@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.python-version.local
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Hydra / experiment outputs
+outputs/
+multirun/
+
+# Weights & Biases
+wandb/
+
+# Data and model artifacts
+data/
+checkpoints/
+*.ckpt
+*.pt
+*.safetensors
+
+# Environment / secrets
+.env
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+
+# Claude Code
+CLAUDE.md
+.claude/settings.local.json
