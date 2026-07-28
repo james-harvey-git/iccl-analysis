@@ -17,5 +17,5 @@ uv sync
 Experiments are dispatched with [Hydra](https://hydra.cc/); configs live in `configs/`.
 
 ```bash
-uv run python scripts/main.py
+uv run python scripts/train.py
 ```

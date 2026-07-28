@@ -1,4 +1,7 @@
 defaults:
+  - data: hyperteacher
+  - model: gdn
+  - training: default
   - _self_
 
 seed: 0

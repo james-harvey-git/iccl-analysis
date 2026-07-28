@@ -1,0 +1,10 @@
+# Sizes follow the source paper's transformer baseline as a starting point.
+name: gdn
+
+d_model: 256
+n_heads: 4
+n_layers: 4
+d_ffw: 1024
+
+# Sequence-mixing backend: fla | reference | auto (see iccl.models.ops).
+backend: auto

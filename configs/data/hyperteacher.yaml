@@ -1,0 +1,21 @@
+# Task-family parameters mirror the source defaults in
+# smonsays/scale-compositionality (configs/teacher.py); the sequence section is
+# our ICCL extension. "???" marks values not yet decided.
+name: hyperteacher
+
+input_dim: 16
+output_dim: 16
+hidden_dims: [16]
+use_bias: true
+num_modules: 16
+num_hot: 3
+task_distribution: discrete
+task_support: random
+frac_ood: 0.25
+scale: 1.7320508075688772  # sqrt(3)
+
+sequence:
+  # Number of tasks presented sequentially within one context window.
+  num_tasks: ???
+  # Demonstrations per task; the model predicts the output at every one.
+  demos_per_task: 16

@@ -1,0 +1,13 @@
+# Optimization defaults follow the source paper's hyperteacher config.
+batch_size: 128
+num_steps: ???
+
+optimizer: adamw
+lr: 3.0e-4
+warmup_steps: 1000
+schedule: constant
+weight_decay: 0.003
+grad_clip: null
+
+eval_every: 1000
+checkpoint_every: 10000
