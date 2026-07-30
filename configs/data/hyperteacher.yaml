@@ -1,21 +1,29 @@
-# Task-family parameters mirror the source defaults in
-# smonsays/scale-compositionality (configs/teacher.py); the sequence section is
-# our ICCL extension. "???" marks values not yet decided.
+# Task-family parameters follow the source HyperTeacher semantics
+# (smonsays/scale-compositionality); pilot values per the dataset spec (#1).
 name: hyperteacher
 
 input_dim: 16
 output_dim: 16
 hidden_dims: [16]
 use_bias: true
-num_modules: 16
-num_hot: 3
-task_distribution: discrete
-task_support: random
-frac_ood: 0.25
+num_modules: 8
 scale: 1.7320508075688772  # sqrt(3)
+weighting: discrete        # binary | discrete | continuous
 
 sequence:
-  # Number of tasks presented sequentially within one context window.
-  num_tasks: ???
-  # Demonstrations per task; the model predicts the output at every one.
-  demos_per_task: 16
+  phases:
+    - {num_tasks: 8, hotness: [2, 2]}
+  demos_per_task: 32       # int, or [lo, hi] range (required for the unsignalled ablation)
+  signal_boundaries: true
+  require_identifiable: true
+  require_full_rank: false
+  task_graph: random       # random | chain | ring | star (structured families are 2-hot only)
+  graph_ordered: false     # structured families only: present e.g. a chain in path order
+
+eval_sets:
+  num_sequences: 256
+  out_dir: data/eval_sets
+  composite:
+    hotness: 2
+    num_demos: 8
+  structural_graphs: [chain, ring, star]
