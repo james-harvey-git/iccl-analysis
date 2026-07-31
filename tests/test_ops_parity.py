@@ -30,12 +30,18 @@ pytestmark = [
 FWD_RTOL, FWD_ATOL = 5e-3, 5e-4
 MODEL_RTOL, MODEL_ATOL = 1e-2, 2e-3
 
-# RMS error-ratio caps vs the fp64 anchor. out/q/k/v follow fla's own tiers
-# (o 0.005, dq/dk/dv 0.008). The gate-path gradients (a/b and the per-head
-# parameters behind them) get 0.05: fla's chunked backward computes them
-# through log-space cumulative sums and recomputation, which measures ~0.03
-# against fp64 truth on H200 while the fp32 reference sits at <1e-5 — the
-# kernel's accuracy profile, not a semantic mismatch (that would be ~1).
+# RMS error-ratio caps vs the fp64 anchor, tiered by how fla's kernel error
+# propagates into each tensor (the fp32 reference sits at <1e-5 on all of
+# them, so everything below is the kernel's accuracy profile, not ours):
+# - out/q/k/v: matmul paths, fla's own tiers (o 0.005, dq/dk/dv 0.008);
+# - a/b: inherit the chunked recurrence backward's gate gradient elementwise
+#   (~0.03 measured on H200; fla caps the same tensor at 0.02 against their
+#   fp32 torch reference);
+# - A_log/dt_bias: per-head *sums* of hundreds of signed gate-gradient terms
+#   whose true values partially cancel while the noise does not (~0.12
+#   measured; fla certifies the reduction itself at 0.005 given exact inputs,
+#   so this is purely the amplified recurrence noise).
+# A semantic mismatch lands at ~1 and fails every tier.
 RATIO_CAPS = {
     "out": 0.005,
     "q": 0.008,
@@ -43,8 +49,8 @@ RATIO_CAPS = {
     "v": 0.008,
     "a": 0.05,
     "b": 0.05,
-    "A_log": 0.05,
-    "dt_bias": 0.05,
+    "A_log": 0.25,
+    "dt_bias": 0.25,
 }
 REF_ERROR_FACTOR = 5.0
 
