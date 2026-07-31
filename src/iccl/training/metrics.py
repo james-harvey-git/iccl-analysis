@@ -8,6 +8,10 @@ task-position curves (forward transfer within a context), the composite-vs-
 control benefit of history, and retention on revisit suites (the revisit block
 paired demo-by-demo against the same task's original block — a savings
 measure, plus the forgetting gap to the original block's final error).
+
+The generic per-suite curves and scalars cover only the curriculum tasks; a
+suite's special final task (the composite probe, the retention revisit) is
+reported through its own paired curve, not folded into the curriculum average.
 """
 
 from contextlib import nullcontext
@@ -174,11 +178,27 @@ def evaluate_suites(
             model, suite, device, batch_size=batch_size, autocast_dtype=autocast_dtype
         )
         nmse = demo_nmse(preds, suite)
-        nmses[name] = nmse
-        for key, value in suite_scalars(nmse, suite["demo_counts"]).items():
+        nmses[name] = nmse  # full, incl. any special final task, for the paired curves below
+
+        # Generic per-suite scalars and curves describe standard in-context
+        # learning, so they cover only the curriculum tasks: the special final
+        # task in the composite/retention suites (a novel composition or a
+        # revisit, with its own demo count) lives in its dedicated curve
+        # instead, and folding it in here would jump the task-position curve and
+        # skew the demo-averaged means. Control-style suites are all special
+        # task and no curriculum, so they fall back to their single task.
+        num_tasks = suite["demo_counts"].shape[1]
+        curriculum = (
+            int(suite["num_curriculum_tasks"][0]) if "num_curriculum_tasks" in suite else num_tasks
+        )
+        curriculum = curriculum or num_tasks
+        generic_nmse = nmse[:, :curriculum, :]
+
+        for key, value in suite_scalars(generic_nmse, suite["demo_counts"][:, :curriculum]).items():
             scalars[f"{name}/{key}"] = value
-        curves[f"{name}/learning_curve"] = np.nanmean(nmse, axis=(0, 1))
-        curves[f"{name}/task_position_curve"] = np.nanmean(nmse, axis=(0, 2))
+        curves[f"{name}/learning_curve"] = np.nanmean(generic_nmse, axis=(0, 1))
+        if curriculum > 1:
+            curves[f"{name}/task_position_curve"] = np.nanmean(generic_nmse, axis=(0, 2))
 
     if "composite" in nmses and "composite_control" in nmses:
         benefit, benefit_curve = composite_benefit(

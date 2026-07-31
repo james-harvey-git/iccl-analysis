@@ -51,7 +51,7 @@ def suite_from(samples: list[SequenceSample]) -> dict[str, np.ndarray]:
         key: np.stack([getattr(s, key) for s in samples])
         for key in ("tokens", "token_type", "targets", "loss_mask")
     }
-    for key in ("task_spans", "demo_counts", "base_mse"):
+    for key in ("task_spans", "demo_counts", "base_mse", "num_curriculum_tasks"):
         suite[key] = np.stack([s.info[key] for s in samples])
     return suite
 
@@ -140,9 +140,15 @@ def test_evaluate_suites_end_to_end(family: HyperTeacher) -> None:
         assert np.isfinite(scalars[f"{name}/nmse_first_demo"])
         assert np.isfinite(scalars[f"{name}/nmse_last_demo"])
         assert curves[f"{name}/learning_curve"].ndim == 1
-        assert curves[f"{name}/task_position_curve"].shape == (
-            suites[name]["demo_counts"].shape[1],
-        )
+
+    # The generic task-position curves cover only the 8 curriculum tasks; the
+    # composite/retention suites' 9th task (the special final task) is excluded.
+    assert curves["in_dist/task_position_curve"].shape == (8,)
+    assert curves["composite/task_position_curve"].shape == (8,)
+    assert curves["retention/task_position_curve"].shape == (8,)
+    # The control is all special task and no curriculum, so it has no position curve.
+    assert "composite_control/task_position_curve" not in curves
+
     assert np.isfinite(scalars["composite/benefit_last_demo"])
     assert curves["composite/benefit_curve"].shape == (final.num_demos,)
     assert np.isfinite(scalars["retention/forgetting"])
