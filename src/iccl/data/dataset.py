@@ -72,6 +72,8 @@ class SequenceDataset(IterableDataset):
     Infinite by default; ``num_sequences`` makes it finite (eval use). With
     multiple dataloader workers, worker w yields indices w, w+W, w+2W, … —
     contents per index are identical regardless of worker count.
+    ``start_index`` offsets the stream (checkpoint resume: pass the number of
+    samples already consumed to continue at the exact offset).
     """
 
     def __init__(
@@ -81,12 +83,14 @@ class SequenceDataset(IterableDataset):
         base_seed: int,
         num_sequences: int | None = None,
         final_task: FinalTaskConfig | None = None,
+        start_index: int = 0,
     ) -> None:
         self.family = family
         self.seq_cfg = seq_cfg
         self.base_seed = base_seed
         self.num_sequences = num_sequences
         self.final_task = final_task
+        self.start_index = start_index
 
     def build(self, index: int, **kwargs: Any) -> SequenceSample:
         rng = sequence_rng(self.base_seed, index)
@@ -96,8 +100,9 @@ class SequenceDataset(IterableDataset):
         worker = get_worker_info()
         start = worker.id if worker is not None else 0
         step = worker.num_workers if worker is not None else 1
-        index = start
-        while self.num_sequences is None or index < self.num_sequences:
+        index = self.start_index + start
+        end = None if self.num_sequences is None else self.start_index + self.num_sequences
+        while end is None or index < end:
             yield to_tensors(self.build(index))
             index += step
 

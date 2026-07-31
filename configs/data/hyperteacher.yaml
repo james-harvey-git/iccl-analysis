@@ -27,4 +27,6 @@ eval_sets:
     hotness: 2
     num_demos: 8
   structural_graphs: [chain, ring, star]
+  retention:
+    revisit_demos: 16
 
