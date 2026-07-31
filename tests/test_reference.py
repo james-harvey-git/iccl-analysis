@@ -154,6 +154,18 @@ def test_output_dtype_follows_input() -> None:
     assert states is not None and states.dtype == torch.float32
 
 
+def test_fp64_inputs_compute_in_fp64() -> None:
+    # fp64 must survive end to end: the parity tests use this backend in fp64
+    # as the ground-truth anchor.
+    inputs32 = make_inputs()
+    inputs64 = {key: t.double() for key, t in inputs32.items()}
+    out64, states64 = run_reference(inputs64, return_states=True)
+    assert out64.dtype == torch.float64
+    assert states64 is not None and states64.dtype == torch.float64
+    out32, _ = run_reference(inputs32)
+    torch.testing.assert_close(out32, out64.float(), rtol=1e-5, atol=1e-6)
+
+
 def test_l2norm_matches_fla_semantics() -> None:
     x = torch.randn(5, 7, generator=torch.Generator().manual_seed(0))
     y = l2norm(x)

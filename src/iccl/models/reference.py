@@ -8,10 +8,12 @@ normalization, the Mamba2 decay gate, the beta sigmoid) are applied here
 explicitly with matching semantics. Parity with ``chunk_gated_delta_rule`` is
 asserted by ``tests/test_ops_parity.py``.
 
-The recurrence accumulates in fp32 regardless of input dtype. The per-step
-memory states S_t are the central object of the mechanistic interpretability
-analysis — this implementation can return the full state trajectory, which the
-chunked kernels cannot (they only materialize state at chunk boundaries).
+The recurrence accumulates in at least fp32 (half-precision inputs are
+upcast; fp64 inputs stay fp64, which makes this backend usable as a
+ground-truth anchor in the parity tests). The per-step memory states S_t are
+the central object of the mechanistic interpretability analysis — this
+implementation can return the full state trajectory, which the chunked
+kernels cannot (they only materialize state at chunk boundaries).
 """
 
 import torch
@@ -53,15 +55,18 @@ def gated_delta_rule_reference(
     with decay ``alpha_t = exp(gdn_gate(a_t))`` and write strength
     ``beta_t = sigmoid(b_t)`` (doubled when ``allow_neg_eigval``), then readout
     ``o_t = S_t q_t / sqrt(key_dim)``. Returns the outputs and, when
-    ``return_states``, the fp32 state trajectory in fla's ``state_v_first``
-    layout ``[batch, seq, heads, value_dim, key_dim]``.
+    ``return_states``, the compute-dtype state trajectory in fla's
+    ``state_v_first`` layout ``[batch, seq, heads, value_dim, key_dim]``.
     """
     in_dtype = v.dtype
-    q = l2norm(q.float())
-    k = l2norm(k.float())
-    v = v.float()
-    alpha = torch.exp(gdn_gate(a.float(), A_log.float(), dt_bias.float()))
-    beta = torch.sigmoid(b.float())
+    compute_dtype = torch.promote_types(in_dtype, torch.float32)
+    q = l2norm(q.to(compute_dtype))
+    k = l2norm(k.to(compute_dtype))
+    v = v.to(compute_dtype)
+    alpha = torch.exp(
+        gdn_gate(a.to(compute_dtype), A_log.to(compute_dtype), dt_bias.to(compute_dtype))
+    )
+    beta = torch.sigmoid(b.to(compute_dtype))
     if allow_neg_eigval:
         beta = beta * 2.0
 
