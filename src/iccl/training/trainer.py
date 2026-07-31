@@ -31,6 +31,12 @@ from iccl.utils import resolve_device
 BEST_METRIC = "in_dist/nmse_last_demo"
 
 
+def _nan_to_none(curve: np.ndarray) -> list[float | None]:
+    """NaN-padded curve tail to a W&B-serializable list (NaN renders as a gap;
+    the raw NaN would break the chart's JSON encoding)."""
+    return [None if math.isnan(v) else float(v) for v in curve]
+
+
 def masked_mse(
     preds: Float[torch.Tensor, "batch seq d_out"],
     targets: Float[torch.Tensor, "batch seq d_out"],
@@ -119,6 +125,9 @@ class Trainer:
         self.best_metric = float("inf")
         self.last_loss = float("nan")
         self.wandb_run = None
+        # Per-curve list of (step, curve) across evals, so each curve is logged
+        # to W&B as one line-series panel with a line per eval step.
+        self.curve_history: dict[str, list[tuple[int, np.ndarray]]] = {}
         if cfg.training.resume is not None:
             self._load_checkpoint(Path(cfg.training.resume))
 
@@ -219,7 +228,8 @@ class Trainer:
             self.model, suites, self.device, autocast_dtype=self.autocast_dtype
         )
         self.model.train()
-        self._log({f"eval/{key}": value for key, value in scalars.items()})
+        self._log({f"eval-scalars/{key}": value for key, value in scalars.items()})
+        self._log_curves(curves)
         eval_dir = self.out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
         np.savez(
@@ -237,6 +247,28 @@ class Trainer:
             self.wandb_run.log(metrics, step=self.step)
         rendered = ", ".join(f"{key}={value:.4g}" for key, value in metrics.items())
         print(f"step {self.step}: {rendered}")
+
+    def _log_curves(self, curves: dict[str, np.ndarray]) -> None:
+        """Log each eval curve as an ``eval-curves/<suite>/<name>`` line-series
+        panel, accumulating a line per eval step so curves can be watched
+        sharpening over training. No-op without a live W&B run (the curves are
+        always saved to the run dir as ``.npz`` regardless)."""
+        if self.wandb_run is None:
+            return
+        import wandb
+
+        for key, curve in curves.items():
+            history = self.curve_history.setdefault(key, [])
+            history.append((self.step, curve))
+            xname = "task position" if key.endswith("task_position_curve") else "demo index"
+            chart = wandb.plot.line_series(
+                xs=list(range(len(curve))),
+                ys=[_nan_to_none(c) for _, c in history],
+                keys=[f"step {step}" for step, _ in history],
+                title=key,
+                xname=xname,
+            )
+            self.wandb_run.log({f"eval-curves/{key}": chart}, step=self.step)
 
     def _save_checkpoint(self, name: str) -> None:
         ckpt_dir = self.out_dir / "checkpoints"
