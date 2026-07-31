@@ -1,10 +1,19 @@
-# Sizes follow the source paper's transformer baseline as a starting point.
+# Sizes follow the source paper's transformer baseline as a starting point;
+# component defaults are fla's canonical GatedDeltaNet choices, each exposed
+# for ablation.
 name: gdn
 
 d_model: 256
-n_heads: 4
+n_heads: 4          # key head dim = d_model // n_heads
 n_layers: 4
 d_ffw: 1024
+expand_v: 2         # value heads are expand_v x wider than key heads
+
+use_short_conv: true
+conv_size: 4
+use_gate: true      # silu-gated RMSNorm on the recurrence output
+allow_neg_eigval: false
+norm_eps: 1.0e-5
 
 # Sequence-mixing backend: fla | reference | auto (see iccl.models.ops).
 backend: auto
