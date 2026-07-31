@@ -1,6 +1,6 @@
 """Numerical parity between the fla and reference gated-delta-rule backends.
 
-Runs only on CUDA machines (Isambard); this is what makes "prototype on the
+Runs only on CUDA machines (the cluster); this is what makes "prototype on the
 reference backend, train on fla kernels" trustworthy.
 
 Gradients are judged the way fla's own test suite judges them: by the RMS
@@ -35,7 +35,7 @@ MODEL_RTOL, MODEL_ATOL = 1e-2, 2e-3
 # them, so everything below is the kernel's accuracy profile, not ours):
 # - out/q/k/v: matmul paths, fla's own tiers (o 0.005, dq/dk/dv 0.008);
 # - a/b: inherit the chunked recurrence backward's gate gradient elementwise
-#   (~0.03 measured on H200; fla caps the same tensor at 0.02 against their
+#   (~0.03 measured on H100; fla caps the same tensor at 0.02 against their
 #   fp32 torch reference);
 # - A_log/dt_bias: per-head *sums* of hundreds of signed gate-gradient terms
 #   whose true values partially cancel while the noise does not (~0.12
