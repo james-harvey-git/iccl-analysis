@@ -181,9 +181,7 @@ def test_structured_graph_families_have_expected_shape() -> None:
 
 def test_structured_extra_tasks_duplicate_skeleton_edges() -> None:
     family = make_family()
-    cfg = make_seq_cfg(
-        phases=(PhaseConfig(num_tasks=11, hotness=(2, 2)),), task_graph="chain"
-    )
+    cfg = make_seq_cfg(phases=(PhaseConfig(num_tasks=11, hotness=(2, 2)),), task_graph="chain")
     seq = build_sequence(family, cfg, sequence_rng(0, 0))
     edges = [tuple(np.flatnonzero(lat)) for lat in seq.info["latents"]]
     assert len(edges) == 11
@@ -210,8 +208,6 @@ def test_structured_graph_validation() -> None:
     )
     with pytest.raises(ValueError, match="2-hot"):
         build_sequence(family, bad_hotness, sequence_rng(0, 0))
-    too_few = make_seq_cfg(
-        phases=(PhaseConfig(num_tasks=5, hotness=(2, 2)),), task_graph="star"
-    )
+    too_few = make_seq_cfg(phases=(PhaseConfig(num_tasks=5, hotness=(2, 2)),), task_graph="star")
     with pytest.raises(ValueError, match="needs >= 7 tasks"):
         build_sequence(family, too_few, sequence_rng(0, 0))

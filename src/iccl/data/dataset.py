@@ -90,9 +90,7 @@ class SequenceDataset(IterableDataset):
 
     def build(self, index: int, **kwargs: Any) -> SequenceSample:
         rng = sequence_rng(self.base_seed, index)
-        return build_sequence(
-            self.family, self.seq_cfg, rng, final_task=self.final_task, **kwargs
-        )
+        return build_sequence(self.family, self.seq_cfg, rng, final_task=self.final_task, **kwargs)
 
     def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
         worker = get_worker_info()
