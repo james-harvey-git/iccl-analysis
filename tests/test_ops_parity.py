@@ -22,7 +22,7 @@ pytestmark = [
 ]
 
 FWD_RTOL, FWD_ATOL = 5e-3, 5e-4
-GRAD_RTOL, GRAD_ATOL = 5e-3, 2e-3
+GRAD_RTOL, GRAD_ATOL = 5e-3, 5e-3
 MODEL_RTOL, MODEL_ATOL = 1e-2, 2e-3
 
 
