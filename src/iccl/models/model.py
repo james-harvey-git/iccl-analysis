@@ -30,6 +30,9 @@ class TokenEmbedding(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(num_types, d_model, d_in))
         self.bias = nn.Parameter(torch.zeros(num_types, d_model))
+        # A stack of per-type bias vectors: exempt from weight decay like any
+        # bias despite being 2-D (boundary/pad tokens embed to purely this row).
+        self.bias._no_weight_decay = True  # pyright: ignore[reportAttributeAccessIssue]
         for w in self.weight:
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
 

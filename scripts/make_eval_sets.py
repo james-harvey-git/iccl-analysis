@@ -2,9 +2,11 @@
 
 Suites: "in_dist" (standard curriculum sequences), "composite" (curriculum plus
 a few-shot composite final task) with its paired "composite_control" (same
-world and final task, no history), and one "structural_<graph>" suite per
-overlap-graph family in eval_sets.structural_graphs. All suites carry their
-worlds as interp probe targets.
+world and final task, no history), one "structural_<graph>" suite per
+overlap-graph family in eval_sets.structural_graphs, and "retention"
+(curriculum sequences that re-demonstrate the first task at the end, for the
+forgetting/savings metrics). All suites carry their worlds as interp probe
+targets.
 """
 
 from dataclasses import replace
@@ -61,6 +63,21 @@ def main(cfg: DictConfig) -> None:
         suite_meta = dict(meta, suite=f"structural_{graph}")
         export_suite(suite, out_dir / f"structural_{graph}", suite_meta)
         num_suites += 1
+
+    revisit_demos = data_cfg.eval_sets.retention.revisit_demos
+    retention_base = (2 + len(data_cfg.eval_sets.structural_graphs)) * num
+    retention = [
+        build_sequence(
+            family,
+            seq_cfg,
+            sequence_rng(cfg.seed + EVAL_SEED_OFFSET, retention_base + i),
+            revisit_demos=revisit_demos,
+            include_world=True,
+        )
+        for i in range(num)
+    ]
+    export_suite(retention, out_dir / "retention", dict(meta, suite="retention"))
+    num_suites += 1
     print(f"exported {num_suites} suites x {num} sequences to {out_dir}/")
 
 

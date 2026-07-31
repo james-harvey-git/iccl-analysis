@@ -174,4 +174,5 @@ def test_no_weight_decay_flags_present() -> None:
         if getattr(param, "_no_weight_decay", False)
     }
     expected = {f"blocks.{i}.mixer.{p}" for i in range(2) for p in ("A_log", "dt_bias")}
+    expected.add("embed.bias")  # 2-D but semantically a bias (stack of per-type vectors)
     assert flagged == expected
