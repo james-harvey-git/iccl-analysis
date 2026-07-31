@@ -9,9 +9,13 @@ control benefit of history, and retention on revisit suites (the revisit block
 paired demo-by-demo against the same task's original block — a savings
 measure, plus the forgetting gap to the original block's final error).
 
-The generic per-suite curves and scalars cover only the curriculum tasks; a
-suite's special final task (the composite probe, the retention revisit) is
-reported through its own paired curve, not folded into the curriculum average.
+The generic learning and task-position curves belong to the pure-curriculum
+suites (in_dist, structural_*). Suites built around a special final task report
+that task directly: composite's ``learning_curve`` is the novel composition's
+few-shot curve (with history) against composite_control's (without), and
+retention reports its revisit through the paired original/relearning/savings
+curves — their curriculum tasks duplicate in_dist, so no generic curve is
+emitted for them.
 """
 
 from contextlib import nullcontext
@@ -108,24 +112,13 @@ def _last_task_curve(
     return np.nanmean(nmse[:, -1, : int(counts[:, -1].max())], axis=0)
 
 
-def composite_benefit(
-    composite_nmse: Float[np.ndarray, "seqs tasks max_demos"],
-    composite_counts: Float[np.ndarray, "seqs tasks"],
-    control_nmse: Float[np.ndarray, "seqs tasks max_demos"],
-    control_counts: Float[np.ndarray, "seqs tasks"],
-) -> tuple[dict[str, float], Float[np.ndarray, " demos"]]:
-    """Benefit of curriculum history on the few-shot composite task: control
-    error minus composite error, per demo of the final task (the last span in
-    the composite suite, the only span in its paired control)."""
-    composite_curve = _last_task_curve(composite_nmse, composite_counts)
-    control_curve = _last_task_curve(control_nmse, control_counts)
-    paired = min(composite_curve.shape[0], control_curve.shape[0])
-    curve = control_curve[:paired] - composite_curve[:paired]
-    scalars = {
-        "benefit_first_demo": float(curve[0]),
-        "benefit_last_demo": float(curve[-1]),
+def _curve_scalars(curve: Float[np.ndarray, " demos"]) -> dict[str, float]:
+    """First-demo, last-demo, and mean normalized MSE of a per-demo curve."""
+    return {
+        "nmse_first_demo": float(curve[0]),
+        "nmse_last_demo": float(curve[-1]),
+        "nmse_mean": float(np.nanmean(curve)),
     }
-    return scalars, curve
 
 
 def retention_metrics(
@@ -178,38 +171,44 @@ def evaluate_suites(
             model, suite, device, batch_size=batch_size, autocast_dtype=autocast_dtype
         )
         nmse = demo_nmse(preds, suite)
-        nmses[name] = nmse  # full, incl. any special final task, for the paired curves below
+        nmses[name] = nmse
 
-        # Generic per-suite scalars and curves describe standard in-context
-        # learning, so they cover only the curriculum tasks: the special final
-        # task in the composite/retention suites (a novel composition or a
-        # revisit, with its own demo count) lives in its dedicated curve
-        # instead, and folding it in here would jump the task-position curve and
-        # skew the demo-averaged means. Control-style suites are all special
-        # task and no curriculum, so they fall back to their single task.
+        # The generic in-context-learning curves belong to the pure-curriculum
+        # suites (in_dist, structural_*). Suites built around a special final
+        # task (composite, retention) draw their curriculum from the same
+        # distribution as in_dist, so a curriculum curve here would only
+        # duplicate it; those suites report their final task through the
+        # dedicated curves below instead.
         num_tasks = suite["demo_counts"].shape[1]
         curriculum = (
             int(suite["num_curriculum_tasks"][0]) if "num_curriculum_tasks" in suite else num_tasks
         )
-        curriculum = curriculum or num_tasks
-        generic_nmse = nmse[:, :curriculum, :]
-
-        for key, value in suite_scalars(generic_nmse, suite["demo_counts"][:, :curriculum]).items():
-            scalars[f"{name}/{key}"] = value
-        curves[f"{name}/learning_curve"] = np.nanmean(generic_nmse, axis=(0, 1))
-        if curriculum > 1:
-            curves[f"{name}/task_position_curve"] = np.nanmean(generic_nmse, axis=(0, 2))
+        if curriculum == num_tasks:
+            for key, value in suite_scalars(nmse, suite["demo_counts"]).items():
+                scalars[f"{name}/{key}"] = value
+            curves[f"{name}/learning_curve"] = np.nanmean(nmse, axis=(0, 1))
+            curves[f"{name}/task_position_curve"] = np.nanmean(nmse, axis=(0, 2))
 
     if "composite" in nmses and "composite_control" in nmses:
-        benefit, benefit_curve = composite_benefit(
-            nmses["composite"],
-            suites["composite"]["demo_counts"],
-            nmses["composite_control"],
-            suites["composite_control"]["demo_counts"],
+        # The composite suite's point is the novel few-shot composition (its
+        # last task); the curriculum before it only supplies in-context history.
+        # Report that task's demo curve with history (composite) and without
+        # (control), and the benefit of history as their difference.
+        composite_curve = _last_task_curve(nmses["composite"], suites["composite"]["demo_counts"])
+        control_curve = _last_task_curve(
+            nmses["composite_control"], suites["composite_control"]["demo_counts"]
         )
-        for key, value in benefit.items():
+        curves["composite/learning_curve"] = composite_curve
+        curves["composite_control/learning_curve"] = control_curve
+        for key, value in _curve_scalars(composite_curve).items():
             scalars[f"composite/{key}"] = value
+        for key, value in _curve_scalars(control_curve).items():
+            scalars[f"composite_control/{key}"] = value
+        paired = min(composite_curve.shape[0], control_curve.shape[0])
+        benefit_curve = control_curve[:paired] - composite_curve[:paired]
         curves["composite/benefit_curve"] = benefit_curve
+        scalars["composite/benefit_first_demo"] = float(benefit_curve[0])
+        scalars["composite/benefit_last_demo"] = float(benefit_curve[-1])
     if "retention" in nmses:
         retention_s, retention_c = retention_metrics(
             nmses["retention"], suites["retention"]["demo_counts"]
