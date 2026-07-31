@@ -73,20 +73,26 @@ nvidia-smi
 echo "============================================"
 
 # ── Frozen eval sets ──────────────────────────────────────────────────────────
-# Generated once if absent, with the same overrides as the training run so the
-# suites match the data config; never regenerated after that (delete the
-# directory yourself if the data config changes). The mkdir lock serializes
-# concurrent first jobs; generation is deterministic, so whoever wins writes
-# the same bytes.
+# Generated once in-job if absent, with the same overrides as the training run
+# so the suites match the data config; never regenerated once present (delete
+# the directory yourself if the data config changes). data/ is gitignored, so
+# on a fresh clone it does not exist yet — create it before taking the lock.
+# The mkdir lock serializes concurrent first jobs (e.g. a sweep); generation is
+# deterministic, so whichever job wins writes the same bytes. The trap frees the
+# lock if generation errors, so a failed job never wedges later ones.
 EVAL_DIR="data/eval_sets"
-if [ -z "$(ls -A "${EVAL_DIR}" 2>/dev/null)" ]; then
-    if mkdir "${EVAL_DIR}.lock" 2>/dev/null; then
+LOCK_DIR="${EVAL_DIR}.lock"
+mkdir -p "${EVAL_DIR}"
+if [ -z "$(ls -A "${EVAL_DIR}")" ]; then
+    if mkdir "${LOCK_DIR}" 2>/dev/null; then
+        trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
         echo "Generating frozen eval sets into ${EVAL_DIR}/"
         uv run python scripts/make_eval_sets.py "$@"
-        rmdir "${EVAL_DIR}.lock"
+        rmdir "${LOCK_DIR}"
+        trap - EXIT
     else
         echo "Another job is generating the eval sets; waiting..."
-        while [ -d "${EVAL_DIR}.lock" ]; do sleep 10; done
+        while [ -d "${LOCK_DIR}" ]; do sleep 10; done
     fi
 fi
 
