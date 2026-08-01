@@ -5,12 +5,14 @@ import pytest
 import torch
 
 from iccl.data.dataset import sequence_rng
+from iccl.data.export import export_suite
 from iccl.data.sequences import (
     FinalTaskConfig,
     PhaseConfig,
     SequenceConfig,
     SequenceSample,
     build_paired_control,
+    build_paired_retention_control,
     build_sequence,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
@@ -100,19 +102,58 @@ def test_demo_positions_are_x_tokens(family: HyperTeacher) -> None:
     assert sample.loss_mask.sum() == sample.info["demo_counts"].sum()
 
 
-def test_retention_metrics_pairing() -> None:
-    # Two tasks of 3 demos plus a 2-demo revisit; revisit errors are half the
-    # original's at each paired demo index, base variance 1 everywhere.
-    nmse = np.array([[[1.0, 0.5, 0.25], [0.9, 0.9, 0.9], [0.5, 0.25, np.nan]]])
-    counts = np.array([[3, 3, 2]])
-    scalars, curves = retention_metrics(nmse, counts)
-    assert scalars["revisit_first_demo"] == pytest.approx(0.5)
+def _retention_nmse(final_block: list[float]) -> tuple[np.ndarray, np.ndarray]:
+    """A one-sequence retention-shaped suite: two curriculum tasks of 3 demos
+    plus a 3-demo final block with the given per-demo errors."""
+    nmse = np.array([[[1.0, 0.5, 0.25], [0.9, 0.9, 0.9], final_block]])
+    return nmse, np.array([[3, 3, 3]])
+
+
+def test_retention_metrics_against_position_matched_controls() -> None:
+    nmse, counts = _retention_nmse([0.8, 0.4, 0.2])
+    novel = _retention_nmse([1.0, 0.9, 0.8])
+    shared = _retention_nmse([0.9, 0.6, 0.5])
+    scalars, curves = retention_metrics(nmse, counts, {"novel": novel, "shared": shared})
+
+    np.testing.assert_allclose(curves["relearning_curve"], [0.8, 0.4, 0.2])
+    np.testing.assert_allclose(curves["control_curve"], [1.0, 0.9, 0.8])
+    np.testing.assert_allclose(curves["savings_curve"], [0.2, 0.5, 0.6])
+    np.testing.assert_allclose(curves["episodic_savings_curve"], [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(curves["module_savings_curve"], [0.1, 0.3, 0.3])
+    # The split is an allocation of a fixed total, so the two terms must sum to it.
+    np.testing.assert_allclose(
+        curves["episodic_savings_curve"] + curves["module_savings_curve"],
+        curves["savings_curve"],
+    )
+
+    assert scalars["savings_demo0"] == pytest.approx(0.2)
+    assert scalars["savings_one_demo"] == pytest.approx(0.5)
+    assert scalars["savings_mean"] == pytest.approx(13 / 30)
+    assert scalars["episodic_savings_one_demo"] == pytest.approx(0.2)
+    assert scalars["relearning_last_demo"] == pytest.approx(0.2)
+    assert scalars["control_last_demo"] == pytest.approx(0.8)
+    # Descriptive only: the first visit's own final demo, at task position 0.
     assert scalars["original_last_demo"] == pytest.approx(0.25)
-    assert scalars["forgetting"] == pytest.approx(0.25)
-    assert scalars["savings_first_demo"] == pytest.approx(0.5)
-    np.testing.assert_allclose(curves["original_curve"], [1.0, 0.5, 0.25])
-    np.testing.assert_allclose(curves["relearning_curve"], [0.5, 0.25])
-    np.testing.assert_allclose(curves["savings_curve"], [0.5, 0.25])
+    # The revisit crosses 0.5 at demo 1; the novel control never does, so it is
+    # censored at the block length.
+    assert scalars["demos_to_threshold_revisit"] == pytest.approx(1.0)
+    assert scalars["demos_to_threshold_control"] == pytest.approx(3.0)
+    assert scalars["demos_to_threshold_delta"] == pytest.approx(2.0)
+
+
+def test_retention_metrics_without_shared_control_omits_the_split() -> None:
+    nmse, counts = _retention_nmse([0.8, 0.4, 0.2])
+    scalars, curves = retention_metrics(nmse, counts, {"novel": _retention_nmse([1.0, 0.9, 0.8])})
+    assert "savings_curve" in curves
+    assert "episodic_savings_curve" not in curves
+    assert "module_savings_curve" not in curves
+    assert not any(key.startswith(("episodic_", "module_")) for key in scalars)
+
+
+def test_retention_metrics_require_the_novel_control() -> None:
+    nmse, counts = _retention_nmse([0.8, 0.4, 0.2])
+    with pytest.raises(KeyError, match="make_eval_sets"):
+        retention_metrics(nmse, counts, {"shared": _retention_nmse([0.9, 0.6, 0.5])})
 
 
 def test_evaluate_suites_end_to_end(family: HyperTeacher) -> None:
@@ -120,18 +161,25 @@ def test_evaluate_suites_end_to_end(family: HyperTeacher) -> None:
     model = GDNModel(d_in=4, d_out=4, d_model=32, n_layers=2, n_heads=2, d_ffw=64)
     final = FinalTaskConfig(mode="composite", hotness=2, num_demos=3)
     in_dist, composite, control, retention = [], [], [], []
+    novel, shared = [], []
     for i in range(2):
         in_dist.append(build_sequence(family, SEQUENCE, sequence_rng(0, i)))
         rng = sequence_rng(0, 10 + i)
         seq = build_sequence(family, SEQUENCE, rng, final_task=final, include_world=True)
         composite.append(seq)
         control.append(build_paired_control(family, SEQUENCE, seq, final, rng))
-        retention.append(build_sequence(family, SEQUENCE, sequence_rng(0, 20 + i), revisit_demos=3))
+        rng = sequence_rng(0, 20 + i)
+        revisit = build_sequence(family, SEQUENCE, rng, revisit_demos=3, include_world=True)
+        retention.append(revisit)
+        novel.append(build_paired_retention_control(family, revisit, rng, mode="novel"))
+        shared.append(build_paired_retention_control(family, revisit, rng, mode="shared"))
     suites = {
         "in_dist": suite_from(in_dist),
         "composite": suite_from(composite),
         "composite_control": suite_from(control),
         "retention": suite_from(retention),
+        "retention_control": suite_from(novel),
+        "retention_control_shared": suite_from(shared),
     }
 
     scalars, curves = evaluate_suites(model, suites, torch.device("cpu"))
@@ -155,12 +203,30 @@ def test_evaluate_suites_end_to_end(family: HyperTeacher) -> None:
     assert "composite/task_position_curve" not in curves
     assert "retention/learning_curve" not in curves
     assert "retention/task_position_curve" not in curves
+    assert "retention_control/learning_curve" not in curves
+    assert "retention_control_shared/task_position_curve" not in curves
 
-    # Retention keeps its paired revisit curves and forgetting scalar.
+    # Retention reports the revisit against its position-matched controls; a
+    # comparison against its own first visit is not part of the metric surface.
     assert curves["retention/savings_curve"].shape == (3,)
-    assert np.isfinite(scalars["retention/forgetting"])
+    assert curves["retention/module_savings_curve"].shape == (3,)
+    assert np.isfinite(scalars["retention/savings_one_demo"])
+    assert np.isfinite(scalars["retention/episodic_savings_mean"])
+    assert not any(
+        key in scalars
+        for key in ("retention/forgetting", "retention/revisit_first_demo", "savings_first_demo")
+    )
 
 
 def test_load_eval_suites_missing_dir_points_at_script(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="make_eval_sets"):
+        load_eval_suites(tmp_path)
+
+
+def test_load_eval_suites_rejects_a_retention_set_without_its_control(
+    tmp_path: Path, family: HyperTeacher
+) -> None:
+    retention = [build_sequence(family, SEQUENCE, sequence_rng(0, 0), revisit_demos=3)]
+    export_suite(retention, tmp_path / "retention", {"suite": "retention"})
+    with pytest.raises(FileNotFoundError, match="retention_control"):
         load_eval_suites(tmp_path)

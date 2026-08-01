@@ -29,4 +29,5 @@ eval_sets:
   structural_graphs: [chain, ring, star]
   retention:
     revisit_demos: 16
+    controls: [novel, shared]  # position-matched baselines; shared needs a non-binary weighting
 
