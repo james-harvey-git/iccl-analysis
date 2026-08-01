@@ -17,6 +17,9 @@ dist/
 outputs/
 multirun/
 
+# Slurm logs
+logs/
+
 # Weights & Biases
 wandb/
 

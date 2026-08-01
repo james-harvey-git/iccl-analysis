@@ -10,7 +10,7 @@ seed: 0
 device: auto
 
 wandb:
-  mode: disabled # online | offline (Isambard compute nodes; `wandb sync` after) | disabled
+  mode: disabled # online | offline (`wandb sync` after) | disabled; cluster jobs pass online
   project: iccl-analysis
   entity: jublett-university-of-oxford
 

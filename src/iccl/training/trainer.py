@@ -9,7 +9,7 @@ import math
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -28,7 +28,40 @@ from iccl.models.model import model_from_config
 from iccl.training.metrics import evaluate_suites, load_eval_suites
 from iccl.utils import resolve_device
 
+if TYPE_CHECKING:
+    import plotly.graph_objects as go
+
 BEST_METRIC = "in_dist/nmse_last_demo"
+
+
+def _nan_to_none(curve: np.ndarray) -> list[float | None]:
+    """NaN-padded curve tail to a plottable list (NaN renders as a gap)."""
+    return [None if math.isnan(v) else float(v) for v in curve]
+
+
+def _curve_figure(history: list[tuple[int, np.ndarray]], title: str, xname: str) -> "go.Figure":
+    """A line-per-eval-step figure, each line colored by training progress so
+    later steps read as the curve moving over the earlier ones."""
+    import plotly.colors as pc
+    import plotly.graph_objects as go
+
+    figure = go.Figure()
+    for i, (step, curve) in enumerate(history):
+        fraction = i / (len(history) - 1) if len(history) > 1 else 1.0
+        color = pc.sample_colorscale("Viridis", fraction)[0]
+        figure.add_trace(
+            go.Scatter(
+                x=list(range(len(curve))),
+                y=_nan_to_none(curve),
+                mode="lines+markers",
+                name=f"step {step}",
+                line={"color": color},
+            )
+        )
+    figure.update_layout(
+        title=title, xaxis_title=xname, yaxis_title="normalized MSE", template="plotly_white"
+    )
+    return figure
 
 
 def masked_mse(
@@ -119,6 +152,9 @@ class Trainer:
         self.best_metric = float("inf")
         self.last_loss = float("nan")
         self.wandb_run = None
+        # Per-curve list of (step, curve) across evals, so each curve is logged
+        # to W&B as one Plotly panel with a line per eval step.
+        self.curve_history: dict[str, list[tuple[int, np.ndarray]]] = {}
         if cfg.training.resume is not None:
             self._load_checkpoint(Path(cfg.training.resume))
 
@@ -219,7 +255,8 @@ class Trainer:
             self.model, suites, self.device, autocast_dtype=self.autocast_dtype
         )
         self.model.train()
-        self._log({f"eval/{key}": value for key, value in scalars.items()})
+        self._log({f"eval-scalars/{key}": value for key, value in scalars.items()})
+        self._log_curves(curves)
         eval_dir = self.out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
         np.savez(
@@ -237,6 +274,24 @@ class Trainer:
             self.wandb_run.log(metrics, step=self.step)
         rendered = ", ".join(f"{key}={value:.4g}" for key, value in metrics.items())
         print(f"step {self.step}: {rendered}")
+
+    def _log_curves(self, curves: dict[str, np.ndarray]) -> None:
+        """Log each eval curve as an ``eval-curves/<suite>/<name>`` Plotly panel,
+        accumulating a line per eval step (colored by training progress) so
+        curves can be watched sharpening over training. Plotly panels carry no
+        backing summary table, unlike ``wandb.plot.line_series``. No-op without
+        a live W&B run (the curves are always saved to the run dir as ``.npz``
+        regardless)."""
+        if self.wandb_run is None:
+            return
+        import wandb
+
+        for key, curve in curves.items():
+            history = self.curve_history.setdefault(key, [])
+            history.append((self.step, curve))
+            xname = "task position" if key.endswith("task_position_curve") else "demo index"
+            figure = _curve_figure(history, key, xname)
+            self.wandb_run.log({f"eval-curves/{key}": wandb.Plotly(figure)}, step=self.step)
 
     def _save_checkpoint(self, name: str) -> None:
         ckpt_dir = self.out_dir / "checkpoints"

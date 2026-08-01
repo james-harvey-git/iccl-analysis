@@ -12,6 +12,7 @@ dependencies = [
     "matplotlib>=3.11.1",
     "numpy>=2.4.6",
     "omegaconf>=2.3.1",
+    "plotly>=6.9.0",
     "torch>=2.13.0",
     "tqdm>=4.70.0",
     "wandb>=0.28.1",
@@ -44,7 +45,7 @@ ignore = ["F722"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "cuda: requires a CUDA GPU with the fla kernels installed (run on Isambard)",
+    "cuda: requires a CUDA GPU with the fla kernels installed (run on the cluster)",
 ]
 
 [tool.pyright]

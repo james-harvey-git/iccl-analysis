@@ -51,7 +51,7 @@ def suite_from(samples: list[SequenceSample]) -> dict[str, np.ndarray]:
         key: np.stack([getattr(s, key) for s in samples])
         for key in ("tokens", "token_type", "targets", "loss_mask")
     }
-    for key in ("task_spans", "demo_counts", "base_mse"):
+    for key in ("task_spans", "demo_counts", "base_mse", "num_curriculum_tasks"):
         suite[key] = np.stack([s.info[key] for s in samples])
     return suite
 
@@ -136,17 +136,29 @@ def test_evaluate_suites_end_to_end(family: HyperTeacher) -> None:
 
     scalars, curves = evaluate_suites(model, suites, torch.device("cpu"))
 
-    for name in suites:
-        assert np.isfinite(scalars[f"{name}/nmse_first_demo"])
-        assert np.isfinite(scalars[f"{name}/nmse_last_demo"])
-        assert curves[f"{name}/learning_curve"].ndim == 1
-        assert curves[f"{name}/task_position_curve"].shape == (
-            suites[name]["demo_counts"].shape[1],
-        )
-    assert np.isfinite(scalars["composite/benefit_last_demo"])
+    # Pure-curriculum suites carry the generic in-context-learning curves over
+    # their 8 curriculum tasks.
+    assert curves["in_dist/learning_curve"].ndim == 1
+    assert curves["in_dist/task_position_curve"].shape == (8,)
+    assert np.isfinite(scalars["in_dist/nmse_last_demo"])
+
+    # The composite suite reports the novel final task's few-shot curve with
+    # history, its control the no-history baseline, and their difference as the
+    # benefit of history — all over the final task's demos, not the curriculum.
+    assert curves["composite/learning_curve"].shape == (final.num_demos,)
+    assert curves["composite_control/learning_curve"].shape == (final.num_demos,)
     assert curves["composite/benefit_curve"].shape == (final.num_demos,)
-    assert np.isfinite(scalars["retention/forgetting"])
+    assert np.isfinite(scalars["composite/nmse_last_demo"])
+    assert np.isfinite(scalars["composite/benefit_last_demo"])
+
+    # Special-task suites do not emit the redundant curriculum curves.
+    assert "composite/task_position_curve" not in curves
+    assert "retention/learning_curve" not in curves
+    assert "retention/task_position_curve" not in curves
+
+    # Retention keeps its paired revisit curves and forgetting scalar.
     assert curves["retention/savings_curve"].shape == (3,)
+    assert np.isfinite(scalars["retention/forgetting"])
 
 
 def test_load_eval_suites_missing_dir_points_at_script(tmp_path: Path) -> None:

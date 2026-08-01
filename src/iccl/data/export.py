@@ -35,6 +35,7 @@ def export_suite(samples: list[SequenceSample], path: Path, meta: dict[str, Any]
         "boundaries": _stack_info(samples, "boundaries"),
         "task_spans": _stack_info(samples, "task_spans"),
         "base_mse": _stack_info(samples, "base_mse"),
+        "num_curriculum_tasks": _stack_info(samples, "num_curriculum_tasks"),
     }
     if "world" in samples[0].info:
         pools = [s.info["world"] for s in samples]
