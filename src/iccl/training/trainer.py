@@ -1,15 +1,17 @@
-"""Meta-training loop: optimization, evaluation, checkpointing, and W&B logging.
+"""Meta-training loop: optimization, evaluation, and checkpointing.
 
 Trains the sequence model on the on-the-fly ICCL stream with a masked MSE loss
 at every demonstration position. Single-device by design (the pilot model fits
 one GPU with room to spare; sweeps parallelize across GPUs via hydra multirun).
+Metric reporting belongs to ``iccl.training.logger``, which the standalone
+evaluation entry point shares.
 """
 
 import math
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import numpy as np
 import torch
@@ -25,43 +27,11 @@ from iccl.data.dataset import (
     sequence_config_from,
 )
 from iccl.models.model import model_from_config
+from iccl.training.logger import RunLogger
 from iccl.training.metrics import evaluate_suites, load_eval_suites
 from iccl.utils import resolve_device
 
-if TYPE_CHECKING:
-    import plotly.graph_objects as go
-
 BEST_METRIC = "in_dist/nmse_last_demo"
-
-
-def _nan_to_none(curve: np.ndarray) -> list[float | None]:
-    """NaN-padded curve tail to a plottable list (NaN renders as a gap)."""
-    return [None if math.isnan(v) else float(v) for v in curve]
-
-
-def _curve_figure(history: list[tuple[int, np.ndarray]], title: str, xname: str) -> "go.Figure":
-    """A line-per-eval-step figure, each line colored by training progress so
-    later steps read as the curve moving over the earlier ones."""
-    import plotly.colors as pc
-    import plotly.graph_objects as go
-
-    figure = go.Figure()
-    for i, (step, curve) in enumerate(history):
-        fraction = i / (len(history) - 1) if len(history) > 1 else 1.0
-        color = pc.sample_colorscale("Viridis", fraction)[0]
-        figure.add_trace(
-            go.Scatter(
-                x=list(range(len(curve))),
-                y=_nan_to_none(curve),
-                mode="lines+markers",
-                name=f"step {step}",
-                line={"color": color},
-            )
-        )
-    figure.update_layout(
-        title=title, xaxis_title=xname, yaxis_title="normalized MSE", template="plotly_white"
-    )
-    return figure
 
 
 def masked_mse(
@@ -151,28 +121,11 @@ class Trainer:
         self.step = 0
         self.best_metric = float("inf")
         self.last_loss = float("nan")
-        self.wandb_run = None
-        # Per-curve list of (step, curve) across evals, so each curve is logged
-        # to W&B as one Plotly panel with a line per eval step.
-        self.curve_history: dict[str, list[tuple[int, np.ndarray]]] = {}
+        self.logger = RunLogger(cfg, self.out_dir, job_type="train")
         if cfg.training.resume is not None:
             self._load_checkpoint(Path(cfg.training.resume))
 
     # ------------------------------------------------------------------ setup
-
-    def _init_wandb(self) -> None:
-        if self.cfg.wandb.mode == "disabled":
-            return
-        import wandb
-
-        config = cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True))
-        self.wandb_run = wandb.init(
-            project=self.cfg.wandb.project,
-            entity=self.cfg.wandb.entity,
-            mode=self.cfg.wandb.mode,
-            config=config,
-            dir=str(self.out_dir),
-        )
 
     def _build_loader(self) -> DataLoader:
         train_cfg = self.cfg.training
@@ -198,7 +151,7 @@ class Trainer:
         train_cfg = self.cfg.training
         eval_enabled = train_cfg.eval_every is not None
         suites = load_eval_suites(Path(self.cfg.data.eval_sets.out_dir)) if eval_enabled else {}
-        self._init_wandb()
+        self.logger.start()
         loader = self._build_loader()
         batches = iter(loader)
         grad_clip = train_cfg.grad_clip if train_cfg.grad_clip is not None else float("inf")
@@ -226,7 +179,7 @@ class Trainer:
 
             if self.step % train_cfg.log_every == 0:
                 elapsed = time.perf_counter() - window_start
-                self._log(
+                self.logger.log(
                     {
                         "train/loss": self.last_loss,
                         "train/lr": float(self.scheduler.get_last_lr()[0]),
@@ -235,7 +188,8 @@ class Trainer:
                         * train_cfg.batch_size
                         / elapsed,
                         "train/tokens_per_s": window_tokens / elapsed,
-                    }
+                    },
+                    self.step,
                 )
                 window_start, window_tokens = time.perf_counter(), 0
             if eval_enabled and self.step % train_cfg.eval_every == 0:
@@ -246,8 +200,7 @@ class Trainer:
         if eval_enabled and self.step % train_cfg.eval_every != 0:
             self._evaluate(suites)
         self._save_checkpoint("last.pt")
-        if self.wandb_run is not None:
-            self.wandb_run.finish()
+        self.logger.finish()
 
     def _evaluate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
         self.model.eval()
@@ -255,43 +208,12 @@ class Trainer:
             self.model, suites, self.device, autocast_dtype=self.autocast_dtype
         )
         self.model.train()
-        self._log({f"eval-scalars/{key}": value for key, value in scalars.items()})
-        self._log_curves(curves)
-        eval_dir = self.out_dir / "eval"
-        eval_dir.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            eval_dir / f"step_{self.step:07d}.npz",
-            **{key.replace("/", "."): curve for key, curve in curves.items()},  # pyright: ignore[reportArgumentType]
-        )
+        self.logger.log_eval(scalars, curves, self.step)
         if BEST_METRIC in scalars and scalars[BEST_METRIC] < self.best_metric:
             self.best_metric = scalars[BEST_METRIC]
             self._save_checkpoint("best.pt")
 
     # ----------------------------------------------------------- persistence
-
-    def _log(self, metrics: dict[str, float]) -> None:
-        if self.wandb_run is not None:
-            self.wandb_run.log(metrics, step=self.step)
-        rendered = ", ".join(f"{key}={value:.4g}" for key, value in metrics.items())
-        print(f"step {self.step}: {rendered}")
-
-    def _log_curves(self, curves: dict[str, np.ndarray]) -> None:
-        """Log each eval curve as an ``eval-curves/<suite>/<name>`` Plotly panel,
-        accumulating a line per eval step (colored by training progress) so
-        curves can be watched sharpening over training. Plotly panels carry no
-        backing summary table, unlike ``wandb.plot.line_series``. No-op without
-        a live W&B run (the curves are always saved to the run dir as ``.npz``
-        regardless)."""
-        if self.wandb_run is None:
-            return
-        import wandb
-
-        for key, curve in curves.items():
-            history = self.curve_history.setdefault(key, [])
-            history.append((self.step, curve))
-            xname = "task position" if key.endswith("task_position_curve") else "demo index"
-            figure = _curve_figure(history, key, xname)
-            self.wandb_run.log({f"eval-curves/{key}": wandb.Plotly(figure)}, step=self.step)
 
     def _save_checkpoint(self, name: str) -> None:
         ckpt_dir = self.out_dir / "checkpoints"
@@ -306,6 +228,9 @@ class Trainer:
             "torch_rng": torch.get_rng_state(),
             "numpy_rng": np.random.get_state(),
             "config": OmegaConf.to_container(self.cfg, resolve=True),
+            # Lets an evaluation of this checkpoint name and link back to the
+            # run that produced it.
+            "wandb_run": self.logger.run_reference(),
         }
         if self.device.type == "cuda":
             state["cuda_rng"] = torch.cuda.get_rng_state_all()

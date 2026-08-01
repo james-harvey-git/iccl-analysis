@@ -42,6 +42,11 @@ select = ["E", "F", "I", "UP", "B"]
 # F722 misreads jaxtyping shape annotations as broken forward references.
 ignore = ["F722"]
 
+[tool.ruff.format]
+# Notebooks are exploratory scratch; reformatting them churns cell source and
+# noises up unrelated diffs. They are still linted.
+exclude = ["*.ipynb"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [

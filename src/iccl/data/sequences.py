@@ -352,6 +352,95 @@ def build_sequence(
     )
 
 
+def _retention_control_latent(
+    family: HyperTeacher,
+    curriculum_latents: np.ndarray,
+    revisited: np.ndarray,
+    num_demos: int,
+    rng: np.random.Generator,
+    mode: str,
+    max_attempts: int = 1000,
+) -> np.ndarray:
+    """The task a retention control demonstrates in place of the revisited one.
+
+    "novel" draws an undemonstrated support of the same hotness from the modules
+    the curriculum covers; "shared" keeps the revisited task's support and
+    redraws its weights, which is only a distinct task under a non-binary
+    weighting (binary latents *are* their support)."""
+    hotness = int(np.count_nonzero(revisited))
+    match mode:
+        case "novel":
+            final = FinalTaskConfig(mode="composite", hotness=hotness, num_demos=num_demos)
+            return _sample_final_latent(family, final, curriculum_latents, rng)
+        case "shared":
+            if family.cfg.weighting == "binary":
+                raise ValueError(
+                    "the shared-module retention control is degenerate under "
+                    "weighting=binary: a task is its support, so the control would "
+                    "duplicate the revisit block"
+                )
+            pattern = (revisited > 0).astype(np.int8)
+            for _ in range(max_attempts):
+                latent = family.apply_weighting(rng, pattern)
+                if not np.array_equal(latent, revisited):
+                    return latent
+            raise RuntimeError("no same-support latent distinct from the revisited task found")
+        case _:
+            raise ValueError(f"unknown retention-control mode: {mode}")
+
+
+def build_paired_retention_control(
+    family: HyperTeacher,
+    sequence: SequenceSample,
+    rng: np.random.Generator,
+    *,
+    mode: str,
+) -> SequenceSample:
+    """Position-matched control for a built retention sequence: the same world,
+    curriculum, and tokens, with the final block demonstrating a different task
+    over the revisit block's own inputs.
+
+    The pairing is exact rather than distributional — everything up to the final
+    block is identical, so the model enters that block in the same state and,
+    since the inputs are shared, emits the same prediction at its first
+    demonstration. Only the block's targets differ. See
+    ``_retention_control_latent`` for what ``mode`` selects.
+    """
+    if "world" not in sequence.info:
+        raise ValueError("paired retention control requires the sequence to carry its world")
+    latents = sequence.info["latents"]
+    curriculum = int(sequence.info["num_curriculum_tasks"])
+    if curriculum == 0 or len(latents) <= curriculum:
+        raise ValueError("paired retention control requires a sequence with a revisit block")
+
+    start, _ = sequence.info["task_spans"][-1]
+    num_demos = int(sequence.info["demo_counts"][-1])
+    replacement = _retention_control_latent(
+        family, latents[:curriculum], latents[-1], num_demos, rng, mode
+    )
+
+    x_positions = start + 2 * np.arange(num_demos)
+    x = sequence.tokens[x_positions, : family.cfg.input_dim]
+    y = teacher_forward(sequence.info["world"], replacement, x)
+
+    tokens = sequence.tokens.copy()
+    targets = sequence.targets.copy()
+    tokens[x_positions + 1, : family.cfg.output_dim] = y
+    targets[x_positions] = y
+
+    info = dict(sequence.info)
+    info["latents"] = np.concatenate([latents[:-1], replacement[None].astype(np.float32)])
+    info["base_mse"] = sequence.info["base_mse"].copy()
+    info["base_mse"][-1] = ((y - y.mean(axis=0)) ** 2).mean(axis=0)
+    return SequenceSample(
+        tokens=tokens,
+        token_type=sequence.token_type.copy(),
+        targets=targets,
+        loss_mask=sequence.loss_mask.copy(),
+        info=info,
+    )
+
+
 def build_paired_control(
     family: HyperTeacher,
     cfg: SequenceConfig,
