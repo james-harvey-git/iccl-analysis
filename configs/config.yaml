@@ -13,6 +13,11 @@ wandb:
   mode: disabled # online | offline (`wandb sync` after) | disabled; cluster jobs pass online
   project: iccl-analysis
   entity: jublett-university-of-oxford
+  name: null # null keeps W&B's generated name (e.g. `different-sound-6`)
+  # Uploads the final snapshot as an artifact at the end of a run; no-op when
+  # mode is disabled. Covers only that automatic upload — promoting a full
+  # series is `scripts/upload_snapshots.py`, which needs no flag.
+  upload_weights: false
 
 hydra:
   run:
