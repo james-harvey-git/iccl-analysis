@@ -17,6 +17,14 @@
 #   sbatch scripts/cluster/train.slurm \
 #       training.resume=outputs/<date>/<time>/checkpoints/last.pt
 #
+#   # Name the run, and keep its final weights as a W&B artifact
+#   sbatch scripts/cluster/train.slurm wandb.name=pilot-logsnapshots \
+#       wandb.upload_weights=true
+#
+#   # Log-spaced snapshots, for watching a capability emerge early in training
+#   sbatch scripts/cluster/train.slurm \
+#       'training.snapshots.log={count: 10, start: 100}'
+#
 #   # W&B is online by default for cluster runs; switch via the env var
 #   # (an override in "$@" would collide with the one this script passes)
 #   WANDB_MODE=disabled sbatch scripts/cluster/train.slurm

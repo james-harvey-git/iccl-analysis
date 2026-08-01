@@ -15,5 +15,17 @@ num_workers: 4
 
 log_every: 50
 eval_every: 1000 # null disables in-training evaluation
-checkpoint_every: 10000
+checkpoint_every: 10000 # cadence of the rolling `last.pt`, which resumption reads
 resume: null # path to a checkpoint to restore and continue from
+
+# Step-tagged weights kept for interpretability and for re-scoring under metrics
+# defined after the run, unlike `last.pt`, which is overwritten. The saved steps
+# are the union of the three generators below plus `num_steps`, deduplicated.
+# Defaults give 2k, 5k, then every 10k: 12 snapshots, ~254 MB at pilot size.
+snapshots:
+  every: 10000 # linear cadence; null disables
+  at: [2000, 5000] # explicit extra steps
+  log: null # {count: N, start: S} -> N log-spaced steps in [S, num_steps]
+  # Weights alone serve interp and re-scoring; optimizer state (~3x the size) is
+  # only needed to branch training from a mid-run step.
+  include_optimizer_state: false

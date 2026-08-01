@@ -15,6 +15,7 @@ from iccl.training.trainer import (
     build_optimizer,
     build_scheduler,
     masked_mse,
+    resolve_snapshot_steps,
     split_decay_params,
 )
 
@@ -35,6 +36,12 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
         "eval_every": None,
         "checkpoint_every": 100,
         "resume": None,
+        "snapshots": {
+            "every": None,
+            "at": None,
+            "log": None,
+            "include_optimizer_state": False,
+        },
     }
     training.update(training_overrides)
     return OmegaConf.create(
@@ -128,6 +135,85 @@ def test_masked_mse_ignores_unmasked_positions() -> None:
     assert masked_mse(preds, targets, mask).item() == pytest.approx(1.0)
     preds[0, 1] = 100.0  # unmasked position must not contribute
     assert masked_mse(preds, targets, mask).item() == pytest.approx(1.0)
+
+
+def snapshot_steps(num_steps: int, **snapshots: Any) -> list[int]:
+    defaults = {"every": None, "at": None, "log": None}
+    return resolve_snapshot_steps(
+        OmegaConf.create({"num_steps": num_steps, "snapshots": defaults | snapshots})
+    )
+
+
+def test_snapshot_schedule_generators_compose() -> None:
+    assert snapshot_steps(100, every=25) == [25, 50, 75, 100]
+    assert snapshot_steps(100, at=[3, 7]) == [3, 7, 100]
+    assert snapshot_steps(100, log={"count": 3, "start": 1}) == [1, 10, 100]
+    # The union deduplicates where generators overlap, and stays sorted.
+    assert snapshot_steps(100, every=25, at=[7, 50], log={"count": 3, "start": 1}) == [
+        1,
+        7,
+        10,
+        25,
+        50,
+        75,
+        100,
+    ]
+
+
+def test_snapshot_schedule_covers_the_configured_default() -> None:
+    """The shipped config: 2k, 5k, then every 10k."""
+    steps = snapshot_steps(100000, every=10000, at=[2000, 5000])
+    assert steps == [2000, 5000] + list(range(10000, 100001, 10000))
+    assert len(steps) == 12
+
+
+def test_final_step_is_always_snapshotted() -> None:
+    # Without it the terminal weights could fall outside every generator, and
+    # analysis code would have to special-case the end of training.
+    assert snapshot_steps(100) == [100]
+    assert snapshot_steps(100, every=30) == [30, 60, 90, 100]
+
+
+def test_snapshot_schedule_drops_out_of_range_and_dedupes_log_collisions() -> None:
+    assert snapshot_steps(100, at=[0, 50, 250]) == [50, 100]
+    # Log spacing over a short run rounds many points onto the same integers.
+    dense = snapshot_steps(10, log={"count": 40, "start": 1})
+    assert dense == sorted(set(dense))
+    assert dense[0] == 1 and dense[-1] == 10
+
+
+def test_snapshot_schedule_rejects_nonsense_cadences() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        snapshot_steps(100, every=0)
+    with pytest.raises(ValueError, match="start >= 1"):
+        snapshot_steps(100, log={"count": 3, "start": 0})
+
+
+def test_trainer_writes_the_resolved_snapshot_series(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, num_steps=4, snapshots={"every": 2, "at": [1], "log": None})
+    torch.manual_seed(0)
+    trainer = Trainer(cfg, out_dir=tmp_path / "run")
+    trainer.fit()
+
+    snapshot_dir = tmp_path / "run" / "snapshots"
+    assert sorted(p.name for p in snapshot_dir.glob("*.pt")) == [
+        "step_0000001.pt",
+        "step_0000002.pt",
+        "step_0000004.pt",
+    ]
+    state = torch.load(snapshot_dir / "step_0000004.pt", weights_only=False)
+    # eval.py needs both to score a snapshot and link it to its training run.
+    assert state["step"] == 4
+    assert "wandb_run" in state
+    assert "optimizer" not in state
+
+
+def test_snapshots_can_carry_optimizer_state(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, num_steps=2, snapshots={"include_optimizer_state": True})
+    torch.manual_seed(0)
+    Trainer(cfg, out_dir=tmp_path / "run").fit()
+    state = torch.load(tmp_path / "run" / "snapshots" / "step_0000002.pt", weights_only=False)
+    assert "optimizer" in state and "scheduler" in state
 
 
 def test_trainer_smoke_and_checkpoint(tmp_path: Path) -> None:
