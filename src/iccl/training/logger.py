@@ -6,10 +6,13 @@ run, and ``scripts/eval.py`` once against a saved checkpoint. Metric namespacing
 the run's setup live here so the two cannot drift apart.
 
 A checkpoint records the identity of the run that wrote it, so an evaluation of
-that checkpoint can name its source run and link back to it.
+that checkpoint can name its source run and link back to it. Weights can also be
+uploaded as W&B artifacts, which survive the run directory and let W&B record
+which weights produced which numbers.
 """
 
 import math
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -19,6 +22,32 @@ from omegaconf import DictConfig, OmegaConf
 
 if TYPE_CHECKING:
     import plotly.graph_objects as go
+
+# W&B artifact names admit only these characters.
+_ARTIFACT_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+
+
+def weights_artifact_name(label: str) -> str:
+    """Artifact name for one run's weights. One artifact per run, so each run
+    owns its own version chain and the lineage graph ties versions to the run
+    that produced them."""
+    return f"weights-{_ARTIFACT_UNSAFE.sub('-', label)}"
+
+
+def repo_relative(path: Path | str) -> str:
+    """``path`` relative to the repo root when it sits inside it, else absolute.
+
+    The root is the package's grandparent under the editable install ``uv sync``
+    produces; the ``pyproject.toml`` check stops a non-editable install from
+    reporting a path inside site-packages.
+    """
+    import iccl
+
+    root = Path(iccl.__file__).resolve().parents[2]
+    resolved = Path(path).resolve()
+    if (root / "pyproject.toml").exists() and resolved.is_relative_to(root):
+        return str(resolved.relative_to(root))
+    return str(resolved)
 
 
 @dataclass(frozen=True)
@@ -120,6 +149,14 @@ class RunLogger:
         import wandb
 
         config = cast(dict[str, Any], OmegaConf.to_container(self.cfg, resolve=True))
+        # Where this run wrote its weights, so the overview page leads back to
+        # them. Repo-relative, since `outputs/` is gitignored and lives only on
+        # the machine that trained the model.
+        config["paths"] = {
+            "run_dir": repo_relative(self.out_dir),
+            "checkpoints": repo_relative(self.out_dir / "checkpoints"),
+            "snapshots": repo_relative(self.out_dir / "snapshots"),
+        }
         tags = [self.job_type]
         notes = None
         if self.source is not None:
@@ -135,6 +172,8 @@ class RunLogger:
             project=self.cfg.wandb.project,
             entity=self.cfg.wandb.entity,
             mode=self.cfg.wandb.mode,
+            # None is W&B's "generate one", so an unset name needs no branch.
+            name=self.cfg.wandb.get("name"),
             job_type=self.job_type,
             tags=tags,
             notes=notes,
@@ -166,6 +205,29 @@ class RunLogger:
         """Report one evaluation, returning the path the curves were written to."""
         self.log({f"eval-scalars/{key}": value for key, value in scalars.items()}, step)
         return self._log_curves(curves, step)
+
+    def upload_weights(self, path: Path) -> None:
+        """The final snapshot as a versioned W&B artifact, so weights outlive the
+        run directory and a reported number can be traced to the weights behind
+        it. Gates on ``cfg.wandb.upload_weights``, which covers only this
+        automatic upload — ``scripts/upload_snapshots.py`` promotes a full series
+        independently, an explicit invocation being its own consent.
+        """
+        if self.run is None or not self.cfg.wandb.get("upload_weights"):
+            return
+        import wandb
+
+        artifact = wandb.Artifact(weights_artifact_name(self.run.name or self.run.id), type="model")
+        artifact.add_file(str(path))
+        self.run.log_artifact(artifact, aliases=["final"])
+        size_mb = path.stat().st_size / 1e6
+        print(f"uploading {path.name} ({size_mb:.0f} MB) as {artifact.name}:final")
+
+    def use_artifact(self, reference: str) -> None:
+        """Records this run as a consumer of an artifact, drawing the lineage
+        edge from weights to the numbers computed from them."""
+        if self.run is not None:
+            self.run.use_artifact(reference)
 
     def finish(self) -> None:
         if self.run is not None:

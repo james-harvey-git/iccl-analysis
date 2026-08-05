@@ -2,10 +2,12 @@
 
 Re-scores a finished run without retraining — for metric changes, which alter
 what the suites report about weights that are already trained. The checkpoint
-path comes from ``training.resume``, as in training. Results go wherever
-training's do: stdout, an ``.npz`` of curves in the hydra run dir, and a W&B run
-unless ``wandb.mode=disabled``, tagged ``eval`` and linked to the run that
-produced the checkpoint when it recorded one.
+comes from ``training.resume``, as in training: either a local path, or a
+``wandb://entity/project/name:alias`` artifact reference, which is downloaded
+and recorded as an input so W&B ties these numbers to the weights behind them.
+Results go wherever training's do: stdout, an ``.npz`` of curves in the hydra run
+dir, and a W&B run unless ``wandb.mode=disabled``, tagged ``eval`` and linked to
+the run that produced the checkpoint when it recorded one.
 """
 
 from pathlib import Path
@@ -21,6 +23,25 @@ from iccl.training.metrics import evaluate_suites, load_eval_suites
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
 
+WANDB_SCHEME = "wandb://"
+
+
+def download_artifact(reference: str) -> Path:
+    """The single checkpoint inside a ``wandb://entity/project/name:alias``
+    artifact. An explicit scheme rather than pattern-matching, so a local path is
+    never mistaken for an artifact reference."""
+    import wandb
+
+    artifact = wandb.Api().artifact(reference.removeprefix(WANDB_SCHEME), type="model")
+    checkpoints = sorted(Path(artifact.download()).glob("*.pt"))
+    if len(checkpoints) != 1:
+        names = ", ".join(path.name for path in checkpoints) or "none"
+        raise ValueError(
+            f"{reference} holds {len(checkpoints)} checkpoints ({names}); a promoted "
+            "series has many, so download it and pass the path of the one to score"
+        )
+    return checkpoints[0]
+
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
@@ -31,7 +52,10 @@ def main(cfg: DictConfig) -> None:
         )
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
-    checkpoint = torch.load(Path(cfg.training.resume), map_location=device, weights_only=False)
+    reference = str(cfg.training.resume)
+    is_artifact = reference.startswith(WANDB_SCHEME)
+    path = download_artifact(reference) if is_artifact else Path(reference)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
     model = model_from_config(cfg).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()
@@ -43,6 +67,9 @@ def main(cfg: DictConfig) -> None:
 
     logger = RunLogger(cfg, out_dir, job_type="eval", source=source_from_checkpoint(checkpoint))
     logger.start()
+    if is_artifact:
+        # After start, so there is a run for the lineage edge to attach to.
+        logger.use_artifact(reference.removeprefix(WANDB_SCHEME))
     scalars, curves = evaluate_suites(
         model,
         suites,

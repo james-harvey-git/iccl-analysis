@@ -88,6 +88,37 @@ def build_scheduler(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
+def resolve_snapshot_steps(cfg: DictConfig) -> list[int]:
+    """Steps at which to keep a step-tagged copy of the weights, from
+    ``cfg.snapshots``.
+
+    The union of three generators — an explicit list, a linear cadence, and a
+    log-spaced sequence — so a run can have both a dense early sample and a
+    steady later one without choosing. ``num_steps`` is always included, so the
+    terminal weights are always in the series and analysis code can glob the
+    directory without special-casing the end of training.
+    """
+    num_steps = int(cfg.num_steps)
+    steps = {num_steps}
+    snapshots = cfg.get("snapshots")
+    if snapshots is not None:
+        for step in snapshots.get("at") or []:
+            steps.add(int(step))
+        every = snapshots.get("every")
+        if every is not None:
+            if every <= 0:
+                raise ValueError(f"snapshots.every must be positive, got {every}")
+            steps.update(range(int(every), num_steps + 1, int(every)))
+        log = snapshots.get("log")
+        if log is not None:
+            start, count = int(log.start), int(log.count)
+            if start < 1 or count < 1:
+                raise ValueError(f"snapshots.log needs start >= 1 and count >= 1, got {log}")
+            # Rounding collides at the dense low end; the set absorbs the repeats.
+            steps.update(int(round(step)) for step in np.geomspace(start, num_steps, count))
+    return sorted(step for step in steps if 0 < step <= num_steps)
+
+
 def resolve_autocast_dtype(precision: str, device: torch.device) -> torch.dtype | None:
     """None means full fp32 (no autocast); ``auto`` picks bf16 on CUDA only."""
     match precision:
@@ -104,10 +135,12 @@ def resolve_autocast_dtype(precision: str, device: torch.device) -> torch.dtype 
 class Trainer:
     """Owns the model, optimizer, eval harness, and checkpoint state for one run.
 
-    ``out_dir`` receives ``checkpoints/`` and ``eval/`` subdirectories; pass the
-    hydra run dir from scripts. ``cfg.training.resume`` restores a checkpoint
-    and continues the data stream at the exact sample offset (bit-exact given
-    the same batch size and worker count).
+    ``out_dir`` receives ``checkpoints/``, ``snapshots/`` and ``eval/``
+    subdirectories; pass the hydra run dir from scripts. ``cfg.training.resume``
+    restores a checkpoint and continues the data stream at the exact sample
+    offset (bit-exact given the same batch size and worker count). Snapshot
+    steps already behind a resumed run are not retaken, so a resumed run's
+    series has a gap wherever the original run's did.
     """
 
     def __init__(self, cfg: DictConfig, out_dir: Path | str) -> None:
@@ -121,6 +154,7 @@ class Trainer:
         self.step = 0
         self.best_metric = float("inf")
         self.last_loss = float("nan")
+        self.snapshot_steps = resolve_snapshot_steps(cfg.training)
         self.logger = RunLogger(cfg, self.out_dir, job_type="train")
         if cfg.training.resume is not None:
             self._load_checkpoint(Path(cfg.training.resume))
@@ -152,6 +186,7 @@ class Trainer:
         eval_enabled = train_cfg.eval_every is not None
         suites = load_eval_suites(Path(self.cfg.data.eval_sets.out_dir)) if eval_enabled else {}
         self.logger.start()
+        self._report_snapshot_plan()
         loader = self._build_loader()
         batches = iter(loader)
         grad_clip = train_cfg.grad_clip if train_cfg.grad_clip is not None else float("inf")
@@ -196,10 +231,18 @@ class Trainer:
                 self._evaluate(suites)
             if self.step % train_cfg.checkpoint_every == 0:
                 self._save_checkpoint("last.pt")
+            if self.step in self.snapshot_steps:
+                self._save_snapshot()
 
         if eval_enabled and self.step % train_cfg.eval_every != 0:
             self._evaluate(suites)
         self._save_checkpoint("last.pt")
+        final_snapshot = self._snapshot_path(self.step)
+        if not final_snapshot.exists():
+            # A run resumed at or past num_steps never entered the loop, so the
+            # terminal snapshot the series guarantees has not been written yet.
+            self._save_snapshot()
+        self.logger.upload_weights(final_snapshot)
         self.logger.finish()
 
     def _evaluate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
@@ -213,7 +256,46 @@ class Trainer:
             self.best_metric = scalars[BEST_METRIC]
             self._save_checkpoint("best.pt")
 
+    def _report_snapshot_plan(self) -> None:
+        """The resolved schedule and its disk cost, once at startup, so a
+        misconfigured cadence is obvious before it fills a filesystem."""
+        per_snapshot = sum(p.numel() for p in self.model.parameters()) * 4
+        if self._keeps_optimizer_state():
+            per_snapshot *= 3  # weights plus AdamW's two moments
+        listed = ", ".join(str(step) for step in self.snapshot_steps[:6])
+        tail = ", ..." if len(self.snapshot_steps) > 6 else ""
+        total_mb = per_snapshot * len(self.snapshot_steps) / 1e6
+        print(f"snapshots: {len(self.snapshot_steps)} steps [{listed}{tail}], ~{total_mb:.0f} MB")
+
     # ----------------------------------------------------------- persistence
+
+    def _keeps_optimizer_state(self) -> bool:
+        snapshots = self.cfg.training.get("snapshots")
+        return snapshots is not None and bool(snapshots.get("include_optimizer_state"))
+
+    def _snapshot_path(self, step: int) -> Path:
+        return self.out_dir / "snapshots" / f"step_{step:07d}.pt"
+
+    def _save_snapshot(self) -> None:
+        """Step-tagged weights, kept rather than overwritten: the rolling
+        checkpoint serves resumption, this serves interpretability and
+        re-scoring under metrics defined after the run.
+
+        Carries the step and run reference ``scripts/eval.py`` needs to score a
+        snapshot and link it back to the run that produced it.
+        """
+        path = self._snapshot_path(self.step)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        state: dict[str, Any] = {
+            "model": self.model.state_dict(),
+            "step": self.step,
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
+            "wandb_run": self.logger.run_reference(),
+        }
+        if self._keeps_optimizer_state():
+            state["optimizer"] = self.optimizer.state_dict()
+            state["scheduler"] = self.scheduler.state_dict()
+        torch.save(state, path)
 
     def _save_checkpoint(self, name: str) -> None:
         ckpt_dir = self.out_dir / "checkpoints"
