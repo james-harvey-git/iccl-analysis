@@ -19,6 +19,28 @@ wandb:
   # series is `scripts/upload_snapshots.py`, which needs no flag.
   upload_weights: false
 
+# Deterministic, known-world, current-task-only evaluation reference (#13).
+# It is computed from frozen suites and never logged through the training W&B
+# path. The plotting script reads `training.resume` as its checkpoint source.
+bayes_oracle:
+  suite: in_dist
+  suite_path: null
+  cache_dir: outputs/bayes_oracle
+  cache_path: null
+  atol: 1.0e-5
+  rtol: 1.0e-5
+  candidate_chunk_size: 128
+  store_full_covariance: false
+  sensitivity_tolerances:
+    - [1.0e-6, 1.0e-6]
+    - [1.0e-4, 1.0e-4]
+  plotting:
+    task_position: 8
+    output_dir: outputs/figures
+    bootstrap_seed: 0
+    bootstrap_replicates: 10000
+    include_raw_mse: true
+
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

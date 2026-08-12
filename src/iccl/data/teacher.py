@@ -26,7 +26,7 @@ import numpy as np
 # initializer, kept identical so weight distributions match the source.
 _TRUNC_STD_CORRECTION = 0.8796256610342398
 
-_DISCRETE_WEIGHT_VALUES = np.array([0.5, 0.6, 0.7, 0.8, 0.9, 1.0], dtype=np.float32)
+DISCRETE_WEIGHT_VALUES = np.array([0.5, 0.6, 0.7, 0.8, 0.9, 1.0], dtype=np.float32)
 
 
 @dataclass(frozen=True)
@@ -133,7 +133,7 @@ class HyperTeacher:
             case "binary":
                 return pattern_f
             case "discrete":
-                weights = rng.choice(_DISCRETE_WEIGHT_VALUES, size=pattern.shape)
+                weights = rng.choice(DISCRETE_WEIGHT_VALUES, size=pattern.shape)
                 return (weights * pattern_f).astype(np.float32)
             case "continuous":
                 # Uniform-on-simplex weights (Willms, 2021), then actives shifted

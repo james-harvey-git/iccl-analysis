@@ -40,7 +40,9 @@ checkpoints/
 
 # Claude Code
 CLAUDE.md
-.claude/settings.local.json
+AGENTS.md
+.claude/
+.agents/
 
 # Scratchpad
 Useful_CLI_Commands.txt

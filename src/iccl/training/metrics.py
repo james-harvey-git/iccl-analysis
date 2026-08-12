@@ -87,18 +87,27 @@ def demo_nmse(
 ) -> Float[np.ndarray, "seqs tasks max_demos"]:
     """Normalized MSE per (sequence, task, demo index), NaN-padded where a
     task has fewer demos than the suite maximum."""
+    mse = demo_mse(preds, suite)
+    denom = np.maximum(suite["base_mse"].mean(axis=-1), BASE_MSE_FLOOR)
+    return mse / denom[:, :, None]
+
+
+def demo_mse(
+    preds: Float[np.ndarray, "seqs seq_len d_out"], suite: Suite
+) -> Float[np.ndarray, "seqs tasks max_demos"]:
+    """Raw MSE per (sequence, task, demo index), with the same causal x-token
+    extraction and NaN padding as :func:`demo_nmse`."""
     sq_err = ((preds - suite["targets"]) ** 2).mean(axis=-1)
     spans, counts = suite["task_spans"], suite["demo_counts"]
-    denom = np.maximum(suite["base_mse"].mean(axis=-1), BASE_MSE_FLOOR)
     num_seqs, num_tasks = counts.shape
-    nmse = np.full((num_seqs, num_tasks, int(counts.max())), np.nan)
+    mse = np.full((num_seqs, num_tasks, int(counts.max())), np.nan)
     for n in range(num_seqs):
         for k in range(num_tasks):
             count = int(counts[n, k])
             # Demos alternate x, y from the span start; loss sits on the x positions.
             positions = spans[n, k, 0] + 2 * np.arange(count)
-            nmse[n, k, :count] = sq_err[n, positions] / denom[n, k]
-    return nmse
+            mse[n, k, :count] = sq_err[n, positions]
+    return mse
 
 
 def suite_scalars(
