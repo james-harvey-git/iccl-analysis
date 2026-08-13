@@ -45,6 +45,16 @@ class ObserverUpdate:
     completion_attempts: int
 
 
+@dataclass(frozen=True)
+class TaskEndDiagnostics:
+    """Diagnostics for the resample-move operation at a completed boundary."""
+
+    rejuvenation_acceptance: float
+    completion_attempts: int
+    resampling_events: int
+    unique_prefixes: int
+
+
 def normalize_log_weights(log_weights: Tensor) -> tuple[Tensor, Tensor]:
     """Normalize log weights and return their log normalizing constant."""
     log_normalizer = torch.logsumexp(log_weights, dim=0)
@@ -147,10 +157,16 @@ class CurrentTaskObserver:
         self.log_evidence = 0.0
         self.reference_diagonal = math.nan
 
-    def end_task(self) -> None:
+    def end_task(self) -> TaskEndDiagnostics:
         """Validate that the task ends after a complete demonstration."""
         if self.pending_features is not None:
             raise RuntimeError("task ended with a pending demonstration output")
+        return TaskEndDiagnostics(
+            rejuvenation_acceptance=math.nan,
+            completion_attempts=0,
+            resampling_events=0,
+            unique_prefixes=len(self.latents),
+        )
 
     def _initialize_gp(self, features: Tensor) -> BatchedOnlineGP:
         reference = float(torch.mean(torch.sum(features.square(), dim=-1)).item())

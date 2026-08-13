@@ -5,10 +5,27 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from itertools import combinations, combinations_with_replacement
+from typing import TypedDict
 
 import numpy as np
 
 from iccl.data.sequences import check_compositional, check_connected
+
+
+class StructuredSuiteSpec(TypedDict):
+    """Resolved metadata for the supported structured-observer task family."""
+
+    input_dim: int
+    output_dim: int
+    hidden_dim: int
+    use_bias: bool
+    num_modules: int
+    num_tasks: int
+    hotness: int
+    scale: float
+    weight_values: list[float]
+    require_coverage: bool
+    require_connected: bool
 
 
 @dataclass(frozen=True)

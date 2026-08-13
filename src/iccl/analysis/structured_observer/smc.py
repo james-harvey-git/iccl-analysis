@@ -19,6 +19,7 @@ from iccl.analysis.structured_observer.kernel import FeatureBank
 from iccl.analysis.structured_observer.observer import (
     ObserverPrediction,
     ObserverUpdate,
+    TaskEndDiagnostics,
     mixture_prediction,
     normalize_log_weights,
     stable_gp_prediction,
@@ -114,6 +115,7 @@ class FullHistoryObserver:
         self.pending_features: Tensor | None = None
         self.pending_prediction: GPPrediction | None = None
         self.last_rejuvenation_acceptance = math.nan
+        self.resampling_events = 0
 
     def start_task(self) -> None:
         """Advance the causal prefix and relabel particles from that prefix alone."""
@@ -197,6 +199,7 @@ class FullHistoryObserver:
         indices = torch.as_tensor(ancestors, dtype=torch.long, device=self.feature_bank.device)
         self.gp.resample(indices)
         self.log_weights.fill_(-math.log(self.smc_config.num_particles))
+        self.resampling_events += 1
 
     def _history_features(self, schedule: np.ndarray) -> Tensor:
         if not self.input_history:
@@ -293,7 +296,7 @@ class FullHistoryObserver:
             completion_attempts=self.completion_attempts,
         )
 
-    def end_task(self) -> None:
+    def end_task(self) -> TaskEndDiagnostics:
         """Resample-move the observed tail, then refresh only unobserved tasks."""
         if self.pending_features is not None:
             raise RuntimeError("task ended with a pending demonstration output")
@@ -304,3 +307,9 @@ class FullHistoryObserver:
             self.smc_config.task_end_rejuvenation_sweeps
         )
         self._refresh_future_tails()
+        return TaskEndDiagnostics(
+            rejuvenation_acceptance=self.last_rejuvenation_acceptance,
+            completion_attempts=self.completion_attempts,
+            resampling_events=self.resampling_events,
+            unique_prefixes=self._unique_prefix_count(),
+        )
