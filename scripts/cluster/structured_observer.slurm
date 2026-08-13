@@ -31,6 +31,7 @@ set -euo pipefail
 REPO_ROOT="${HOME}/iccl-analysis"
 cd "${REPO_ROOT}"
 export PATH="${HOME}/.local/bin:${PATH}"
+export PYTHONUNBUFFERED=1
 
 echo "Job:      ${SLURM_JOB_ID}"
 echo "Node:     $(hostname)"
