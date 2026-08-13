@@ -50,7 +50,11 @@ class ModulePool:
     readout: np.ndarray  # [hidden_dims[-1], output_dim]
 
 
-def _truncated_normal(rng: np.random.Generator, shape: tuple[int, ...], std: float) -> np.ndarray:
+def sample_truncated_normal(
+    rng: np.random.Generator,
+    shape: tuple[int, ...],
+    std: float,
+) -> np.ndarray:
     """Normal truncated to +-2 sigma with corrected std, matching jax's
     variance_scaling(..., distribution='truncated_normal')."""
     samples = rng.standard_normal(size=shape)
@@ -69,13 +73,13 @@ def sample_module_pool(cfg: TeacherConfig, rng: np.random.Generator) -> ModulePo
     biases: list[np.ndarray] = []
     for d_in, d_out in zip(dims[:-1], dims[1:], strict=True):
         std = math.sqrt(cfg.scale / d_in)
-        modules.append(_truncated_normal(rng, (cfg.num_modules, d_in, d_out), std))
+        modules.append(sample_truncated_normal(rng, (cfg.num_modules, d_in, d_out), std))
         if cfg.use_bias:
             biases.append(rng.uniform(0.0, 0.5, size=(cfg.num_modules, d_out)).astype(np.float32))
         else:
             biases.append(np.zeros((cfg.num_modules, d_out), dtype=np.float32))
     readout_std = math.sqrt(cfg.scale / cfg.hidden_dims[-1])
-    readout = _truncated_normal(rng, (cfg.hidden_dims[-1], cfg.output_dim), readout_std)
+    readout = sample_truncated_normal(rng, (cfg.hidden_dims[-1], cfg.output_dim), readout_std)
     return ModulePool(modules=modules, biases=biases, readout=readout)
 
 
