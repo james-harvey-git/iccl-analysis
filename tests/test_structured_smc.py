@@ -3,7 +3,11 @@ from itertools import product
 import numpy as np
 import torch
 
-from iccl.analysis.structured_observer.gp import GPPrediction, gaussian_log_predictive_density
+from iccl.analysis.structured_observer.gp import (
+    GPPrediction,
+    batch_gp_factor,
+    gaussian_log_predictive_density,
+)
 from iccl.analysis.structured_observer.kernel import sample_feature_bank
 from iccl.analysis.structured_observer.observer import (
     CurrentTaskObserver,
@@ -90,7 +94,6 @@ def test_enumerated_full_history_observer_matches_brute_force_gp_mixture() -> No
             num_particles=len(schedules),
             ess_fraction=1e-12,
             task_end_rejuvenation_sweeps=0,
-            max_completion_attempts=1000,
         ),
         seed=3,
         initial_schedules=schedules,
@@ -201,7 +204,6 @@ def test_full_observer_is_causal_with_respect_to_future_outputs() -> None:
                 num_particles=len(schedules),
                 ess_fraction=1e-12,
                 task_end_rejuvenation_sweeps=0,
-                max_completion_attempts=1000,
             ),
             seed=1,
             initial_schedules=schedules,
@@ -217,3 +219,48 @@ def test_full_observer_is_causal_with_respect_to_future_outputs() -> None:
     second = first_two_predictions(-9.0)
     assert np.array_equal(first[0], second[0])
     assert np.array_equal(first[1], second[1])
+
+
+def test_rejuvenation_retains_only_prefix_and_matches_full_gp_factor() -> None:
+    cfg = _schedule_config()
+    bank = sample_feature_bank(
+        input_dim=2,
+        num_modules=3,
+        scale=1.0,
+        num_features=24,
+        seed=13,
+    )
+    observer = FullHistoryObserver(
+        feature_bank=bank,
+        schedule_config=cfg,
+        output_dim=1,
+        relative_jitter=1e-5,
+        max_relative_jitter=1e-3,
+        smc_config=SMCConfig(
+            num_particles=12,
+            ess_fraction=1e-12,
+            task_end_rejuvenation_sweeps=1,
+            proposal_chunk_size=5,
+        ),
+        seed=4,
+    )
+    observer.start_task()
+    for x, y in [([0.1, -0.2], [0.4]), ([0.3, 0.5], [-0.1])]:
+        observer.predict(np.asarray(x))
+        observer.observe(np.asarray(y))
+    diagnostics = observer.end_task()
+    assert np.all(observer.schedules[:, 1:] == 0.0)
+    assert 0.0 <= diagnostics.rejuvenation_acceptance <= 1.0
+    assert observer.gp is not None
+    n = observer.gp.num_observations
+    expected_cholesky, expected_whitened = batch_gp_factor(
+        observer.gp.features[:, :n],
+        observer.gp.targets[:n],
+        observer.gp.jitter,
+    )
+    assert torch.allclose(observer.gp.cholesky[:, :n, :n], expected_cholesky)
+    assert torch.allclose(observer.gp.whitened_targets[:, :n], expected_whitened)
+
+    observer.start_task()
+    assert np.all(np.count_nonzero(observer.schedules[:, 1], axis=1) == 2)
+    assert np.all(observer.schedules[:, 2] == 0.0)

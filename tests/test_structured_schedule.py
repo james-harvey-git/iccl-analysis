@@ -1,6 +1,7 @@
 import numpy as np
 
 from iccl.analysis.structured_observer.schedule import (
+    ConditionedSchedulePrior,
     ScheduleConfig,
     canonical_task_classes,
     canonicalize_schedule_prefix,
@@ -44,6 +45,32 @@ def test_valid_schedule_sampling_and_conditional_completion() -> None:
     assert completion_attempts >= 1
     assert np.array_equal(completed[:2], schedule[:2])
     assert is_valid_schedule(completed, cfg)
+
+
+def test_conditioned_prefix_prior_counts_and_samples_exact_valid_support_prior() -> None:
+    cfg = ScheduleConfig(
+        num_modules=3,
+        num_tasks=3,
+        hotness=2,
+        weight_values=(1.0,),
+    )
+    prior = ConditionedSchedulePrior(cfg)
+    assert prior.completion_count(prior.initial_state, 3) == 24
+
+    first = np.array([[1.0, 1.0, 0.0]])
+    state = prior.state_from_prefix(first)
+    assert np.array_equal(prior.support_counts(state, 1), [2.0, 3.0, 3.0])
+
+    rng = np.random.default_rng(17)
+    counts: dict[bytes, int] = {}
+    for _ in range(12_000):
+        schedule = prior.sample_schedule(rng)
+        assert is_valid_schedule(schedule, cfg)
+        key = (schedule != 0.0).tobytes()
+        counts[key] = counts.get(key, 0) + 1
+    assert len(counts) == 24
+    frequencies = np.asarray(list(counts.values()), dtype=np.float64) / 12_000
+    assert np.max(np.abs(frequencies - 1.0 / 24.0)) < 0.01
 
 
 def test_prefix_canonicalization_never_uses_future_rows() -> None:

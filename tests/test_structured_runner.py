@@ -62,7 +62,6 @@ def _compute(suite: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
             num_particles=6,
             ess_fraction=1e-12,
             task_end_rejuvenation_sweeps=0,
-            max_completion_attempts=1000,
         ),
         smc_seeds=(0,),
         relative_jitter=1e-5,

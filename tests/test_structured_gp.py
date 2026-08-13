@@ -4,7 +4,10 @@ import torch
 
 from iccl.analysis.structured_observer.gp import (
     BatchedOnlineGP,
+    batch_gp_factor,
     batch_log_marginal_likelihood,
+    extend_gp_factor,
+    log_marginal_likelihood_from_factor,
 )
 
 
@@ -89,3 +92,41 @@ def test_resampling_preserves_selected_gp_states() -> None:
     gp.resample(indices)
     assert torch.equal(gp.features, before.index_select(0, indices))
     assert math.isclose(gp.jitter, 1e-4)
+
+
+def test_extending_prefix_factor_matches_full_history_refactorization() -> None:
+    generator = torch.Generator().manual_seed(19)
+    features = torch.randn((4, 7, 6), generator=generator, dtype=torch.float64)
+    targets = torch.randn((7, 2), generator=generator, dtype=torch.float64)
+    jitter = 1e-4
+    base_features = features[:, :4]
+    base_cholesky, base_whitened = batch_gp_factor(
+        base_features,
+        targets[:4],
+        jitter,
+    )
+    extended_cholesky, extended_whitened, block_log_likelihood = extend_gp_factor(
+        base_features,
+        base_cholesky,
+        base_whitened,
+        features[:, 4:],
+        targets[4:],
+        jitter,
+    )
+    full_cholesky, full_whitened = batch_gp_factor(features, targets, jitter)
+
+    assert torch.allclose(extended_cholesky, full_cholesky, atol=1e-10)
+    assert torch.allclose(extended_whitened, full_whitened, atol=1e-10)
+    full_log_likelihood = log_marginal_likelihood_from_factor(
+        full_cholesky,
+        full_whitened,
+    )
+    base_log_likelihood = log_marginal_likelihood_from_factor(
+        base_cholesky,
+        base_whitened,
+    )
+    assert torch.allclose(
+        block_log_likelihood,
+        full_log_likelihood - base_log_likelihood,
+        atol=1e-9,
+    )

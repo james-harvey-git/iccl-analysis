@@ -68,8 +68,8 @@ def settings_from_config(
             num_particles=int(smc.num_particles),
             ess_fraction=float(smc.ess_fraction),
             task_end_rejuvenation_sweeps=int(smc.task_end_rejuvenation_sweeps),
-            max_completion_attempts=int(smc.max_completion_attempts),
             initial_gp_capacity=int(smc.initial_gp_capacity),
+            proposal_chunk_size=int(smc.proposal_chunk_size),
         ),
         smc_seeds=tuple(int(seed) for seed in smc.seeds),
         sequence_limit=(

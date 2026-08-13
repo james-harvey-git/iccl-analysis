@@ -52,7 +52,6 @@ def _settings() -> StructuredObserverSettings:
             num_particles=4,
             ess_fraction=0.5,
             task_end_rejuvenation_sweeps=0,
-            max_completion_attempts=1000,
         ),
         smc_seeds=(0,),
         sequence_limit=1,

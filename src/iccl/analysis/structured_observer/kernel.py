@@ -77,6 +77,87 @@ class FeatureBank:
     def _as_tensor(self, value: np.ndarray | Tensor) -> Tensor:
         return torch.as_tensor(value, dtype=self.dtype, device=self.device)
 
+    def module_preactivations(self, x: np.ndarray | Tensor) -> Tensor:
+        """Project inputs through every sampled module before task composition.
+
+        A single input returns ``[features, modules]`` and an input history
+        returns ``[observations, features, modules]``. These projections depend
+        on the fixed feature bank and input only, so SMC proposals can reuse
+        them across latent-task hypotheses.
+        """
+        x_t = self._as_tensor(x)
+        if x_t.ndim == 1:
+            if x_t.shape != (self.input_dim,):
+                raise ValueError(
+                    f"expected x shape {(self.input_dim,)}, got {tuple(x_t.shape)}"
+                )
+            return (
+                torch.einsum("jmd,d->jm", self.module_weights, x_t)
+                + self.module_biases
+            )
+        if x_t.ndim == 2:
+            if x_t.shape[1] != self.input_dim:
+                raise ValueError("inputs must have shape [observations, input_dim]")
+            return (
+                torch.einsum("jmd,nd->njm", self.module_weights, x_t)
+                + self.module_biases.unsqueeze(0)
+            )
+        raise ValueError("x must be one input or an input history")
+
+    def features_from_module_preactivations(
+        self,
+        module_preactivations: Tensor,
+        latents: np.ndarray | Tensor,
+    ) -> Tensor:
+        """Compose cached module projections under one or more task latents."""
+        preactivations = self._as_tensor(module_preactivations)
+        z_t = self._as_tensor(latents)
+        if preactivations.ndim == 2:
+            if preactivations.shape != (self.num_features, self.num_modules):
+                raise ValueError(
+                    "module preactivations must have shape [features, modules]"
+                )
+            if z_t.ndim == 1:
+                z_t = z_t.unsqueeze(0)
+            if z_t.ndim != 2 or z_t.shape[1] != self.num_modules:
+                raise ValueError(
+                    f"expected latents shape [hypotheses, {self.num_modules}]"
+                )
+            hotness = torch.count_nonzero(z_t, dim=-1)
+            if bool((hotness == 0).any()):
+                raise ValueError("task latents must activate at least one module")
+            scaled_z = z_t / torch.sqrt(hotness.to(self.dtype)).unsqueeze(-1)
+            hidden = torch.relu(scaled_z @ preactivations.T)
+        elif preactivations.ndim == 3:
+            if preactivations.shape[1:] != (self.num_features, self.num_modules):
+                raise ValueError(
+                    "module preactivations must have shape "
+                    "[observations, features, modules]"
+                )
+            if z_t.ndim == 2:
+                if z_t.shape[1] != self.num_modules:
+                    raise ValueError(
+                        f"expected latents shape [hypotheses, {self.num_modules}]"
+                    )
+                z_t = z_t.unsqueeze(1).expand(-1, preactivations.shape[0], -1)
+            if z_t.ndim != 3 or z_t.shape[1:] != (
+                preactivations.shape[0],
+                self.num_modules,
+            ):
+                raise ValueError(
+                    "latents must have shape [hypotheses, observations, modules]"
+                )
+            hotness = torch.count_nonzero(z_t, dim=-1)
+            if bool((hotness == 0).any()):
+                raise ValueError("task latents must activate at least one module")
+            scaled_z = z_t / torch.sqrt(hotness.to(self.dtype)).unsqueeze(-1)
+            hidden = torch.relu(
+                torch.einsum("hnm,njm->hnj", scaled_z, preactivations)
+            )
+        else:
+            raise ValueError("module preactivations must have rank two or three")
+        return hidden * math.sqrt(self.scale / self.num_features)
+
     def features(self, x: np.ndarray | Tensor, latents: np.ndarray | Tensor) -> Tensor:
         """Evaluate features for one input under one or more task latents.
 
@@ -87,25 +168,8 @@ class FeatureBank:
         Returns:
             Feature matrix with shape ``[hypotheses, num_features]``.
         """
-        x_t = self._as_tensor(x)
-        z_t = self._as_tensor(latents)
-        if x_t.shape != (self.input_dim,):
-            raise ValueError(f"expected x shape {(self.input_dim,)}, got {tuple(x_t.shape)}")
-        if z_t.ndim == 1:
-            z_t = z_t.unsqueeze(0)
-        if z_t.ndim != 2 or z_t.shape[1] != self.num_modules:
-            raise ValueError(
-                f"expected latents shape [hypotheses, {self.num_modules}], "
-                f"got {tuple(z_t.shape)}"
-            )
-        hotness = torch.count_nonzero(z_t, dim=-1)
-        if bool((hotness == 0).any()):
-            raise ValueError("task latents must activate at least one module")
-        scaled_z = z_t / torch.sqrt(hotness.to(self.dtype)).unsqueeze(-1)
-        module_preactivations = torch.einsum("jmd,d->jm", self.module_weights, x_t)
-        module_preactivations = module_preactivations + self.module_biases
-        hidden = torch.relu(scaled_z @ module_preactivations.T)
-        return hidden * math.sqrt(self.scale / self.num_features)
+        module_preactivations = self.module_preactivations(x)
+        return self.features_from_module_preactivations(module_preactivations, latents)
 
     def features_for_history(
         self,
@@ -118,24 +182,11 @@ class FeatureBank:
         ``[hypotheses, observations, modules]`` or ``[observations, modules]``.
         The result is ``[hypotheses, observations, num_features]``.
         """
-        x_t = self._as_tensor(inputs)
-        z_t = self._as_tensor(latents)
-        if x_t.ndim != 2 or x_t.shape[1] != self.input_dim:
-            raise ValueError("inputs must have shape [observations, input_dim]")
-        if z_t.ndim == 2:
-            z_t = z_t.unsqueeze(0)
-        if z_t.ndim != 3 or z_t.shape[1:] != (x_t.shape[0], self.num_modules):
-            raise ValueError(
-                "latents must have shape [hypotheses, observations, modules]"
-            )
-        hotness = torch.count_nonzero(z_t, dim=-1)
-        if bool((hotness == 0).any()):
-            raise ValueError("task latents must activate at least one module")
-        scaled_z = z_t / torch.sqrt(hotness.to(self.dtype)).unsqueeze(-1)
-        module_preactivations = torch.einsum("jmd,nd->njm", self.module_weights, x_t)
-        module_preactivations = module_preactivations + self.module_biases.unsqueeze(0)
-        hidden = torch.relu(torch.einsum("hnm,njm->hnj", scaled_z, module_preactivations))
-        return hidden * math.sqrt(self.scale / self.num_features)
+        module_preactivations = self.module_preactivations(inputs)
+        return self.features_from_module_preactivations(
+            module_preactivations,
+            latents,
+        )
 
     def kernel(
         self,

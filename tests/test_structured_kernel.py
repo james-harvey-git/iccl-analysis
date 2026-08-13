@@ -96,6 +96,25 @@ def test_history_features_equal_repeated_single_input_evaluation() -> None:
         assert torch.allclose(history[hypothesis], repeated)
 
 
+def test_cached_module_projections_equal_direct_feature_evaluation() -> None:
+    bank = sample_feature_bank(
+        input_dim=2,
+        num_modules=3,
+        scale=1.5,
+        num_features=32,
+        seed=10,
+    )
+    inputs = np.array([[0.1, 0.2], [-0.3, 0.4]])
+    latents = np.array([[0.5, 1.0, 0.0], [0.0, 0.7, 0.9]])
+    projections = bank.module_preactivations(inputs)
+    cached = bank.features_from_module_preactivations(projections, latents)
+    direct = bank.features_for_history(
+        inputs,
+        np.repeat(latents[:, None], repeats=2, axis=1),
+    )
+    assert torch.equal(cached, direct)
+
+
 def test_kernel_is_invariant_to_joint_module_permutation() -> None:
     bank = sample_feature_bank(
         input_dim=3,

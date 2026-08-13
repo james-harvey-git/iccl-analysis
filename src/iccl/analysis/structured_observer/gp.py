@@ -62,6 +62,106 @@ def batch_log_marginal_likelihood(features: Tensor, targets: Tensor, jitter: flo
     return log_marginal_likelihood_from_factor(cholesky, whitened_targets)
 
 
+def extend_gp_factor(
+    base_features: Tensor,
+    base_cholesky: Tensor,
+    base_whitened_targets: Tensor,
+    block_features: Tensor,
+    block_targets: Tensor,
+    jitter: float,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Replay a block of observations from an existing batched GP factor.
+
+    Returns the extended Cholesky factor, extended whitened targets, and the
+    conditional log likelihood of the block. This is algebraically identical
+    to factoring the concatenated history, while retaining all work associated
+    with the fixed prefix.
+    """
+    if base_features.ndim != 3 or block_features.ndim != 3:
+        raise ValueError("feature tensors must have shape [hypotheses, observations, features]")
+    hypotheses, base_observations, num_features = base_features.shape
+    if block_features.shape[0] != hypotheses or block_features.shape[2] != num_features:
+        raise ValueError("base and block feature dimensions do not match")
+    if base_cholesky.shape != (hypotheses, base_observations, base_observations):
+        raise ValueError("base Cholesky shape does not match base features")
+    if base_whitened_targets.ndim != 3 or base_whitened_targets.shape[:2] != (
+        hypotheses,
+        base_observations,
+    ):
+        raise ValueError("base whitened targets do not match base features")
+    block_observations = block_features.shape[1]
+    output_dim = base_whitened_targets.shape[2]
+    if block_targets.shape != (block_observations, output_dim):
+        raise ValueError("block targets must have shape [observations, outputs]")
+    if jitter <= 0.0:
+        raise ValueError("jitter must be positive")
+
+    total_observations = base_observations + block_observations
+    cholesky = block_features.new_zeros(
+        (hypotheses, total_observations, total_observations)
+    )
+    whitened_targets = block_features.new_zeros(
+        (hypotheses, total_observations, output_dim)
+    )
+    cholesky[:, :base_observations, :base_observations] = base_cholesky
+    whitened_targets[:, :base_observations] = base_whitened_targets
+    block_log_likelihood = block_features.new_zeros(hypotheses)
+
+    for block_index in range(block_observations):
+        observation = base_observations + block_index
+        features = block_features[:, block_index]
+        cross_parts: list[Tensor] = []
+        if base_observations:
+            cross_parts.append(torch.einsum("hnj,hj->hn", base_features, features))
+        if block_index:
+            cross_parts.append(
+                torch.einsum(
+                    "hnj,hj->hn",
+                    block_features[:, :block_index],
+                    features,
+                )
+            )
+        kernel_diagonal = torch.sum(features.square(), dim=-1) + jitter
+        if observation:
+            cross_kernel = torch.cat(cross_parts, dim=1)
+            triangular_solution = torch.linalg.solve_triangular(
+                cholesky[:, :observation, :observation],
+                cross_kernel.unsqueeze(-1),
+                upper=False,
+            ).squeeze(-1)
+            mean = torch.einsum(
+                "hn,hno->ho",
+                triangular_solution,
+                whitened_targets[:, :observation],
+            )
+            variance = kernel_diagonal - torch.sum(
+                triangular_solution.square(),
+                dim=-1,
+            )
+        else:
+            triangular_solution = block_features.new_zeros((hypotheses, 0))
+            mean = block_features.new_zeros((hypotheses, output_dim))
+            variance = kernel_diagonal
+        prediction = GPPrediction(
+            mean=mean,
+            variance=variance,
+            triangular_solution=triangular_solution,
+        )
+        tolerance = torch.finfo(block_features.dtype).eps * 100.0
+        if not bool(torch.isfinite(variance).all()) or bool((variance <= tolerance).any()):
+            raise RuntimeError("non-positive GP variance while replaying task block")
+        target = block_targets[block_index]
+        block_log_likelihood += gaussian_log_predictive_density(target, prediction)
+        if observation:
+            cholesky[:, observation, :observation] = triangular_solution
+        diagonal = torch.sqrt(variance)
+        cholesky[:, observation, observation] = diagonal
+        whitened_targets[:, observation] = (
+            target.unsqueeze(0) - mean
+        ) / diagonal.unsqueeze(-1)
+    return cholesky, whitened_targets, block_log_likelihood
+
+
 def log_marginal_likelihood_from_factor(
     cholesky: Tensor,
     whitened_targets: Tensor,
@@ -287,6 +387,35 @@ class BatchedOnlineGP:
         self.features[mask, :n] = features[mask]
         self.cholesky[mask, :n, :n] = cholesky[mask]
         self.whitened_targets[mask, :n] = whitened_targets[mask]
+
+    def replace_extended_block(
+        self,
+        indices: Tensor,
+        block_start: int,
+        block_features: Tensor,
+        cholesky: Tensor,
+        whitened_targets: Tensor,
+    ) -> None:
+        """Install accepted task-block proposals and their extended factors."""
+        n = self.num_observations
+        if indices.ndim != 1 or indices.dtype != torch.long:
+            raise ValueError("replacement indices must be a vector of integer indices")
+        selected = indices.shape[0]
+        if not 0 <= block_start <= n:
+            raise ValueError("block_start is outside the observed GP history")
+        if block_features.shape != (
+            selected,
+            n - block_start,
+            self.num_features,
+        ):
+            raise ValueError("replacement block features do not match GP state")
+        if cholesky.shape != (selected, n, n):
+            raise ValueError("replacement Cholesky shape does not match GP state")
+        if whitened_targets.shape != (selected, n, self.output_dim):
+            raise ValueError("replacement whitened-target shape does not match GP state")
+        self.features[indices, block_start:n] = block_features
+        self.cholesky[indices, :n, :n] = cholesky
+        self.whitened_targets[indices, :n] = whitened_targets
 
     def log_marginal_likelihood(self) -> Tensor:
         """Return the accumulated data evidence for every hypothesis."""

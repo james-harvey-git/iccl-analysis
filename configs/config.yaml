@@ -61,8 +61,8 @@ structured_observer:
     seeds: [0, 1, 2]
     ess_fraction: 0.5
     task_end_rejuvenation_sweeps: 2
-    max_completion_attempts: 10000
     initial_gp_capacity: 8
+    proposal_chunk_size: 128
   plotting:
     task_position: 8
     output_dir: outputs/figures/structured_observer

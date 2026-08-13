@@ -12,7 +12,7 @@ from torch import Tensor
 from iccl.analysis.structured_observer.gp import (
     BatchedOnlineGP,
     GPPrediction,
-    batch_gp_factor,
+    extend_gp_factor,
     gaussian_log_predictive_density,
     log_marginal_likelihood_from_factor,
 )
@@ -27,11 +27,11 @@ from iccl.analysis.structured_observer.observer import (
     weight_diagnostics,
 )
 from iccl.analysis.structured_observer.schedule import (
+    ConditionedSchedulePrior,
     ScheduleConfig,
     canonicalize_schedule_prefix,
+    conditioned_schedule_prior,
     prefix_key,
-    sample_conditional_completion,
-    sample_valid_schedule,
     systematic_resampling_indices,
 )
 
@@ -43,8 +43,8 @@ class SMCConfig:
     num_particles: int
     ess_fraction: float
     task_end_rejuvenation_sweeps: int
-    max_completion_attempts: int
     initial_gp_capacity: int = 8
+    proposal_chunk_size: int = 128
 
 
 class FullHistoryObserver:
@@ -68,6 +68,8 @@ class FullHistoryObserver:
             raise ValueError("ess_fraction must be in (0, 1]")
         if smc_config.task_end_rejuvenation_sweeps < 0:
             raise ValueError("task-end rejuvenation sweeps cannot be negative")
+        if smc_config.proposal_chunk_size <= 0:
+            raise ValueError("proposal_chunk_size must be positive")
         if not 0.0 < relative_jitter <= max_relative_jitter:
             raise ValueError("relative jitter must be positive and at most its maximum")
         self.feature_bank = feature_bank
@@ -77,17 +79,20 @@ class FullHistoryObserver:
         self.max_relative_jitter_setting = max_relative_jitter
         self.smc_config = smc_config
         self.rng = np.random.Generator(np.random.Philox(seed))
+        self.conditioned_prior: ConditionedSchedulePrior = conditioned_schedule_prior(
+            schedule_config
+        )
+        self._fixed_initial_schedules = initial_schedules is not None
         if initial_schedules is None:
-            sampled = [
-                sample_valid_schedule(
-                    self.rng,
-                    schedule_config,
-                    max_attempts=smc_config.max_completion_attempts,
-                )
-                for _ in range(smc_config.num_particles)
-            ]
-            self.schedules = np.stack([item[0] for item in sampled])
-            self.completion_attempts = sum(item[1] for item in sampled)
+            self.schedules = np.zeros(
+                (
+                    smc_config.num_particles,
+                    schedule_config.num_tasks,
+                    schedule_config.num_modules,
+                ),
+                dtype=np.float64,
+            )
+            self.completion_attempts = 0
         else:
             expected_shape = (
                 smc_config.num_particles,
@@ -111,8 +116,8 @@ class FullHistoryObserver:
         self.reference_diagonal = math.nan
         self.log_evidence = 0.0
         self.task_index = -1
-        self.input_history: list[np.ndarray] = []
-        self.task_history: list[int] = []
+        self.module_preactivation_history: list[Tensor] = []
+        self.task_start_observation = 0
         self.pending_features: Tensor | None = None
         self.pending_prediction: GPPrediction | None = None
         self.last_rejuvenation_acceptance = math.nan
@@ -125,6 +130,11 @@ class FullHistoryObserver:
         self.task_index += 1
         if self.task_index >= self.schedule_config.num_tasks:
             raise RuntimeError("observer received more tasks than its schedule prior")
+        if not self._fixed_initial_schedules:
+            self.schedules[:, self.task_index] = self.conditioned_prior.sample_next_batch(
+                self.rng,
+                self.schedules[:, : self.task_index],
+            )
         observed_tasks = self.task_index + 1
         self.schedules = np.stack(
             [
@@ -132,6 +142,7 @@ class FullHistoryObserver:
                 for schedule in self.schedules
             ]
         )
+        self.task_start_observation = 0 if self.gp is None else self.gp.num_observations
 
     def _current_latents(self) -> Tensor:
         return torch.as_tensor(
@@ -167,7 +178,11 @@ class FullHistoryObserver:
             raise RuntimeError("predict called before the first task boundary")
         if self.pending_features is not None:
             raise RuntimeError("predict called twice without observing an output")
-        features = self.feature_bank.features(x, self._current_latents())
+        module_preactivations = self.feature_bank.module_preactivations(x)
+        features = self.feature_bank.features_from_module_preactivations(
+            module_preactivations,
+            self._current_latents(),
+        )
         if self.gp is None:
             self.gp = self._initialize_gp(features)
         prediction = stable_gp_prediction(
@@ -179,8 +194,7 @@ class FullHistoryObserver:
         ess, max_weight = weight_diagnostics(self.log_weights)
         self.pending_features = features
         self.pending_prediction = prediction
-        self.input_history.append(np.asarray(x, dtype=np.float64).copy())
-        self.task_history.append(self.task_index)
+        self.module_preactivation_history.append(module_preactivations)
         return ObserverPrediction(
             mean=mean.detach().cpu().numpy(),
             covariance_trace=float(covariance_trace.item()),
@@ -202,95 +216,119 @@ class FullHistoryObserver:
         self.log_weights.fill_(-math.log(self.smc_config.num_particles))
         self.resampling_events += 1
 
-    def _history_features(self, schedules: np.ndarray) -> Tensor:
-        if not self.input_history:
-            return self.feature_bank.module_weights.new_zeros(
-                (len(schedules), 0, self.feature_bank.num_features)
-            )
-        inputs = np.stack(self.input_history)
-        latents = np.stack(
-            [schedules[:, index] for index in self.task_history],
-            axis=1,
+    def _conditional_task_log_likelihood(self) -> np.ndarray:
+        """Return each particle's current-task evidence given its fixed past."""
+        if self.gp is None:
+            raise RuntimeError("cannot evaluate an uninitialized GP")
+        n = self.gp.num_observations
+        start = self.task_start_observation
+        full = log_marginal_likelihood_from_factor(
+            self.gp.cholesky[:, :n, :n],
+            self.gp.whitened_targets[:, :n],
         )
-        return self.feature_bank.features_for_history(inputs, latents)
+        past = log_marginal_likelihood_from_factor(
+            self.gp.cholesky[:, :start, :start],
+            self.gp.whitened_targets[:, :start],
+        )
+        return (full - past).detach().cpu().numpy()
+
+    def _sample_current_task_proposals(self) -> np.ndarray:
+        """Draw current tasks from the exact prior conditional on each past prefix."""
+        candidates = self.schedules.copy()
+        candidates[:, self.task_index + 1 :] = 0.0
+        candidates[:, self.task_index] = self.conditioned_prior.sample_next_batch(
+            self.rng,
+            self.schedules[:, : self.task_index],
+        )
+        return np.stack(
+            [
+                canonicalize_schedule_prefix(schedule, self.task_index + 1)
+                for schedule in candidates
+            ]
+        )
 
     def _rejuvenate(self, sweeps: int) -> float:
-        """Apply conditional-prior tail proposals with GP-evidence MH ratios."""
+        """Apply current-task prior proposals with conditional GP-evidence ratios."""
         if self.gp is None or sweeps == 0 or self.gp.num_observations == 0:
             return math.nan
         accepted = 0
         proposed = 0
-        current_log_likelihoods = self.gp.log_marginal_likelihood().detach().cpu().numpy()
-        fixed_prefix_length = self.task_index
+        current_log_likelihoods = self._conditional_task_log_likelihood()
+        n = self.gp.num_observations
+        block_start = self.task_start_observation
+        block_preactivations = torch.stack(
+            self.module_preactivation_history[block_start:n]
+        )
+        block_targets = self.gp.targets[block_start:n]
+        chunk_size = self.smc_config.proposal_chunk_size
         for _ in range(sweeps):
-            candidates: list[np.ndarray] = []
-            for particle in range(self.smc_config.num_particles):
-                prefix = self.schedules[particle, :fixed_prefix_length]
-                candidate, attempts = sample_conditional_completion(
-                    self.rng,
-                    prefix,
-                    self.schedule_config,
-                    max_attempts=self.smc_config.max_completion_attempts,
+            candidate_schedules = self._sample_current_task_proposals()
+            for chunk_start in range(0, self.smc_config.num_particles, chunk_size):
+                chunk_end = min(
+                    chunk_start + chunk_size,
+                    self.smc_config.num_particles,
                 )
-                self.completion_attempts += attempts
-                candidates.append(
-                    canonicalize_schedule_prefix(candidate, self.task_index + 1)
+                particle_slice = slice(chunk_start, chunk_end)
+                candidate_latents = candidate_schedules[
+                    particle_slice,
+                    self.task_index,
+                ]
+                candidate_features = (
+                    self.feature_bank.features_from_module_preactivations(
+                        block_preactivations,
+                        candidate_latents,
+                    )
                 )
-            candidate_schedules = np.stack(candidates)
-            candidate_features = self._history_features(candidate_schedules)
-            candidate_cholesky, candidate_whitened = batch_gp_factor(
-                candidate_features,
-                self.gp.targets[: self.gp.num_observations],
-                self.gp.jitter,
-            )
-            candidate_log_likelihoods = (
-                log_marginal_likelihood_from_factor(
-                    candidate_cholesky,
-                    candidate_whitened,
+                candidate_cholesky, candidate_whitened, candidate_likelihood = (
+                    extend_gp_factor(
+                        self.gp.features[particle_slice, :block_start],
+                        self.gp.cholesky[
+                            particle_slice,
+                            :block_start,
+                            :block_start,
+                        ],
+                        self.gp.whitened_targets[particle_slice, :block_start],
+                        candidate_features,
+                        block_targets,
+                        self.gp.jitter,
+                    )
                 )
-                .detach()
-                .cpu()
-                .numpy()
-            )
-            log_acceptance = candidate_log_likelihoods - current_log_likelihoods
-            accept = np.log(self.rng.random(self.smc_config.num_particles)) < np.minimum(
-                0.0,
-                log_acceptance,
-            )
-            accepted += int(accept.sum())
-            proposed += self.smc_config.num_particles
-            if bool(accept.any()):
-                self.schedules[accept] = candidate_schedules[accept]
-                mask = torch.as_tensor(
-                    accept,
-                    dtype=torch.bool,
-                    device=self.feature_bank.device,
+                candidate_values = candidate_likelihood.detach().cpu().numpy()
+                log_acceptance = (
+                    candidate_values
+                    - current_log_likelihoods[particle_slice]
                 )
-                self.gp.replace_hypotheses(
-                    mask,
-                    candidate_features,
-                    candidate_cholesky,
-                    candidate_whitened,
+                accept = np.log(self.rng.random(chunk_end - chunk_start)) < np.minimum(
+                    0.0,
+                    log_acceptance,
                 )
-                current_log_likelihoods[accept] = candidate_log_likelihoods[accept]
+                accepted += int(accept.sum())
+                proposed += chunk_end - chunk_start
+                if bool(accept.any()):
+                    local_indices = np.flatnonzero(accept)
+                    global_indices = local_indices + chunk_start
+                    self.schedules[global_indices] = candidate_schedules[global_indices]
+                    local_tensor = torch.as_tensor(
+                        local_indices,
+                        dtype=torch.long,
+                        device=self.feature_bank.device,
+                    )
+                    global_tensor = torch.as_tensor(
+                        global_indices,
+                        dtype=torch.long,
+                        device=self.feature_bank.device,
+                    )
+                    self.gp.replace_extended_block(
+                        global_tensor,
+                        block_start,
+                        candidate_features.index_select(0, local_tensor),
+                        candidate_cholesky.index_select(0, local_tensor),
+                        candidate_whitened.index_select(0, local_tensor),
+                    )
+                    current_log_likelihoods[global_indices] = candidate_values[
+                        local_indices
+                    ]
         return accepted / proposed if proposed else math.nan
-
-    def _refresh_future_tails(self) -> None:
-        """Redraw unobserved suffixes from their conditional prior."""
-        prefix_length = self.task_index + 1
-        if prefix_length == self.schedule_config.num_tasks:
-            return
-        refreshed: list[np.ndarray] = []
-        for schedule in self.schedules:
-            candidate, attempts = sample_conditional_completion(
-                self.rng,
-                schedule[:prefix_length],
-                self.schedule_config,
-                max_attempts=self.smc_config.max_completion_attempts,
-            )
-            self.completion_attempts += attempts
-            refreshed.append(canonicalize_schedule_prefix(candidate, prefix_length))
-        self.schedules = np.stack(refreshed)
 
     def observe(self, y: np.ndarray) -> ObserverUpdate:
         """Reweight particles by the revealed output and resample when ESS is low."""
@@ -326,7 +364,7 @@ class FullHistoryObserver:
         )
 
     def end_task(self) -> TaskEndDiagnostics:
-        """Resample-move the observed tail, then refresh only unobserved tasks."""
+        """Resample and rejuvenate the current task before the next boundary."""
         if self.pending_features is not None:
             raise RuntimeError("task ended with a pending demonstration output")
         if self.gp is None:
@@ -335,7 +373,6 @@ class FullHistoryObserver:
         self.last_rejuvenation_acceptance = self._rejuvenate(
             self.smc_config.task_end_rejuvenation_sweeps
         )
-        self._refresh_future_tails()
         return TaskEndDiagnostics(
             rejuvenation_acceptance=self.last_rejuvenation_acceptance,
             completion_attempts=self.completion_attempts,
