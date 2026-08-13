@@ -251,6 +251,7 @@ def test_rejuvenation_retains_only_prefix_and_matches_full_gp_factor() -> None:
     diagnostics = observer.end_task()
     assert np.all(observer.schedules[:, 1:] == 0.0)
     assert 0.0 <= diagnostics.rejuvenation_acceptance <= 1.0
+    assert observer.last_rejuvenation_unique_proposals == 1
     assert observer.gp is not None
     n = observer.gp.num_observations
     expected_cholesky, expected_whitened = batch_gp_factor(

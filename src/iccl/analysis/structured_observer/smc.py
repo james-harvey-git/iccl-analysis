@@ -121,6 +121,7 @@ class FullHistoryObserver:
         self.pending_features: Tensor | None = None
         self.pending_prediction: GPPrediction | None = None
         self.last_rejuvenation_acceptance = math.nan
+        self.last_rejuvenation_unique_proposals = 0
         self.resampling_events = 0
 
     def start_task(self) -> None:
@@ -261,16 +262,32 @@ class FullHistoryObserver:
         )
         block_targets = self.gp.targets[block_start:n]
         chunk_size = self.smc_config.proposal_chunk_size
+        unique_proposals = 0
         for _ in range(sweeps):
             candidate_schedules = self._sample_current_task_proposals()
-            for chunk_start in range(0, self.smc_config.num_particles, chunk_size):
+            proposal_groups: dict[bytes, list[int]] = {}
+            for particle, schedule in enumerate(candidate_schedules):
+                key = prefix_key(schedule, self.task_index + 1)
+                proposal_groups.setdefault(key, []).append(particle)
+            groups = list(proposal_groups.values())
+            unique_proposals += len(groups)
+            for chunk_start in range(0, len(groups), chunk_size):
                 chunk_end = min(
                     chunk_start + chunk_size,
-                    self.smc_config.num_particles,
+                    len(groups),
                 )
-                particle_slice = slice(chunk_start, chunk_end)
+                chunk_groups = groups[chunk_start:chunk_end]
+                representatives = np.asarray(
+                    [group[0] for group in chunk_groups],
+                    dtype=np.int64,
+                )
+                representative_tensor = torch.as_tensor(
+                    representatives,
+                    dtype=torch.long,
+                    device=self.feature_bank.device,
+                )
                 candidate_latents = candidate_schedules[
-                    particle_slice,
+                    representatives,
                     self.task_index,
                 ]
                 candidate_features = (
@@ -281,53 +298,60 @@ class FullHistoryObserver:
                 )
                 candidate_cholesky, candidate_whitened, candidate_likelihood = (
                     extend_gp_factor(
-                        self.gp.features[particle_slice, :block_start],
+                        self.gp.features[
+                            :, :block_start
+                        ].index_select(0, representative_tensor),
                         self.gp.cholesky[
-                            particle_slice,
-                            :block_start,
-                            :block_start,
-                        ],
-                        self.gp.whitened_targets[particle_slice, :block_start],
+                            :, :block_start, :block_start
+                        ].index_select(0, representative_tensor),
+                        self.gp.whitened_targets[
+                            :, :block_start
+                        ].index_select(0, representative_tensor),
                         candidate_features,
                         block_targets,
                         self.gp.jitter,
                     )
                 )
                 candidate_values = candidate_likelihood.detach().cpu().numpy()
-                log_acceptance = (
-                    candidate_values
-                    - current_log_likelihoods[particle_slice]
-                )
-                accept = np.log(self.rng.random(chunk_end - chunk_start)) < np.minimum(
-                    0.0,
-                    log_acceptance,
-                )
-                accepted += int(accept.sum())
-                proposed += chunk_end - chunk_start
-                if bool(accept.any()):
-                    local_indices = np.flatnonzero(accept)
-                    global_indices = local_indices + chunk_start
-                    self.schedules[global_indices] = candidate_schedules[global_indices]
-                    local_tensor = torch.as_tensor(
-                        local_indices,
-                        dtype=torch.long,
-                        device=self.feature_bank.device,
+                for local_index, particles in enumerate(chunk_groups):
+                    particle_indices = np.asarray(particles, dtype=np.int64)
+                    log_acceptance = (
+                        candidate_values[local_index]
+                        - current_log_likelihoods[particle_indices]
                     )
+                    accept = np.log(self.rng.random(len(particles))) < np.minimum(
+                        0.0,
+                        log_acceptance,
+                    )
+                    accepted += int(accept.sum())
+                    proposed += len(particles)
+                    if not bool(accept.any()):
+                        continue
+                    global_indices = particle_indices[accept]
+                    self.schedules[global_indices] = candidate_schedules[global_indices]
                     global_tensor = torch.as_tensor(
                         global_indices,
                         dtype=torch.long,
                         device=self.feature_bank.device,
                     )
+                    repeats = len(global_indices)
                     self.gp.replace_extended_block(
                         global_tensor,
                         block_start,
-                        candidate_features.index_select(0, local_tensor),
-                        candidate_cholesky.index_select(0, local_tensor),
-                        candidate_whitened.index_select(0, local_tensor),
+                        candidate_features[local_index : local_index + 1].expand(
+                            repeats, -1, -1
+                        ),
+                        candidate_cholesky[local_index : local_index + 1].expand(
+                            repeats, -1, -1
+                        ),
+                        candidate_whitened[local_index : local_index + 1].expand(
+                            repeats, -1, -1
+                        ),
                     )
                     current_log_likelihoods[global_indices] = candidate_values[
-                        local_indices
+                        local_index
                     ]
+        self.last_rejuvenation_unique_proposals = unique_proposals
         return accepted / proposed if proposed else math.nan
 
     def observe(self, y: np.ndarray) -> ObserverUpdate:
