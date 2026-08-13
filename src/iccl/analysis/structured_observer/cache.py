@@ -46,7 +46,11 @@ class StructuredObserverSettings:
     sequence_limit: int | None
 
 
-def settings_from_config(cfg: DictConfig) -> StructuredObserverSettings:
+def settings_from_config(
+    cfg: DictConfig,
+    *,
+    require_device_available: bool = True,
+) -> StructuredObserverSettings:
     """Resolve Hydra values into the immutable numerical cache settings."""
     kernel = cfg.kernel
     smc = cfg.smc
@@ -72,7 +76,10 @@ def settings_from_config(cfg: DictConfig) -> StructuredObserverSettings:
             None if cfg.get("sequence_limit") is None else int(cfg.sequence_limit)
         ),
     )
-    validate_observer_device(settings.device)
+    validate_observer_device(
+        settings.device,
+        require_available=require_device_available,
+    )
     if settings.kernel.dtype != "float64":
         raise ValueError("structured observer v1 requires kernel.dtype=float64")
     if "full_history" in settings.modes and not settings.smc_seeds:

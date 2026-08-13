@@ -39,7 +39,10 @@ def main(cfg: DictConfig) -> None:
             "pass an explicit checkpoint with training.resume=<local path or wandb:// reference>"
         )
     seed_everything(cfg.seed)
-    settings = settings_from_config(cfg.structured_observer)
+    settings = settings_from_config(
+        cfg.structured_observer,
+        require_device_available=False,
+    )
     suite_name = str(cfg.structured_observer.suite)
     suite_path, metadata_path = suite_paths(
         Path(cfg.data.eval_sets.out_dir),

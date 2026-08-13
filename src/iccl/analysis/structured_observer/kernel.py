@@ -24,14 +24,18 @@ def torch_dtype(name: str) -> torch.dtype:
             raise ValueError(f"unsupported structured-observer dtype: {name}")
 
 
-def validate_observer_device(device: str | torch.device) -> torch.device:
-    """Return a CPU/CUDA device and reject MPS, whose float64 support is absent."""
+def validate_observer_device(
+    device: str | torch.device,
+    *,
+    require_available: bool = True,
+) -> torch.device:
+    """Validate a CPU/CUDA setting and optionally require local availability."""
     resolved = torch.device(device)
     if resolved.type == "mps":
         raise ValueError("structured GP observers require device=cpu or device=cuda")
     if resolved.type not in {"cpu", "cuda"}:
         raise ValueError(f"unsupported structured-observer device: {resolved}")
-    if resolved.type == "cuda" and not torch.cuda.is_available():
+    if require_available and resolved.type == "cuda" and not torch.cuda.is_available():
         raise ValueError("device=cuda requested but CUDA is unavailable")
     return resolved
 

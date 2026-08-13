@@ -3,7 +3,11 @@ import math
 import numpy as np
 import torch
 
-from iccl.analysis.structured_observer.kernel import FeatureBank, sample_feature_bank
+from iccl.analysis.structured_observer.kernel import (
+    FeatureBank,
+    sample_feature_bank,
+    validate_observer_device,
+)
 from iccl.data.teacher import sample_truncated_normal
 
 
@@ -42,6 +46,11 @@ def test_feature_banks_are_nested_across_feature_counts() -> None:
     large = sample_feature_bank(**kwargs, num_features=32)
     assert torch.equal(small.module_weights, large.module_weights[:16])
     assert torch.equal(small.module_biases, large.module_biases[:16])
+
+
+def test_unavailable_cuda_can_be_validated_for_cache_identity() -> None:
+    device = validate_observer_device("cuda", require_available=False)
+    assert device.type == "cuda"
 
 
 def test_feature_scale_matches_integrated_readout_factor() -> None:
