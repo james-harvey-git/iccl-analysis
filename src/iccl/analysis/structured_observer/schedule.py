@@ -140,7 +140,7 @@ def canonical_task_classes(cfg: ScheduleConfig) -> tuple[np.ndarray, np.ndarray]
     probabilities: list[float] = []
     for first, second in combinations_with_replacement(values, 2):
         latent = np.zeros(cfg.num_modules, dtype=np.float64)
-        latent[:2] = (first, second)
+        latent[-2:] = (first, second)
         latents.append(latent)
         multiplicity = 1 if math.isclose(first, second) else 2
         probabilities.append(multiplicity / len(values) ** 2)

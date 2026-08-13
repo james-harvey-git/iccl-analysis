@@ -160,7 +160,7 @@ class BatchedOnlineGP:
         """Extend every hypothesis with a shared observed output."""
         n = self.num_observations
         if n >= self.max_observations:
-            raise RuntimeError("GP observation capacity exceeded")
+            self._grow_capacity(max(1, 2 * self.max_observations))
         if target.shape != (self.output_dim,):
             raise ValueError(
                 f"expected target shape {(self.output_dim,)}, got {tuple(target.shape)}"
@@ -180,6 +180,31 @@ class BatchedOnlineGP:
         ) / diagonal.unsqueeze(-1)
         self.targets[n] = target
         self.num_observations += 1
+
+    def _grow_capacity(self, capacity: int) -> None:
+        """Grow storage geometrically without exposing future demonstration counts."""
+        if capacity <= self.max_observations:
+            return
+        feature_storage = self.features.new_zeros(
+            (self.num_hypotheses, capacity, self.num_features)
+        )
+        cholesky_storage = self.cholesky.new_zeros(
+            (self.num_hypotheses, capacity, capacity)
+        )
+        whitened_storage = self.whitened_targets.new_zeros(
+            (self.num_hypotheses, capacity, self.output_dim)
+        )
+        target_storage = self.targets.new_zeros((capacity, self.output_dim))
+        old_capacity = self.max_observations
+        feature_storage[:, :old_capacity] = self.features
+        cholesky_storage[:, :old_capacity, :old_capacity] = self.cholesky
+        whitened_storage[:, :old_capacity] = self.whitened_targets
+        target_storage[:old_capacity] = self.targets
+        self.features = feature_storage
+        self.cholesky = cholesky_storage
+        self.whitened_targets = whitened_storage
+        self.targets = target_storage
+        self.max_observations = capacity
 
     def predict_and_append(self, features: Tensor, target: Tensor) -> tuple[GPPrediction, Tensor]:
         """Return the causal prediction and its log density, then update state."""
