@@ -1,4 +1,5 @@
 from pathlib import Path
+from runpy import run_path
 
 import numpy as np
 
@@ -6,6 +7,10 @@ from iccl.analysis.structured_observer.plotting import (
     paired_bootstrap_methods,
     plot_structured_observer_comparison,
 )
+
+seed_sensitivity_statistics = run_path(
+    "scripts/analyze_structured_observer_seed_sensitivity.py"
+)["seed_sensitivity_statistics"]
 
 
 def test_shared_bootstrap_preserves_exact_paired_difference() -> None:
@@ -81,3 +86,42 @@ def test_comparison_writes_figures_arrays_and_provenance(tmp_path: Path) -> None
     assert any(path.name.endswith("plotted-arrays.npz") for path in written)
     assert any(path.name.endswith("provenance.json") for path in written)
     assert all(path.exists() for path in written)
+
+
+def test_seed_sensitivity_evaluates_predictions_after_ensembling() -> None:
+    num_sequences = 4
+    targets = np.zeros((num_sequences, 1, 3, 1), dtype=np.float32)
+    first = np.ones_like(targets)
+    second = -np.ones_like(targets)
+    predictions = np.stack([first, second])
+    individual_nmse = np.ones((2, num_sequences, 1, 3), dtype=np.float32)
+    cache = {
+        "base_mse": np.ones((num_sequences, 1, 1), dtype=np.float32),
+        "demo_counts": np.full((num_sequences, 1), 3, dtype=np.int64),
+        "full_nmse": np.zeros((num_sequences, 1, 3), dtype=np.float32),
+        "full_nmse_by_seed": individual_nmse,
+        "full_predictions_by_seed": predictions,
+        "sequence_indices": np.arange(num_sequences, dtype=np.int32),
+        "smc_seeds": np.array([0, 1], dtype=np.int64),
+        "targets": targets,
+    }
+    statistics = seed_sensitivity_statistics(
+        np.zeros((num_sequences, 1, 3), dtype=np.float32),
+        cache,
+        task_index=0,
+        demo_count=3,
+        bootstrap_replicates=20,
+        bootstrap_seed=0,
+    )
+    assert np.array_equal(
+        statistics["individual_seed_nmse_mean"],
+        np.ones((2, 3), dtype=np.float32),
+    )
+    assert np.array_equal(
+        statistics["cumulative_ensemble_nmse_mean"],
+        np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+    )
+    assert np.array_equal(
+        statistics["gdn_minus_cumulative_mean"],
+        np.array([[-1.0, -1.0, -1.0], [0.0, 0.0, 0.0]], dtype=np.float32),
+    )
