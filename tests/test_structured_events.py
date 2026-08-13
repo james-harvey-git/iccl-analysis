@@ -29,6 +29,8 @@ def test_event_stream_preserves_predict_then_reveal_timing() -> None:
         OutputEvent,
     ]
     assert events[1].task_position == 1
+    assert isinstance(events[1], InputEvent)
+    assert isinstance(events[2], OutputEvent)
     assert events[1].demo_index == 0
     assert np.allclose(events[1].value, [0.2, -0.4])
     assert np.allclose(events[2].value, [0.7])

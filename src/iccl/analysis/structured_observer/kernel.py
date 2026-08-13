@@ -176,17 +176,25 @@ def sample_feature_bank(
         raise ValueError("num_features must be positive")
     resolved_device = validate_observer_device(device)
     resolved_dtype = torch_dtype(dtype) if isinstance(dtype, str) else dtype
-    rng = np.random.Generator(np.random.Philox(seed))
     weight_std = math.sqrt(scale / input_dim)
-    weights = sample_truncated_normal(
-        rng,
-        (num_features, num_modules, input_dim),
-        weight_std,
-    )
-    if use_bias:
-        biases = rng.uniform(0.0, 0.5, size=(num_features, num_modules)).astype(np.float32)
-    else:
-        biases = np.zeros((num_features, num_modules), dtype=np.float32)
+    weights = np.empty((num_features, num_modules, input_dim), dtype=np.float32)
+    biases = np.empty((num_features, num_modules), dtype=np.float32)
+    for feature_index in range(num_features):
+        weight_rng = np.random.Generator(
+            np.random.Philox(np.random.SeedSequence([seed, feature_index, 0]))
+        )
+        weights[feature_index] = sample_truncated_normal(
+            weight_rng,
+            (num_modules, input_dim),
+            weight_std,
+        )
+        if use_bias:
+            bias_rng = np.random.Generator(
+                np.random.Philox(np.random.SeedSequence([seed, feature_index, 1]))
+            )
+            biases[feature_index] = bias_rng.uniform(0.0, 0.5, size=num_modules)
+        else:
+            biases[feature_index] = 0.0
     return FeatureBank(
         module_weights=torch.as_tensor(weights, dtype=resolved_dtype, device=resolved_device),
         module_biases=torch.as_tensor(biases, dtype=resolved_dtype, device=resolved_device),

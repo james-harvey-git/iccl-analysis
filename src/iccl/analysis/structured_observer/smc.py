@@ -12,8 +12,9 @@ from torch import Tensor
 from iccl.analysis.structured_observer.gp import (
     BatchedOnlineGP,
     GPPrediction,
-    batch_log_marginal_likelihood,
+    batch_gp_factor,
     gaussian_log_predictive_density,
+    log_marginal_likelihood_from_factor,
 )
 from iccl.analysis.structured_observer.kernel import FeatureBank
 from iccl.analysis.structured_observer.observer import (
@@ -201,14 +202,17 @@ class FullHistoryObserver:
         self.log_weights.fill_(-math.log(self.smc_config.num_particles))
         self.resampling_events += 1
 
-    def _history_features(self, schedule: np.ndarray) -> Tensor:
+    def _history_features(self, schedules: np.ndarray) -> Tensor:
         if not self.input_history:
             return self.feature_bank.module_weights.new_zeros(
-                (0, self.feature_bank.num_features)
+                (len(schedules), 0, self.feature_bank.num_features)
             )
         inputs = np.stack(self.input_history)
-        latents = np.stack([schedule[index] for index in self.task_history])
-        return self.feature_bank.features_for_history(inputs, latents)[0]
+        latents = np.stack(
+            [schedules[:, index] for index in self.task_history],
+            axis=1,
+        )
+        return self.feature_bank.features_for_history(inputs, latents)
 
     def _rejuvenate(self, sweeps: int) -> float:
         """Apply conditional-prior tail proposals with GP-evidence MH ratios."""
@@ -219,6 +223,7 @@ class FullHistoryObserver:
         current_log_likelihoods = self.gp.log_marginal_likelihood().detach().cpu().numpy()
         fixed_prefix_length = self.task_index
         for _ in range(sweeps):
+            candidates: list[np.ndarray] = []
             for particle in range(self.smc_config.num_particles):
                 prefix = self.schedules[particle, :fixed_prefix_length]
                 candidate, attempts = sample_conditional_completion(
@@ -228,22 +233,46 @@ class FullHistoryObserver:
                     max_attempts=self.smc_config.max_completion_attempts,
                 )
                 self.completion_attempts += attempts
-                candidate = canonicalize_schedule_prefix(candidate, self.task_index + 1)
-                candidate_features = self._history_features(candidate)
-                candidate_log_likelihood = float(
-                    batch_log_marginal_likelihood(
-                        candidate_features.unsqueeze(0),
-                        self.gp.targets[: self.gp.num_observations],
-                        self.gp.jitter,
-                    )[0].item()
+                candidates.append(
+                    canonicalize_schedule_prefix(candidate, self.task_index + 1)
                 )
-                log_acceptance = candidate_log_likelihood - current_log_likelihoods[particle]
-                proposed += 1
-                if math.log(self.rng.random()) < min(0.0, log_acceptance):
-                    self.schedules[particle] = candidate
-                    self.gp.replace_hypothesis(particle, candidate_features)
-                    current_log_likelihoods[particle] = candidate_log_likelihood
-                    accepted += 1
+            candidate_schedules = np.stack(candidates)
+            candidate_features = self._history_features(candidate_schedules)
+            candidate_cholesky, candidate_whitened = batch_gp_factor(
+                candidate_features,
+                self.gp.targets[: self.gp.num_observations],
+                self.gp.jitter,
+            )
+            candidate_log_likelihoods = (
+                log_marginal_likelihood_from_factor(
+                    candidate_cholesky,
+                    candidate_whitened,
+                )
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            log_acceptance = candidate_log_likelihoods - current_log_likelihoods
+            accept = np.log(self.rng.random(self.smc_config.num_particles)) < np.minimum(
+                0.0,
+                log_acceptance,
+            )
+            accepted += int(accept.sum())
+            proposed += self.smc_config.num_particles
+            if bool(accept.any()):
+                self.schedules[accept] = candidate_schedules[accept]
+                mask = torch.as_tensor(
+                    accept,
+                    dtype=torch.bool,
+                    device=self.feature_bank.device,
+                )
+                self.gp.replace_hypotheses(
+                    mask,
+                    candidate_features,
+                    candidate_cholesky,
+                    candidate_whitened,
+                )
+                current_log_likelihoods[accept] = candidate_log_likelihoods[accept]
         return accepted / proposed if proposed else math.nan
 
     def _refresh_future_tails(self) -> None:

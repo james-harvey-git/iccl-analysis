@@ -40,7 +40,6 @@ bayes_oracle:
     bootstrap_seed: 0
     bootstrap_replicates: 10000
     include_raw_mse: true
-
 # Generator-aware random-feature GP comparison (#14). These fixed evaluation
 # references are cached locally and never logged through the training W&B path.
 structured_observer:
@@ -70,6 +69,17 @@ structured_observer:
     bootstrap_seed: 0
     bootstrap_replicates: 10000
     include_raw_mse: true
+  calibration:
+    sequence_limit: 32
+    feature_counts: [512, 1024, 2048]
+    particle_counts: [256, 512, 1024, 2048]
+    cache_dir: outputs/structured_observer/convergence/cache
+    output_dir: outputs/figures/structured_observer/convergence
+    thresholds:
+      kernel_relative_frobenius: 0.01
+      curve_max_abs_change: 0.02
+      seed_standard_error: 0.01
+      relative_jitter: 1.0e-5
 
 hydra:
   run:

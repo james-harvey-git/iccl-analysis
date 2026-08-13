@@ -59,10 +59,24 @@ def batch_gp_factor(
 def batch_log_marginal_likelihood(features: Tensor, targets: Tensor, jitter: float) -> Tensor:
     """Exact GP log marginal likelihood for each feature-history hypothesis."""
     cholesky, whitened_targets = batch_gp_factor(features, targets, jitter)
-    observations = features.shape[1]
-    output_dim = targets.shape[1]
+    return log_marginal_likelihood_from_factor(cholesky, whitened_targets)
+
+
+def log_marginal_likelihood_from_factor(
+    cholesky: Tensor,
+    whitened_targets: Tensor,
+) -> Tensor:
+    """Compute GP evidence from an existing Cholesky/whitened-target factor."""
+    if cholesky.ndim != 3 or cholesky.shape[-1] != cholesky.shape[-2]:
+        raise ValueError("cholesky must have shape [hypotheses, observations, observations]")
+    if whitened_targets.ndim != 3 or whitened_targets.shape[:2] != cholesky.shape[:2]:
+        raise ValueError(
+            "whitened_targets must have shape [hypotheses, observations, outputs]"
+        )
+    observations = cholesky.shape[1]
+    output_dim = whitened_targets.shape[-1]
     if observations == 0:
-        return features.new_zeros(features.shape[0])
+        return cholesky.new_zeros(cholesky.shape[0])
     data_fit = torch.sum(whitened_targets.square(), dim=(-2, -1))
     log_determinant_term = output_dim * torch.sum(
         torch.log(torch.diagonal(cholesky, dim1=-2, dim2=-1)),
@@ -251,6 +265,28 @@ class BatchedOnlineGP:
         self.features[index, :n] = features
         self.cholesky[index, :n, :n] = cholesky[0]
         self.whitened_targets[index, :n] = whitened[0]
+
+    def replace_hypotheses(
+        self,
+        mask: Tensor,
+        features: Tensor,
+        cholesky: Tensor,
+        whitened_targets: Tensor,
+    ) -> None:
+        """Replace a masked subset from already-computed batched factors."""
+        n = self.num_observations
+        expected_features = (self.num_hypotheses, n, self.num_features)
+        if mask.shape != (self.num_hypotheses,) or mask.dtype != torch.bool:
+            raise ValueError("replacement mask must be a boolean hypothesis vector")
+        if features.shape != expected_features:
+            raise ValueError(f"expected replacement features shape {expected_features}")
+        if cholesky.shape != (self.num_hypotheses, n, n):
+            raise ValueError("replacement Cholesky shape does not match GP state")
+        if whitened_targets.shape != (self.num_hypotheses, n, self.output_dim):
+            raise ValueError("replacement whitened-target shape does not match GP state")
+        self.features[mask, :n] = features[mask]
+        self.cholesky[mask, :n, :n] = cholesky[mask]
+        self.whitened_targets[mask, :n] = whitened_targets[mask]
 
     def log_marginal_likelihood(self) -> Tensor:
         """Return the accumulated data evidence for every hypothesis."""
