@@ -112,6 +112,7 @@ def test_enumerated_full_history_observer_matches_brute_force_gp_mixture() -> No
     task_indices = [0, 0, 1]
     canonical_schedules = schedules.copy()
     reference_diagonal = None
+    brute_force_log_evidence = 0.0
 
     observer.start_task()
     for index, (x, y, task_index) in enumerate(
@@ -169,8 +170,11 @@ def test_enumerated_full_history_observer_matches_brute_force_gp_mixture() -> No
             triangular_solution=torch.empty((len(schedules), 0), dtype=torch.float64),
         )
         log_density = gaussian_log_predictive_density(target, component_prediction)
-        log_weights, _ = normalize_log_weights(log_weights + log_density)
-        observer.observe(y)
+        log_weights, log_increment = normalize_log_weights(log_weights + log_density)
+        brute_force_log_evidence += float(log_increment.item())
+        update = observer.observe(y)
+        assert torch.allclose(observer.log_weights, log_weights, atol=1e-10)
+        assert np.isclose(update.log_evidence, brute_force_log_evidence, atol=1e-10)
         history_features.append(component_features)
         targets.append(target)
 
