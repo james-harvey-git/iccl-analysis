@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ from omegaconf import DictConfig
 from iccl.analysis.bayes_oracle import file_sha256, load_suite_metadata
 from iccl.analysis.structured_observer.kernel import validate_observer_device
 from iccl.analysis.structured_observer.runner import (
+    _metric_arrays,
     compute_structured_observers,
     make_feature_bank_from_spec,
 )
@@ -263,6 +265,103 @@ def load_cache(
     if actual_schema != metadata.get("array_schema"):
         raise ValueError(f"cache array schema does not match its sidecar: {cache_path}")
     return arrays, metadata
+
+
+def merge_seed_caches(
+    cache_paths: list[Path],
+    output_path: Path | None = None,
+) -> Path:
+    """Merge disjoint SMC-seed caches for the same suite and numerical settings."""
+    if not cache_paths:
+        raise ValueError("at least one seed cache is required")
+    loaded = [load_cache(path) for path in cache_paths]
+    arrays_by_cache = [item[0] for item in loaded]
+    metadata_by_cache = [item[1] for item in loaded]
+    reference_identity = deepcopy(metadata_by_cache[0]["identity"])
+    reference_feature_hash = metadata_by_cache[0]["feature_bank_sha256"]
+
+    def without_seeds(identity: dict[str, Any]) -> dict[str, Any]:
+        normalized = deepcopy(identity)
+        normalized["settings"]["smc_seeds"] = []
+        return normalized
+
+    expected_identity = without_seeds(reference_identity)
+    expected_keys = arrays_by_cache[0].keys()
+    for path, arrays, metadata in zip(
+        cache_paths,
+        arrays_by_cache,
+        metadata_by_cache,
+        strict=True,
+    ):
+        if without_seeds(metadata["identity"]) != expected_identity:
+            raise ValueError(f"seed cache settings do not match: {path}")
+        if metadata["feature_bank_sha256"] != reference_feature_hash:
+            raise ValueError(f"seed cache feature banks do not match: {path}")
+        if arrays.keys() != expected_keys:
+            raise ValueError(f"seed cache array keys do not match: {path}")
+        identity_seeds = np.asarray(
+            metadata["identity"]["settings"]["smc_seeds"],
+            dtype=np.int64,
+        )
+        if not np.array_equal(arrays["smc_seeds"], identity_seeds):
+            raise ValueError(f"seed cache arrays disagree with metadata: {path}")
+
+    seeds = np.concatenate([arrays["smc_seeds"] for arrays in arrays_by_cache])
+    if len(np.unique(seeds)) != len(seeds):
+        raise ValueError("seed caches contain overlapping SMC seeds")
+    order = np.argsort(seeds)
+    merged: dict[str, np.ndarray] = {"smc_seeds": seeds[order]}
+    derived = {
+        "full_predictions_mean",
+        "full_algorithmic_prediction_std",
+        "full_raw_mse",
+        "full_nmse",
+    }
+    for key in expected_keys:
+        if key == "smc_seeds" or key in derived:
+            continue
+        values = [arrays[key] for arrays in arrays_by_cache]
+        if key.startswith("full_") and key.endswith("_by_seed"):
+            merged[key] = np.concatenate(values, axis=0)[order]
+            continue
+        reference = values[0]
+        if not all(np.array_equal(reference, value, equal_nan=True) for value in values[1:]):
+            raise ValueError(f"seed-independent cache array differs: {key}")
+        merged[key] = reference.copy()
+
+    if "full_predictions_by_seed" in merged:
+        predictions = merged["full_predictions_by_seed"]
+        merged["full_predictions_mean"] = np.mean(predictions, axis=0)
+        merged["full_algorithmic_prediction_std"] = np.std(
+            predictions,
+            axis=0,
+            ddof=1 if len(seeds) > 1 else 0,
+        )
+        raw, nmse = _metric_arrays(
+            merged["full_predictions_mean"],
+            merged["targets"],
+            merged["base_mse"],
+            merged["demo_counts"],
+        )
+        merged["full_raw_mse"] = raw.astype(np.float32)
+        merged["full_nmse"] = nmse.astype(np.float32)
+
+    reference_identity["settings"]["smc_seeds"] = merged["smc_seeds"].tolist()
+    if output_path is None:
+        suite_stem = cache_paths[0].stem.rsplit("-", maxsplit=1)[0]
+        output_path = cache_paths[0].parent / (
+            f"{suite_stem}-{identity_hash(reference_identity)[:16]}.npz"
+        )
+    if output_path.exists() or cache_metadata_path(output_path).exists():
+        load_cache(output_path, expected_identity=reference_identity)
+        return output_path
+    write_cache(
+        output_path,
+        merged,
+        reference_identity,
+        feature_bank_hash=reference_feature_hash,
+    )
+    return output_path
 
 
 def generate_or_reuse_cache(

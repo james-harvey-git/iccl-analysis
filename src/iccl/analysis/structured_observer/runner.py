@@ -328,6 +328,7 @@ def compute_structured_observers(
     counts = arrays["demo_counts"]
     base_mse = suite["base_mse"][:num_sequences]
     arrays["targets"] = targets
+    arrays["base_mse"] = base_mse.astype(np.float32, copy=True)
     if "current_task" in modes:
         raw, nmse = _metric_arrays(
             arrays["current_task_predictions"], targets, base_mse, counts

@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ from iccl.analysis.structured_observer.cache import (
     cache_identity,
     default_cache_path,
     load_cache,
+    merge_seed_caches,
     structured_suite_spec,
     write_cache,
 )
@@ -82,3 +84,51 @@ def test_cache_round_trip_and_identity_validation(tmp_path: Path) -> None:
     stale["schema_version"] = 999
     with pytest.raises(ValueError, match="stale"):
         load_cache(cache_path, expected_identity=stale)
+
+
+def test_disjoint_seed_caches_merge_into_monolithic_seed_axis(tmp_path: Path) -> None:
+    suite_path = tmp_path / "in_dist.npz"
+    metadata_path = tmp_path / "in_dist.meta.json"
+    np.savez_compressed(suite_path, placeholder=np.array([1]))
+    metadata_path.write_text(json.dumps(_metadata()))
+    base_identity = cache_identity(suite_path, metadata_path, _metadata(), _settings())
+    cache_paths = []
+    for seed, value in [(1, 1.0), (0, 0.0)]:
+        identity = deepcopy(base_identity)
+        identity["settings"]["smc_seeds"] = [seed]
+        predictions = np.full((1, 1, 1, 2, 1), value, dtype=np.float32)
+        arrays = {
+            "sequence_indices": np.array([0], dtype=np.int32),
+            "task_positions": np.array([1], dtype=np.int16),
+            "demo_counts": np.array([[2]], dtype=np.int64),
+            "smc_seeds": np.array([seed], dtype=np.int64),
+            "targets": np.zeros((1, 1, 2, 1), dtype=np.float32),
+            "base_mse": np.ones((1, 1, 1), dtype=np.float32),
+            "full_predictions_by_seed": predictions,
+            "full_raw_mse_by_seed": np.full(
+                (1, 1, 1, 2), value**2, dtype=np.float32
+            ),
+            "full_nmse_by_seed": np.full(
+                (1, 1, 1, 2), value**2, dtype=np.float32
+            ),
+            "full_predictions_mean": predictions[0],
+            "full_algorithmic_prediction_std": np.zeros_like(predictions[0]),
+            "full_raw_mse": np.full((1, 1, 2), value**2, dtype=np.float32),
+            "full_nmse": np.full((1, 1, 2), value**2, dtype=np.float32),
+        }
+        path = tmp_path / f"seed-{seed}.npz"
+        write_cache(path, arrays, identity, feature_bank_hash="same-bank")
+        cache_paths.append(path)
+
+    output_path = tmp_path / "merged.npz"
+    merged_path = merge_seed_caches(cache_paths, output_path)
+    arrays, metadata = load_cache(merged_path)
+    assert np.array_equal(arrays["smc_seeds"], [0, 1])
+    assert np.array_equal(
+        arrays["full_predictions_by_seed"][:, 0, 0, 0, 0],
+        [0.0, 1.0],
+    )
+    assert np.allclose(arrays["full_predictions_mean"], 0.5)
+    assert np.allclose(arrays["full_raw_mse"], 0.25)
+    assert np.allclose(arrays["full_nmse"], 0.25)
+    assert metadata["identity"]["settings"]["smc_seeds"] == [0, 1]

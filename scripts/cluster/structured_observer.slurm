@@ -3,6 +3,8 @@
 #
 # Usage:
 #   sbatch scripts/cluster/structured_observer.slurm [hydra-overrides...]
+# For the default three-seed run, prefer structured_observer_seed_array.slurm
+# so each seed is independently resumable and uses its own GPU.
 #
 # Default: 256 in-distribution sequences, 2048 prior-matched random features,
 # 1024 particles, and SMC seeds 0/1/2. The job writes only local cache files;
