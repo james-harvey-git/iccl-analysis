@@ -17,30 +17,12 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
+from iccl.analysis.checkpoints import WANDB_SCHEME, resolve_checkpoint_path
 from iccl.models.model import model_from_config
 from iccl.training.logger import RunLogger, source_from_checkpoint
 from iccl.training.metrics import evaluate_suites, load_eval_suites
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
-
-WANDB_SCHEME = "wandb://"
-
-
-def download_artifact(reference: str) -> Path:
-    """The single checkpoint inside a ``wandb://entity/project/name:alias``
-    artifact. An explicit scheme rather than pattern-matching, so a local path is
-    never mistaken for an artifact reference."""
-    import wandb
-
-    artifact = wandb.Api().artifact(reference.removeprefix(WANDB_SCHEME), type="model")
-    checkpoints = sorted(Path(artifact.download()).glob("*.pt"))
-    if len(checkpoints) != 1:
-        names = ", ".join(path.name for path in checkpoints) or "none"
-        raise ValueError(
-            f"{reference} holds {len(checkpoints)} checkpoints ({names}); a promoted "
-            "series has many, so download it and pass the path of the one to score"
-        )
-    return checkpoints[0]
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
@@ -53,8 +35,7 @@ def main(cfg: DictConfig) -> None:
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
     reference = str(cfg.training.resume)
-    is_artifact = reference.startswith(WANDB_SCHEME)
-    path = download_artifact(reference) if is_artifact else Path(reference)
+    path, is_artifact = resolve_checkpoint_path(reference)
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     model = model_from_config(cfg).to(device)
     model.load_state_dict(checkpoint["model"])

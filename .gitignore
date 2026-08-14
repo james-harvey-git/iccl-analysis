@@ -38,9 +38,11 @@ checkpoints/
 .vscode/
 .idea/
 
-# Claude Code
+# Local agent configuration
 CLAUDE.md
-.claude/settings.local.json
+AGENTS.md
+.claude/
+.agents/
 
 # Scratchpad
 Useful_CLI_Commands.txt

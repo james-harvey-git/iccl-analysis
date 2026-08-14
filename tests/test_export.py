@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.export import export_eval_sets, load_suite
+from iccl.data.export import (
+    export_eval_sets,
+    load_suite,
+    load_suite_metadata,
+    suite_paths,
+)
 
 SHARED_SUITES = [
     "in_dist",
@@ -91,3 +96,33 @@ def test_shared_control_meta_records_its_distance_to_the_revisited_task(tmp_path
     meta = json.loads((tmp_path / "retention_control_shared.meta.json").read_text())
     distances = meta["latent_distance_to_revisited"]
     assert 0.0 < distances["min"] <= distances["mean"]
+
+
+def test_suite_paths_resolve_default_and_explicit_suites(tmp_path: Path) -> None:
+    suite_path = tmp_path / "in_dist.npz"
+    metadata_path = tmp_path / "in_dist.meta.json"
+    suite_path.write_bytes(b"arrays")
+    metadata_path.write_text('{"suite": "in_dist"}')
+
+    assert suite_paths(tmp_path, "in_dist") == (suite_path, metadata_path)
+    assert suite_paths(tmp_path / "unused", "unused", tmp_path / "in_dist") == (
+        suite_path,
+        metadata_path,
+    )
+    assert load_suite_metadata(metadata_path) == {"suite": "in_dist"}
+
+
+def test_suite_paths_report_missing_array_and_metadata_files(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="frozen suite not found"):
+        suite_paths(tmp_path, "in_dist")
+
+    (tmp_path / "in_dist.npz").write_bytes(b"arrays")
+    with pytest.raises(FileNotFoundError, match="frozen suite metadata not found"):
+        suite_paths(tmp_path, "in_dist")
+
+
+def test_load_suite_metadata_requires_a_json_object(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "in_dist.meta.json"
+    metadata_path.write_text("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        load_suite_metadata(metadata_path)

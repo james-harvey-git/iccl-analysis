@@ -180,6 +180,30 @@ def load_suite(path: Path) -> dict[str, np.ndarray]:
         return dict(data)
 
 
+def suite_paths(
+    eval_dir: Path,
+    suite_name: str,
+    explicit_path: str | Path | None = None,
+) -> tuple[Path, Path]:
+    """Resolve and validate the array and metadata paths for one frozen suite."""
+    suite_path = Path(explicit_path) if explicit_path is not None else eval_dir / suite_name
+    suite_path = suite_path.with_suffix(".npz")
+    metadata_path = suite_path.with_suffix(".meta.json")
+    if not suite_path.exists():
+        raise FileNotFoundError(f"frozen suite not found: {suite_path}")
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"frozen suite metadata not found: {metadata_path}")
+    return suite_path, metadata_path
+
+
+def load_suite_metadata(path: Path) -> dict[str, Any]:
+    """Load a frozen suite's JSON-object metadata sidecar."""
+    metadata = json.loads(path.read_text())
+    if not isinstance(metadata, dict):
+        raise ValueError(f"suite metadata must be a JSON object: {path}")
+    return metadata
+
+
 def _git_commit() -> str:
     try:
         return subprocess.run(
