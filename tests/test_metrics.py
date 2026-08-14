@@ -18,6 +18,7 @@ from iccl.data.sequences import (
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 from iccl.models.model import GDNModel
 from iccl.training.metrics import (
+    demo_mse,
     demo_nmse,
     evaluate_suites,
     load_eval_suites,
@@ -74,12 +75,41 @@ def test_demo_nmse_hand_built() -> None:
         "demo_counts": np.array([[2, 2]]),
         "base_mse": np.array([[[2.0, 2.0], [1.0, 3.0]]]),  # per-task means 2, 2
     }
+    mse = demo_mse(preds, suite)
     nmse = demo_nmse(preds, suite)
+    np.testing.assert_allclose(mse, [[[1.0, 2.0], [0.0, 4.0]]])
     np.testing.assert_allclose(nmse, [[[0.5, 1.0], [0.0, 2.0]]])
     scalars = suite_scalars(nmse, suite["demo_counts"])
     assert scalars["nmse_first_demo"] == pytest.approx(0.25)
     assert scalars["nmse_last_demo"] == pytest.approx(1.5)
     assert scalars["nmse_mean"] == pytest.approx(0.875)
+
+
+def test_demo_errors_nan_pad_variable_demo_counts() -> None:
+    targets = np.zeros((2, 8, 2), dtype=np.float32)
+    preds = np.zeros_like(targets)
+    counts = np.array([[2, 1], [1, 2]])
+    spans = np.array([[[1, 5], [6, 8]], [[1, 3], [4, 8]]])
+    for sequence, position, error in (
+        (0, 1, 1.0),
+        (0, 3, 2.0),
+        (0, 6, 4.0),
+        (1, 1, 9.0),
+        (1, 4, 16.0),
+        (1, 6, 25.0),
+    ):
+        preds[sequence, position] = np.sqrt(error)
+    suite = {
+        "targets": targets,
+        "task_spans": spans,
+        "demo_counts": counts,
+        "base_mse": np.full((2, 2, 2), 2.0),
+    }
+
+    mse = demo_mse(preds, suite)
+    expected = np.array([[[1.0, 2.0], [4.0, np.nan]], [[9.0, np.nan], [16.0, 25.0]]])
+    np.testing.assert_allclose(mse, expected, equal_nan=True)
+    np.testing.assert_allclose(demo_nmse(preds, suite), expected / 2.0, equal_nan=True)
 
 
 def test_predicting_the_mean_scores_unit_nmse(family: HyperTeacher) -> None:
