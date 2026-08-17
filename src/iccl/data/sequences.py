@@ -542,6 +542,8 @@ def build_sequence(
     include_world: bool = False,
     world: ModulePool | None = None,
     fixed_final_latent: np.ndarray | None = None,
+    fixed_curriculum_latents: np.ndarray | None = None,
+    fixed_demo_counts: tuple[int, ...] | None = None,
 ) -> SequenceSample:
     """Build one ICCL sequence.
 
@@ -555,7 +557,26 @@ def build_sequence(
     assert_feasible(cfg, family.cfg.num_modules)
     pool = world if world is not None else sample_module_pool(family.cfg, rng)
 
-    if history:
+    if fixed_curriculum_latents is not None:
+        if not history:
+            raise ValueError("fixed_curriculum_latents requires history=True")
+        curriculum_latents = fixed_curriculum_latents.astype(np.float32)
+        if curriculum_latents.ndim != 2 or curriculum_latents.shape[1] != family.cfg.num_modules:
+            raise ValueError(
+                "fixed_curriculum_latents must have shape [tasks, num_modules], got "
+                f"{curriculum_latents.shape} for M={family.cfg.num_modules}"
+            )
+        num_tasks = len(curriculum_latents)
+        curriculum = CurriculumSample(
+            latents=curriculum_latents,
+            task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+            pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
+            generation_categories=_task_categories(curriculum_latents),
+            presentation_categories=_task_categories(curriculum_latents),
+            generation_attempts=0,
+            num_surplus_tasks=max(0, num_tasks - (family.cfg.num_modules - 1)),
+        )
+    elif history:
         curriculum = _sample_curriculum_latents(family, cfg, rng)
         curriculum_latents = curriculum.latents
     else:
@@ -600,7 +621,17 @@ def build_sequence(
         int(category) for category in presentation_categories[len(generation_categories) :]
     )
 
-    demo_counts = _curriculum_demo_counts(cfg, len(curriculum_latents), rng)
+    if fixed_demo_counts is None:
+        demo_counts = _curriculum_demo_counts(cfg, len(curriculum_latents), rng)
+    else:
+        if len(fixed_demo_counts) != len(curriculum_latents):
+            raise ValueError(
+                "fixed_demo_counts must match the curriculum task count, got "
+                f"{len(fixed_demo_counts)} counts for {len(curriculum_latents)} tasks"
+            )
+        if any(count < 1 for count in fixed_demo_counts):
+            raise ValueError(f"fixed_demo_counts must all be >=1, got {fixed_demo_counts}")
+        demo_counts = list(fixed_demo_counts)
     if final_task is not None or fixed_final_latent is not None:
         if final_task is None:
             raise ValueError("fixed_final_latent requires final_task metadata")
@@ -818,3 +849,224 @@ def build_paired_control(
         fixed_final_latent=sequence.info["latents"][-1],
     )
     return control
+
+
+def _composition_latents(
+    family: HyperTeacher,
+    rng: np.random.Generator,
+    *,
+    num_tasks: int,
+    constituent_task_exposures: int,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+    """History exposing two target modules separately but never jointly."""
+    num_modules = family.cfg.num_modules
+    if num_modules < 4:
+        raise ValueError(f"matched-prefix composition requires M>=4, got M={num_modules}")
+    if constituent_task_exposures < 1:
+        raise ValueError(
+            "constituent_task_exposures must be positive, got "
+            f"{constituent_task_exposures}"
+        )
+    minimum_tasks = num_modules - 1 + 2 * (constituent_task_exposures - 1)
+    if num_tasks < minimum_tasks:
+        raise ValueError(
+            "composition cell cannot meet connected coverage and constituent exposures: "
+            f"M={num_modules}, T={num_tasks}, exposures={constituent_task_exposures}, "
+            f"need T>={minimum_tasks}"
+        )
+
+    target_values = sorted(
+        int(value) for value in rng.choice(num_modules, size=2, replace=False)
+    )
+    target = (target_values[0], target_values[1])
+    remaining = np.array([m for m in range(num_modules) if m not in target], dtype=np.int64)
+    local_prufer = (
+        rng.integers(0, len(remaining), size=len(remaining) - 2, dtype=np.int64)
+        if len(remaining) > 2
+        else np.empty(0, dtype=np.int64)
+    )
+    edges = [
+        (int(remaining[a]), int(remaining[b]))
+        for a, b in _decode_prufer(local_prufer, len(remaining))
+    ]
+    edges.extend(
+        [
+            (target[0], int(remaining[int(rng.integers(len(remaining)))])),
+            (target[1], int(remaining[int(rng.integers(len(remaining)))])),
+        ]
+    )
+    for module in target:
+        for _ in range(constituent_task_exposures - 1):
+            edges.append((module, int(remaining[int(rng.integers(len(remaining)))])))
+    while len(edges) < num_tasks:
+        chosen = rng.choice(remaining, size=2, replace=False)
+        edges.append((int(chosen[0]), int(chosen[1])))
+
+    history = np.stack([_weighted_edge(family, edge, rng) for edge in edges])
+    history = history[rng.permutation(len(history))]
+    final_latent = _weighted_edge(family, target, rng)
+    return history, final_latent, target
+
+
+def _refresh_latent_metadata(info: dict[str, Any], latents: np.ndarray) -> None:
+    """Refresh order-dependent metadata after replacing task latents."""
+    info["presentation_category"] = _task_categories(latents)
+    info["generation_category"] = info["presentation_category"].copy()
+    unique_supports = np.zeros(len(latents), dtype=np.int64)
+    modules_covered = np.zeros(len(latents), dtype=np.int64)
+    seen: set[tuple[int, ...]] = set()
+    covered: set[int] = set()
+    for i, latent in enumerate(latents):
+        unique_supports[i] = len(seen)
+        modules_covered[i] = len(covered)
+        support = tuple(int(m) for m in np.flatnonzero(latent))
+        seen.add(support)
+        covered.update(support)
+    info["num_unique_supports_seen"] = unique_supports
+    info["num_modules_covered"] = modules_covered
+
+
+def _replace_history_latents(
+    family: HyperTeacher,
+    sequence: SequenceSample,
+    replacements: np.ndarray,
+) -> SequenceSample:
+    """Replace a sequence's history tasks while preserving every input position."""
+    if "world" not in sequence.info:
+        raise ValueError("history replacement requires the sequence to carry its world")
+    curriculum = int(sequence.info["num_curriculum_tasks"])
+    if replacements.shape != sequence.info["latents"][:curriculum].shape:
+        raise ValueError(
+            f"history replacements have shape {replacements.shape}, expected "
+            f"{sequence.info['latents'][:curriculum].shape}"
+        )
+
+    tokens = sequence.tokens.copy()
+    targets = sequence.targets.copy()
+    info = dict(sequence.info)
+    latents = sequence.info["latents"].copy()
+    latents[:curriculum] = replacements
+    base_mse = sequence.info["base_mse"].copy()
+    for task in range(curriculum):
+        start, _ = sequence.info["task_spans"][task]
+        count = int(sequence.info["demo_counts"][task])
+        x_positions = start + 2 * np.arange(count)
+        x = sequence.tokens[x_positions, : family.cfg.input_dim]
+        y = teacher_forward(sequence.info["world"], replacements[task], x)
+        tokens[x_positions + 1, : family.cfg.output_dim] = y
+        targets[x_positions] = y
+        base_mse[task] = ((y - y.mean(axis=0)) ** 2).mean(axis=0)
+    info["latents"] = latents
+    info["base_mse"] = base_mse
+    _refresh_latent_metadata(info, latents)
+    return SequenceSample(
+        tokens=tokens,
+        token_type=sequence.token_type.copy(),
+        targets=targets,
+        loss_mask=sequence.loss_mask.copy(),
+        info=info,
+    )
+
+
+def build_no_history_control(sequence: SequenceSample) -> SequenceSample:
+    """Exact final-block control with the history prefix removed."""
+    if "world" not in sequence.info:
+        raise ValueError("no-history control requires the sequence to carry its world")
+    final_task = len(sequence.info["latents"]) - 1
+    if final_task < int(sequence.info["num_curriculum_tasks"]):
+        raise ValueError("no-history control requires a final task after the curriculum")
+    boundaries = sequence.info["boundaries"]
+    start = int(boundaries[-1]) if len(boundaries) else int(sequence.info["task_spans"][-1, 0])
+    offset = 1 if len(boundaries) else 0
+    tokens = sequence.tokens[start:].copy()
+    token_type = sequence.token_type[start:].copy()
+    targets = sequence.targets[start:].copy()
+    loss_mask = sequence.loss_mask[start:].copy()
+    count = int(sequence.info["demo_counts"][-1])
+    info: dict[str, Any] = {
+        "latents": sequence.info["latents"][-1:].copy(),
+        "demo_counts": np.array([count], dtype=np.int64),
+        "boundaries": np.array([0], dtype=np.int64) if offset else np.empty(0, dtype=np.int64),
+        "task_spans": np.array([[offset, len(tokens)]], dtype=np.int64),
+        "base_mse": sequence.info["base_mse"][-1:].copy(),
+        "num_curriculum_tasks": 0,
+        "num_modules": sequence.info["num_modules"],
+        "num_surplus_tasks": 0,
+        "num_prediction_tokens": count,
+        "serialized_length": len(tokens),
+        "curriculum_sampler": sequence.info["curriculum_sampler"],
+        "generation_attempts": 0,
+        "task_origin": np.array([TASK_ORIGIN_CODES["final"]], dtype=np.int8),
+        "pre_shuffle_index": np.array([0], dtype=np.int64),
+        "generation_category": np.array([TASK_CATEGORY_CODES["first"]], dtype=np.int8),
+        "presentation_category": np.array([TASK_CATEGORY_CODES["first"]], dtype=np.int8),
+        "history_prediction_tokens": np.array([0], dtype=np.int64),
+        "history_serialized_tokens": np.array([0], dtype=np.int64),
+        "target_first_prediction_index": np.array([offset], dtype=np.int64),
+        "num_unique_supports_seen": np.array([0], dtype=np.int64),
+        "num_modules_covered": np.array([0], dtype=np.int64),
+        "world": sequence.info["world"],
+    }
+    return SequenceSample(tokens, token_type, targets, loss_mask, info)
+
+
+def build_paired_composition_controls(
+    family: HyperTeacher,
+    cfg: SequenceConfig,
+    rng: np.random.Generator,
+    *,
+    target_demos: int,
+    constituent_task_exposures: int,
+    fixed_demo_counts: tuple[int, ...],
+) -> tuple[SequenceSample, SequenceSample, SequenceSample]:
+    """Constituent history, target-free matched prefix, and no-history control."""
+    history, final_latent, target = _composition_latents(
+        family,
+        rng,
+        num_tasks=len(fixed_demo_counts),
+        constituent_task_exposures=constituent_task_exposures,
+    )
+    pool = sample_module_pool(family.cfg, rng)
+    final = FinalTaskConfig(mode="composite", hotness=2, num_demos=target_demos)
+    constituent = build_sequence(
+        family,
+        cfg,
+        rng,
+        final_task=final,
+        include_world=True,
+        world=pool,
+        fixed_final_latent=final_latent,
+        fixed_curriculum_latents=history,
+        fixed_demo_counts=fixed_demo_counts,
+    )
+
+    allowed = np.array([m for m in range(family.cfg.num_modules) if m not in target])
+    replacements = history.copy()
+    for i, latent in enumerate(history):
+        if any(latent[module] != 0 for module in target):
+            chosen = rng.choice(allowed, size=2, replace=False)
+            replacements[i] = _weighted_edge(
+                family, (int(chosen[0]), int(chosen[1])), rng
+            )
+    matched = _replace_history_latents(family, constituent, replacements)
+    no_history = build_no_history_control(constituent)
+
+    for sample in (constituent, matched, no_history):
+        sample.info["target_support"] = np.array(target, dtype=np.int64)
+    for sample in (constituent, matched):
+        prefix = sample.info["latents"][: int(sample.info["num_curriculum_tasks"])]
+        supports = prefix != 0
+        task_exposure = np.array([supports[:, module].sum() for module in target], dtype=np.int64)
+        demo_counts = sample.info["demo_counts"][: len(prefix)]
+        demo_exposure = np.array(
+            [(demo_counts * supports[:, module]).sum() for module in target], dtype=np.int64
+        )
+        sample.info["constituent_task_exposures"] = task_exposure
+        sample.info["constituent_demo_exposures"] = demo_exposure
+        sample.info["prior_target_support_count"] = int(
+            sum(tuple(np.flatnonzero(latent)) == tuple(sorted(target)) for latent in prefix)
+        )
+    no_history.info["constituent_task_exposures"] = np.zeros(2, dtype=np.int64)
+    no_history.info["constituent_demo_exposures"] = np.zeros(2, dtype=np.int64)
+    no_history.info["prior_target_support_count"] = 0
+    return constituent, matched, no_history

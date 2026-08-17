@@ -17,6 +17,7 @@ from iccl.data.sequences import (
     SequenceConfig,
     _decode_prufer,
     assert_feasible,
+    build_paired_composition_controls,
     build_paired_control,
     build_paired_retention_control,
     build_sequence,
@@ -366,3 +367,44 @@ def test_variable_world_validation_reports_conflicting_and_impossible_specs() ->
             make_seq_cfg(phases=(), surplus_tasks=0, require_full_rank=True),
             num_modules=8,
         )
+
+
+def test_paired_composition_controls_match_prefix_shape_and_final_block() -> None:
+    family = make_family(num_modules=6)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+    demos = (3,) * 6
+    constituent, matched, no_history = build_paired_composition_controls(
+        family,
+        cfg,
+        sequence_rng(17, 2),
+        target_demos=4,
+        constituent_task_exposures=1,
+        fixed_demo_counts=demos,
+    )
+
+    np.testing.assert_array_equal(constituent.info["constituent_task_exposures"], [1, 1])
+    np.testing.assert_array_equal(matched.info["constituent_task_exposures"], [0, 0])
+    assert constituent.info["prior_target_support_count"] == 0
+    assert matched.info["prior_target_support_count"] == 0
+    for key in ("demo_counts", "boundaries", "task_spans", "history_prediction_tokens"):
+        np.testing.assert_array_equal(constituent.info[key], matched.info[key])
+
+    curriculum = constituent.info["num_curriculum_tasks"]
+    for task in range(curriculum):
+        start, _ = constituent.info["task_spans"][task]
+        count = constituent.info["demo_counts"][task]
+        x_positions = start + 2 * np.arange(count)
+        np.testing.assert_array_equal(
+            constituent.tokens[x_positions], matched.tokens[x_positions]
+        )
+
+    final_boundary = constituent.info["boundaries"][-1]
+    np.testing.assert_array_equal(
+        constituent.tokens[final_boundary:], matched.tokens[final_boundary:]
+    )
+    np.testing.assert_array_equal(
+        constituent.targets[final_boundary:], matched.targets[final_boundary:]
+    )
+    np.testing.assert_array_equal(constituent.tokens[final_boundary:], no_history.tokens)
+    np.testing.assert_array_equal(constituent.targets[final_boundary:], no_history.targets)
+    assert no_history.info["num_curriculum_tasks"] == 0
