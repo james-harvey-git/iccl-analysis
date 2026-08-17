@@ -1,33 +1,92 @@
-# Task-family parameters follow the source HyperTeacher semantics
-# (smonsays/scale-compositionality); pilot values per the dataset spec (#1).
+# Variable-world HyperTeacher curriculum. Use `data=hyperteacher_legacy` for the
+# fixed M=8, T=8, D=32 stream and fixed-world frozen suites.
 name: hyperteacher
 
 input_dim: 16
 output_dim: 16
 hidden_dims: [16]
 use_bias: true
-num_modules: 8
+num_modules:
+  min: 4
+  max: 12
+  held_out: [6, 10]
 scale: 1.7320508075688772  # sqrt(3)
 weighting: discrete        # binary | discrete | continuous
 
 sequence:
-  phases:
-    - {num_tasks: 8, hotness: [2, 2]}
-  demos_per_task: 32       # int, or [lo, hi] range (required for the unsignalled ablation)
+  curriculum_sampler: constructive  # constructive | rejection
+  hotness: 2
+  surplus_tasks: 1          # int or inclusive [lo, hi]
+  demos_per_task:
+    min: 24
+    max: 40
+    scope: per_task         # per_sequence | per_task
   signal_boundaries: true
   require_identifiable: true
   require_full_rank: false
-  task_graph: random       # random | chain | ring | star (structured families are 2-hot only)
-  graph_ordered: false     # structured families only: present e.g. a chain in path order
 
 eval_sets:
   num_sequences: 256
   out_dir: data/eval_sets
-  composite:
-    hotness: 2
-    num_demos: 8
-  structural_graphs: [chain, ring, star]
-  retention:
-    revisit_demos: 16
-    controls: [novel, shared]  # position-matched baselines; shared needs a non-binary weighting
+  module_counts:
+    seen_selection: endpoints_and_canonical
+    canonical_seen: 8
+    ood: [13, 16]
 
+  capabilities:
+    enabled: [icl, composition, retention]
+    composition:
+      target_demos: 16
+      constituent_task_exposures: 1
+      controls: [matched_prefix, no_history]
+    retention:
+      revisit_demos: 16
+      controls: [novel, shared]
+
+  structural_slices:
+    enabled:
+      - fixed_surplus
+      - matched_task_count
+      - matched_prediction_tokens
+      - task_count
+      - history_demos
+      - matched_serialized_prefix
+      - demo_allocation
+
+    fixed_surplus:
+      surplus_tasks: 1
+      history_demos_per_task: 32
+
+    matched_task_count:
+      task_count: 15
+      history_demos_per_task: 32
+
+    matched_prediction_tokens:
+      prediction_tokens: 480
+      surplus_tasks: 1
+
+    task_count:
+      module_count: 8
+      values: [7, 8, 10, 12, 15]
+      history_demos_per_task: 32
+
+    history_demos:
+      module_count: 8
+      task_count: 8
+      values: [8, 16, 32, 64]
+
+    matched_serialized_prefix:
+      module_count: 8
+      serialized_tokens: 520
+      task_counts: [8, 10, 12]
+
+    demo_allocation:
+      module_count: 8
+      task_count: 8
+      prediction_tokens: 256
+      patterns: [uniform, alternating, front_loaded, back_loaded]
+
+distribution_diagnostic:
+  num_sequences: 10000
+  bootstrap_seed: 0
+  bootstrap_replicates: 1000

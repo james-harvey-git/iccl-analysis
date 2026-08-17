@@ -25,6 +25,27 @@ TOKEN_Y = 1
 TOKEN_BOUNDARY = 2
 TOKEN_PAD = 3
 
+TASK_ORIGIN_CODES = {
+    "legacy": 0,
+    "backbone": 1,
+    "surplus": 2,
+    "final": 3,
+    "revisit": 4,
+}
+
+TASK_CATEGORY_CODES = {
+    "first": 0,
+    "novel_support": 1,
+    "seen_support_new_weights": 2,
+    "exact_repeat": 3,
+}
+
+CURRICULUM_SAMPLER_CODES = {
+    "rejection": 0,
+    "constructive": 1,
+    "structured": 2,
+}
+
 
 @dataclass(frozen=True)
 class PhaseConfig:
@@ -47,6 +68,24 @@ class FinalTaskConfig:
 
 
 @dataclass(frozen=True)
+class DemoCountConfig:
+    """Inclusive demonstration-count distribution.
+
+    ``per_sequence`` draws one count for the curriculum; ``per_task`` draws
+    independently for each curriculum task. Equal bounds are a fixed value and
+    deliberately consume no random number.
+    """
+
+    min: int
+    max: int
+    scope: str
+
+
+DemoCountSpec = int | tuple[int, int] | DemoCountConfig
+SurplusTaskSpec = int | tuple[int, int]
+
+
+@dataclass(frozen=True)
 class SequenceConfig:
     """``task_graph`` selects the overlap-graph family of the curriculum's task
     set: "random" draws tasks i.i.d. per phase (rejection-sampled for
@@ -57,12 +96,15 @@ class SequenceConfig:
     otherwise task order is shuffled."""
 
     phases: tuple[PhaseConfig, ...]
-    demos_per_task: int | tuple[int, int]
+    demos_per_task: DemoCountSpec
     signal_boundaries: bool
     require_identifiable: bool
     require_full_rank: bool = False
     task_graph: str = "random"
     graph_ordered: bool = False
+    curriculum_sampler: str = "rejection"
+    hotness: int = 2
+    surplus_tasks: SurplusTaskSpec | None = None
 
 
 @dataclass
@@ -72,6 +114,19 @@ class SequenceSample:
     targets: np.ndarray  # [seq_len, output_dim] float32, nonzero at x-positions
     loss_mask: np.ndarray  # [seq_len] float32, 1 at x-positions
     info: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CurriculumSample:
+    """Sampled curriculum plus its construction provenance."""
+
+    latents: np.ndarray
+    task_origins: np.ndarray
+    pre_shuffle_indices: np.ndarray
+    generation_categories: np.ndarray
+    presentation_categories: np.ndarray
+    generation_attempts: int
+    num_surplus_tasks: int
 
 
 def check_compositional(supports: np.ndarray, num_modules: int) -> bool:
@@ -99,6 +154,69 @@ def check_full_rank(latents: np.ndarray) -> bool:
     return int(np.linalg.matrix_rank(latents[:, used])) == int(used.sum())
 
 
+def _inclusive_draw(
+    spec: int | tuple[int, int], rng: np.random.Generator, *, name: str
+) -> int:
+    """Draw from an inclusive integer range, preserving fixed-value RNG streams."""
+    if isinstance(spec, int):
+        value = spec
+    else:
+        lo, hi = spec
+        if lo > hi:
+            raise ValueError(f"{name} requires min <= max, got [{lo}, {hi}]")
+        value = lo if lo == hi else int(rng.integers(lo, hi + 1))
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
+    return value
+
+
+def _task_categories(latents: np.ndarray) -> np.ndarray:
+    """Classify tasks relative to tasks preceding them in the supplied order."""
+    categories = np.empty(len(latents), dtype=np.int8)
+    seen: dict[tuple[int, ...], list[np.ndarray]] = {}
+    for i, latent in enumerate(latents):
+        support = tuple(int(m) for m in np.flatnonzero(latent))
+        previous = seen.get(support)
+        if i == 0:
+            category = "first"
+        elif previous is None:
+            category = "novel_support"
+        elif any(np.array_equal(latent, other) for other in previous):
+            category = "exact_repeat"
+        else:
+            category = "seen_support_new_weights"
+        categories[i] = TASK_CATEGORY_CODES[category]
+        seen.setdefault(support, []).append(latent)
+    return categories
+
+
+def _decode_prufer(sequence: np.ndarray, num_modules: int) -> list[tuple[int, int]]:
+    """Decode a Prüfer sequence into the corresponding labelled tree edges."""
+    if num_modules < 2:
+        raise ValueError(f"a 2-hot curriculum needs at least 2 modules, got {num_modules}")
+    degrees = np.ones(num_modules, dtype=np.int64)
+    for node in sequence:
+        degrees[int(node)] += 1
+    edges: list[tuple[int, int]] = []
+    for node_raw in sequence:
+        node = int(node_raw)
+        leaf = int(np.flatnonzero(degrees == 1)[0])
+        edges.append((leaf, node))
+        degrees[leaf] -= 1
+        degrees[node] -= 1
+    remaining = np.flatnonzero(degrees == 1)
+    edges.append((int(remaining[0]), int(remaining[1])))
+    return edges
+
+
+def _weighted_edge(
+    family: HyperTeacher, edge: tuple[int, int], rng: np.random.Generator
+) -> np.ndarray:
+    pattern = np.zeros(family.cfg.num_modules, dtype=np.int8)
+    pattern[list(edge)] = 1
+    return family.apply_weighting(rng, pattern)
+
+
 def _structured_base_size(task_graph: str, num_modules: int) -> int:
     """Number of edges in the family's covering skeleton."""
     match task_graph:
@@ -117,6 +235,30 @@ def assert_feasible(cfg: SequenceConfig, num_modules: int) -> None:
     tasks with hotness k_i covers at most 1 + sum(k_i - 1) modules. For
     structured graphs: every phase must be exactly 2-hot (tasks are edges) and
     there must be at least as many tasks as skeleton edges."""
+    if cfg.surplus_tasks is not None:
+        if cfg.phases:
+            raise ValueError("absolute phases and relative surplus_tasks are mutually exclusive")
+        if cfg.task_graph != "random":
+            raise ValueError("variable-world curricula use curriculum_sampler, not task_graph")
+        if cfg.curriculum_sampler not in {"constructive", "rejection"}:
+            raise ValueError(f"unknown curriculum_sampler: {cfg.curriculum_sampler}")
+        if cfg.hotness != 2:
+            raise ValueError(
+                f"variable-world curricula require exactly 2-hot tasks, got hotness={cfg.hotness}"
+            )
+        minimum_surplus = (
+            cfg.surplus_tasks
+            if isinstance(cfg.surplus_tasks, int)
+            else cfg.surplus_tasks[0]
+        )
+        if minimum_surplus < 0:
+            raise ValueError(f"surplus_tasks must be non-negative, got {minimum_surplus}")
+        if cfg.require_full_rank and minimum_surplus < 1:
+            raise ValueError(
+                f"full rank over M={num_modules} needs T>=M, so surplus_tasks must be >=1"
+            )
+        return
+
     num_tasks = sum(p.num_tasks for p in cfg.phases)
     if cfg.task_graph != "random":
         if any(p.hotness != (2, 2) for p in cfg.phases):
@@ -176,18 +318,120 @@ def _structured_latents(
     return np.stack(latents)
 
 
+def _constructive_curriculum(
+    family: HyperTeacher,
+    cfg: SequenceConfig,
+    rng: np.random.Generator,
+    num_surplus: int,
+    max_attempts: int,
+) -> CurriculumSample:
+    """Uniform labelled spanning-tree backbone plus unbiased ordinary surplus tasks."""
+    num_modules = family.cfg.num_modules
+    for attempt in range(1, max_attempts + 1):
+        prufer = (
+            rng.integers(0, num_modules, size=num_modules - 2, dtype=np.int64)
+            if num_modules > 2
+            else np.empty(0, dtype=np.int64)
+        )
+        edges = _decode_prufer(prufer, num_modules)
+        generated = [_weighted_edge(family, edge, rng) for edge in edges]
+        for _ in range(num_surplus):
+            pattern = family.sample_pattern(rng, cfg.hotness)
+            generated.append(family.apply_weighting(rng, pattern))
+        latents = np.stack(generated)
+        if cfg.require_full_rank and not check_full_rank(latents):
+            continue
+
+        origins = np.array(
+            [TASK_ORIGIN_CODES["backbone"]] * (num_modules - 1)
+            + [TASK_ORIGIN_CODES["surplus"]] * num_surplus,
+            dtype=np.int8,
+        )
+        generation_categories = _task_categories(latents)
+        order = rng.permutation(len(latents))
+        presented = latents[order]
+        return CurriculumSample(
+            latents=presented,
+            task_origins=origins[order],
+            pre_shuffle_indices=order.astype(np.int64),
+            generation_categories=generation_categories[order],
+            presentation_categories=_task_categories(presented),
+            generation_attempts=attempt,
+            num_surplus_tasks=num_surplus,
+        )
+    raise RuntimeError(
+        f"no full-rank constructive curriculum found in {max_attempts} attempts for "
+        f"M={num_modules}, S={num_surplus}, weighting={family.cfg.weighting}"
+    )
+
+
+def _rejection_curriculum(
+    family: HyperTeacher,
+    cfg: SequenceConfig,
+    rng: np.random.Generator,
+    num_surplus: int,
+    max_attempts: int,
+) -> CurriculumSample:
+    """I.i.d. ordinary tasks conditioned on the configured structural checks."""
+    num_tasks = family.cfg.num_modules - 1 + num_surplus
+    for attempt in range(1, max_attempts + 1):
+        latents = np.stack(
+            [
+                family.apply_weighting(rng, family.sample_pattern(rng, cfg.hotness))
+                for _ in range(num_tasks)
+            ]
+        )
+        if cfg.require_identifiable:
+            supports = latents > 0
+            if not check_compositional(supports, family.cfg.num_modules):
+                continue
+            if not check_connected(supports):
+                continue
+            if cfg.require_full_rank and not check_full_rank(latents):
+                continue
+        return CurriculumSample(
+            latents=latents,
+            task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+            pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
+            generation_categories=_task_categories(latents),
+            presentation_categories=_task_categories(latents),
+            generation_attempts=attempt,
+            num_surplus_tasks=num_surplus,
+        )
+    raise RuntimeError(
+        f"no identifiable task set found in {max_attempts} attempts for "
+        f"M={family.cfg.num_modules}, S={num_surplus}"
+    )
+
+
 def _sample_curriculum_latents(
     family: HyperTeacher,
     cfg: SequenceConfig,
     rng: np.random.Generator,
     max_attempts: int = 1000,
-) -> np.ndarray:
+) -> CurriculumSample:
     """Sample the phase tasks' latents [T, M]: constructively for structured
     graph families, otherwise i.i.d. with rejection-resampling until the
     identifiability checks pass (when required)."""
+    if cfg.surplus_tasks is not None:
+        num_surplus = _inclusive_draw(cfg.surplus_tasks, rng, name="surplus_tasks")
+        if cfg.curriculum_sampler == "constructive":
+            return _constructive_curriculum(family, cfg, rng, num_surplus, max_attempts)
+        return _rejection_curriculum(family, cfg, rng, num_surplus, max_attempts)
+
     if cfg.task_graph != "random":
-        return _structured_latents(family, cfg, rng)
-    for _ in range(max_attempts):
+        latents = _structured_latents(family, cfg, rng)
+        num_tasks = len(latents)
+        return CurriculumSample(
+            latents=latents,
+            task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+            pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
+            generation_categories=_task_categories(latents),
+            presentation_categories=_task_categories(latents),
+            generation_attempts=1,
+            num_surplus_tasks=0,
+        )
+    for attempt in range(1, max_attempts + 1):
         latents = []
         for phase in cfg.phases:
             lo, hi = phase.hotness
@@ -197,7 +441,16 @@ def _sample_curriculum_latents(
                 latents.append(family.apply_weighting(rng, pattern))
         stacked = np.stack(latents)
         if not cfg.require_identifiable:
-            return stacked
+            num_tasks = len(stacked)
+            return CurriculumSample(
+                latents=stacked,
+                task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+                pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
+                generation_categories=_task_categories(stacked),
+                presentation_categories=_task_categories(stacked),
+                generation_attempts=attempt,
+                num_surplus_tasks=0,
+            )
         supports = stacked > 0
         if not check_compositional(supports, family.cfg.num_modules):
             continue
@@ -205,7 +458,16 @@ def _sample_curriculum_latents(
             continue
         if cfg.require_full_rank and not check_full_rank(stacked):
             continue
-        return stacked
+        num_tasks = len(stacked)
+        return CurriculumSample(
+            latents=stacked,
+            task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+            pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
+            generation_categories=_task_categories(stacked),
+            presentation_categories=_task_categories(stacked),
+            generation_attempts=attempt,
+            num_surplus_tasks=0,
+        )
     raise RuntimeError(
         f"no identifiable task set found in {max_attempts} attempts; "
         f"the phase configuration is likely too tight for connected coverage"
@@ -242,11 +504,31 @@ def _sample_final_latent(
             raise ValueError(f"unknown final-task mode: {final.mode}")
 
 
-def _demo_count(cfg: SequenceConfig, rng: np.random.Generator) -> int:
-    if isinstance(cfg.demos_per_task, int):
-        return cfg.demos_per_task
-    lo, hi = cfg.demos_per_task
-    return int(rng.integers(lo, hi + 1))
+def _draw_demo_count(lo: int, hi: int, rng: np.random.Generator) -> int:
+    if lo < 1 or hi < lo:
+        raise ValueError(f"demos_per_task requires 1 <= min <= max, got [{lo}, {hi}]")
+    return lo if lo == hi else int(rng.integers(lo, hi + 1))
+
+
+def _curriculum_demo_counts(
+    cfg: SequenceConfig, num_tasks: int, rng: np.random.Generator
+) -> list[int]:
+    spec = cfg.demos_per_task
+    if isinstance(spec, int):
+        if spec < 1:
+            raise ValueError(f"demos_per_task must be >=1, got {spec}")
+        return [spec] * num_tasks
+    if isinstance(spec, tuple):
+        lo, hi = spec
+        return [_draw_demo_count(lo, hi, rng) for _ in range(num_tasks)]
+    if spec.scope == "per_sequence":
+        count = _draw_demo_count(spec.min, spec.max, rng)
+        return [count] * num_tasks
+    if spec.scope == "per_task":
+        return [_draw_demo_count(spec.min, spec.max, rng) for _ in range(num_tasks)]
+    raise ValueError(
+        f"demos_per_task.scope must be per_sequence or per_task, got {spec.scope!r}"
+    )
 
 
 def build_sequence(
@@ -274,34 +556,59 @@ def build_sequence(
     pool = world if world is not None else sample_module_pool(family.cfg, rng)
 
     if history:
-        curriculum_latents = _sample_curriculum_latents(family, cfg, rng)
+        curriculum = _sample_curriculum_latents(family, cfg, rng)
+        curriculum_latents = curriculum.latents
     else:
         if fixed_final_latent is None or world is None:
             raise ValueError("history=False requires fixed_final_latent and world")
         curriculum_latents = np.zeros((0, family.cfg.num_modules), dtype=np.float32)
+        curriculum = CurriculumSample(
+            latents=curriculum_latents,
+            task_origins=np.empty(0, dtype=np.int8),
+            pre_shuffle_indices=np.empty(0, dtype=np.int64),
+            generation_categories=np.empty(0, dtype=np.int8),
+            presentation_categories=np.empty(0, dtype=np.int8),
+            generation_attempts=0,
+            num_surplus_tasks=0,
+        )
 
     latents = [lat for lat in curriculum_latents]
+    task_origins = list(curriculum.task_origins)
+    pre_shuffle_indices = list(curriculum.pre_shuffle_indices)
+    generation_categories = list(curriculum.generation_categories)
     if final_task is not None:
         if fixed_final_latent is not None:
             latents.append(fixed_final_latent.astype(np.float32))
         else:
             latents.append(_sample_final_latent(family, final_task, curriculum_latents, rng))
+        task_origins.append(TASK_ORIGIN_CODES["final"])
+        pre_shuffle_indices.append(len(pre_shuffle_indices))
     elif fixed_final_latent is not None:
         latents.append(fixed_final_latent.astype(np.float32))
+        task_origins.append(TASK_ORIGIN_CODES["final"])
+        pre_shuffle_indices.append(len(pre_shuffle_indices))
     if revisit_demos > 0:
         if len(curriculum_latents) == 0:
             raise ValueError("revisit requires curriculum history")
         latents.append(curriculum_latents[0])
+        task_origins.append(TASK_ORIGIN_CODES["revisit"])
+        pre_shuffle_indices.append(len(pre_shuffle_indices))
 
-    demo_counts = []
-    for i in range(len(latents)):
-        is_revisit = revisit_demos > 0 and i == len(latents) - 1
-        if is_revisit:
-            demo_counts.append(revisit_demos)
-        elif final_task is not None and i == len(curriculum_latents):
-            demo_counts.append(final_task.num_demos)
-        else:
-            demo_counts.append(_demo_count(cfg, rng))
+    stacked_latents = np.stack(latents)
+    presentation_categories = _task_categories(stacked_latents)
+    generation_categories.extend(
+        int(category) for category in presentation_categories[len(generation_categories) :]
+    )
+
+    demo_counts = _curriculum_demo_counts(cfg, len(curriculum_latents), rng)
+    if final_task is not None or fixed_final_latent is not None:
+        if final_task is None:
+            raise ValueError("fixed_final_latent requires final_task metadata")
+        if final_task.num_demos < 1:
+            raise ValueError(f"final task needs at least one demo, got {final_task.num_demos}")
+        demo_counts.append(final_task.num_demos)
+    if revisit_demos > 0:
+        demo_counts.append(revisit_demos)
 
     token_dim = max(family.cfg.input_dim, family.cfg.output_dim)
     seq_len = sum(2 * n for n in demo_counts)
@@ -337,14 +644,61 @@ def build_sequence(
             pos += 1
         task_spans.append((start, pos))
 
+    history_prediction_tokens = np.zeros(len(latents), dtype=np.int64)
+    history_serialized_tokens = np.zeros(len(latents), dtype=np.int64)
+    unique_supports_seen = np.zeros(len(latents), dtype=np.int64)
+    modules_covered = np.zeros(len(latents), dtype=np.int64)
+    seen_supports: set[tuple[int, ...]] = set()
+    covered_modules: set[int] = set()
+    prediction_prefix = 0
+    serialized_prefix = 0
+    for i, (latent, count) in enumerate(zip(latents, demo_counts, strict=True)):
+        history_prediction_tokens[i] = prediction_prefix
+        history_serialized_tokens[i] = serialized_prefix
+        unique_supports_seen[i] = len(seen_supports)
+        modules_covered[i] = len(covered_modules)
+        support = tuple(int(m) for m in np.flatnonzero(latent))
+        seen_supports.add(support)
+        covered_modules.update(support)
+        prediction_prefix += count
+        serialized_prefix += 2 * count + int(cfg.signal_boundaries)
+
+    sampler_name = (
+        cfg.curriculum_sampler
+        if cfg.surplus_tasks is not None
+        else ("structured" if cfg.task_graph != "random" else "rejection")
+    )
     info: dict[str, Any] = {
-        "latents": np.stack(latents),
+        "latents": stacked_latents,
         "demo_counts": np.array(demo_counts, dtype=np.int64),
         "boundaries": np.array(boundaries, dtype=np.int64),
         "task_spans": np.array(task_spans, dtype=np.int64),
         "base_mse": np.stack(base_mse),
         "num_curriculum_tasks": len(curriculum_latents),
+        "num_modules": family.cfg.num_modules,
+        "num_surplus_tasks": curriculum.num_surplus_tasks,
+        "num_prediction_tokens": int(sum(demo_counts)),
+        "serialized_length": seq_len,
+        "curriculum_sampler": CURRICULUM_SAMPLER_CODES[sampler_name],
+        "generation_attempts": curriculum.generation_attempts,
+        "task_origin": np.array(task_origins, dtype=np.int8),
+        "pre_shuffle_index": np.array(pre_shuffle_indices, dtype=np.int64),
+        "generation_category": np.array(generation_categories, dtype=np.int8),
+        "presentation_category": presentation_categories,
+        "history_prediction_tokens": history_prediction_tokens,
+        "history_serialized_tokens": history_serialized_tokens,
+        "target_first_prediction_index": np.array(task_spans, dtype=np.int64)[:, 0],
+        "num_unique_supports_seen": unique_supports_seen,
+        "num_modules_covered": modules_covered,
     }
+    if revisit_demos > 0:
+        original_last_prediction = int(task_spans[0][0] + 2 * (demo_counts[0] - 1))
+        revisit_first_prediction = int(task_spans[-1][0])
+        info["intervening_tasks"] = len(curriculum_latents) - 1
+        info["prediction_token_delay"] = int(
+            history_prediction_tokens[-1] - demo_counts[0]
+        )
+        info["serialized_token_delay"] = revisit_first_prediction - original_last_prediction
     if include_world:
         info["world"] = pool
     return SequenceSample(

@@ -1,0 +1,33 @@
+# Fixed-world distribution for exact reproduction of the M=8, T=8, D=32
+# training stream, frozen suites, and golden regression fixtures.
+name: hyperteacher
+
+input_dim: 16
+output_dim: 16
+hidden_dims: [16]
+use_bias: true
+num_modules: 8
+scale: 1.7320508075688772  # sqrt(3)
+weighting: discrete        # binary | discrete | continuous
+
+sequence:
+  curriculum_sampler: rejection
+  phases:
+    - {num_tasks: 8, hotness: [2, 2]}
+  demos_per_task: 32
+  signal_boundaries: true
+  require_identifiable: true
+  require_full_rank: false
+  task_graph: random
+  graph_ordered: false
+
+eval_sets:
+  num_sequences: 256
+  out_dir: data/eval_sets
+  composite:
+    hotness: 2
+    num_demos: 8
+  structural_graphs: [chain, ring, star]
+  retention:
+    revisit_demos: 16
+    controls: [novel, shared]

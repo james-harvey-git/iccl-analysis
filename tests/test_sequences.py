@@ -1,4 +1,5 @@
 from dataclasses import replace
+from itertools import product
 from typing import Any
 
 import numpy as np
@@ -6,12 +7,15 @@ import pytest
 
 from iccl.data.dataset import sequence_rng
 from iccl.data.sequences import (
+    TASK_ORIGIN_CODES,
     TOKEN_BOUNDARY,
     TOKEN_X,
     TOKEN_Y,
+    DemoCountConfig,
     FinalTaskConfig,
     PhaseConfig,
     SequenceConfig,
+    _decode_prufer,
     assert_feasible,
     build_paired_control,
     build_paired_retention_control,
@@ -272,3 +276,93 @@ def test_structured_graph_validation() -> None:
     too_few = make_seq_cfg(phases=(PhaseConfig(num_tasks=5, hotness=(2, 2)),), task_graph="star")
     with pytest.raises(ValueError, match="needs >= 7 tasks"):
         build_sequence(family, too_few, sequence_rng(0, 0))
+
+
+def test_prufer_decoder_enumerates_every_labelled_tree_once() -> None:
+    trees = {
+        tuple(sorted(tuple(sorted(edge)) for edge in _decode_prufer(np.array(code), 4)))
+        for code in product(range(4), repeat=2)
+    }
+    assert len(trees) == 4 ** (4 - 2)
+
+
+@pytest.mark.parametrize("sampler", ["constructive", "rejection"])
+def test_variable_world_curricula_obey_connected_floor_and_provenance(sampler: str) -> None:
+    family = make_family(num_modules=6)
+    cfg = make_seq_cfg(
+        phases=(),
+        curriculum_sampler=sampler,
+        hotness=2,
+        surplus_tasks=2,
+    )
+    seq = build_sequence(family, cfg, sequence_rng(11, 4))
+    latents = seq.info["latents"]
+
+    assert latents.shape == (7, 6)
+    assert seq.info["num_modules"] == 6
+    assert seq.info["num_surplus_tasks"] == 2
+    assert seq.info["num_curriculum_tasks"] == 7
+    assert seq.info["generation_attempts"] >= 1
+    assert check_compositional(latents > 0, 6)
+    assert check_connected(latents > 0)
+    np.testing.assert_array_equal(np.sort(seq.info["pre_shuffle_index"]), np.arange(7))
+    if sampler == "constructive":
+        origins = seq.info["task_origin"]
+        assert (origins == TASK_ORIGIN_CODES["backbone"]).sum() == 5
+        assert (origins == TASK_ORIGIN_CODES["surplus"]).sum() == 2
+
+
+def test_constructive_sampler_shuffles_backbone_and_surplus_together() -> None:
+    family = make_family(num_modules=5)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=3)
+    surplus_positions = []
+    for i in range(20):
+        seq = build_sequence(family, cfg, sequence_rng(2, i))
+        surplus_positions.extend(
+            np.flatnonzero(seq.info["task_origin"] == TASK_ORIGIN_CODES["surplus"]).tolist()
+        )
+    assert min(surplus_positions) < 4
+    assert max(surplus_positions) >= 4
+
+
+def test_demo_count_modes_and_prefix_metadata() -> None:
+    family = make_family(num_modules=5)
+    base = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+
+    per_sequence = build_sequence(
+        family,
+        replace(base, demos_per_task=DemoCountConfig(2, 5, "per_sequence")),
+        sequence_rng(3, 0),
+    )
+    assert len(set(per_sequence.info["demo_counts"].tolist())) == 1
+
+    per_task = build_sequence(
+        family,
+        replace(base, demos_per_task=DemoCountConfig(2, 5, "per_task")),
+        sequence_rng(3, 0),
+    )
+    assert (per_task.info["demo_counts"] >= 2).all()
+    assert (per_task.info["demo_counts"] <= 5).all()
+    assert len(set(per_task.info["demo_counts"].tolist())) > 1
+
+    counts = per_task.info["demo_counts"]
+    expected_b = np.concatenate([[0], np.cumsum(counts[:-1])])
+    expected_l = np.concatenate([[0], np.cumsum(2 * counts[:-1] + 1)])
+    np.testing.assert_array_equal(per_task.info["history_prediction_tokens"], expected_b)
+    np.testing.assert_array_equal(per_task.info["history_serialized_tokens"], expected_l)
+    assert per_task.info["num_prediction_tokens"] == counts.sum()
+    assert per_task.info["serialized_length"] == 2 * counts.sum() + len(counts)
+
+
+def test_variable_world_validation_reports_conflicting_and_impossible_specs() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        assert_feasible(make_seq_cfg(surplus_tasks=1), num_modules=8)
+    with pytest.raises(ValueError, match="exactly 2-hot"):
+        assert_feasible(
+            make_seq_cfg(phases=(), surplus_tasks=1, hotness=3), num_modules=8
+        )
+    with pytest.raises(ValueError, match="surplus_tasks must be >=1"):
+        assert_feasible(
+            make_seq_cfg(phases=(), surplus_tasks=0, require_full_rank=True),
+            num_modules=8,
+        )

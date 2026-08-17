@@ -21,11 +21,10 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from iccl.data.dataset import (
-    SequenceDataset,
     collate_sequences,
-    make_family,
-    sequence_config_from,
+    sequence_dataset_from_config,
 )
+from iccl.data.sequences import TOKEN_PAD
 from iccl.models.model import model_from_config
 from iccl.training.logger import RunLogger
 from iccl.training.metrics import evaluate_suites, load_eval_suites
@@ -163,10 +162,8 @@ class Trainer:
 
     def _build_loader(self) -> DataLoader:
         train_cfg = self.cfg.training
-        family = make_family(self.cfg.data)
-        dataset = SequenceDataset(
-            family,
-            sequence_config_from(self.cfg.data),
+        dataset = sequence_dataset_from_config(
+            self.cfg.data,
             base_seed=self.cfg.seed,
             start_index=self.step * train_cfg.batch_size,
         )
@@ -192,7 +189,11 @@ class Trainer:
         grad_clip = train_cfg.grad_clip if train_cfg.grad_clip is not None else float("inf")
 
         self.model.train()
-        window_start, window_tokens = time.perf_counter(), 0
+        window_start = time.perf_counter()
+        window_padded_tokens = 0
+        window_real_tokens = 0
+        window_prediction_tokens = 0
+        window_sequences = 0
         while self.step < train_cfg.num_steps:
             batch = {k: v.to(self.device, non_blocking=True) for k, v in next(batches).items()}
             ctx = (
@@ -210,7 +211,11 @@ class Trainer:
             self.scheduler.step()
             self.step += 1
             self.last_loss = loss.item()
-            window_tokens += batch["tokens"].shape[0] * batch["tokens"].shape[1]
+            batch_sequences = batch["tokens"].shape[0]
+            window_sequences += batch_sequences
+            window_padded_tokens += int(batch["token_type"].numel())
+            window_real_tokens += int((batch["token_type"] != TOKEN_PAD).sum().item())
+            window_prediction_tokens += int(batch["loss_mask"].sum().item())
 
             if self.step % train_cfg.log_every == 0:
                 elapsed = time.perf_counter() - window_start
@@ -222,11 +227,22 @@ class Trainer:
                         "train/sequences_per_s": train_cfg.log_every
                         * train_cfg.batch_size
                         / elapsed,
-                        "train/tokens_per_s": window_tokens / elapsed,
+                        "train/tokens_per_s": window_padded_tokens / elapsed,
+                        "train/real_serialized_tokens_per_s": window_real_tokens / elapsed,
+                        "train/padded_serialized_tokens_per_s": window_padded_tokens / elapsed,
+                        "train/padding_fraction": 1.0
+                        - window_real_tokens / window_padded_tokens,
+                        "train/mean_prediction_tokens_per_sequence": window_prediction_tokens
+                        / window_sequences,
+                        "train/mean_serialized_length": window_real_tokens / window_sequences,
                     },
                     self.step,
                 )
-                window_start, window_tokens = time.perf_counter(), 0
+                window_start = time.perf_counter()
+                window_padded_tokens = 0
+                window_real_tokens = 0
+                window_prediction_tokens = 0
+                window_sequences = 0
             if eval_enabled and self.step % train_cfg.eval_every == 0:
                 self._evaluate(suites)
             if self.step % train_cfg.checkpoint_every == 0:
