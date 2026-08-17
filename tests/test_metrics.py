@@ -11,6 +11,7 @@ from iccl.data.sequences import (
     PhaseConfig,
     SequenceConfig,
     SequenceSample,
+    build_paired_composition_controls,
     build_paired_control,
     build_paired_retention_control,
     build_sequence,
@@ -18,6 +19,7 @@ from iccl.data.sequences import (
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 from iccl.models.model import GDNModel
 from iccl.training.metrics import (
+    _append_generalization_gaps,
     demo_mse,
     demo_nmse,
     evaluate_suites,
@@ -260,3 +262,140 @@ def test_load_eval_suites_rejects_a_retention_set_without_its_control(
     export_suite(retention, tmp_path / "retention", {"suite": "retention"})
     with pytest.raises(FileNotFoundError, match="retention_control"):
         load_eval_suites(tmp_path)
+
+
+def test_variable_capability_metrics_emit_structural_rows() -> None:
+    family = HyperTeacher(
+        TeacherConfig(
+            input_dim=4,
+            output_dim=4,
+            hidden_dims=(4,),
+            use_bias=True,
+            num_modules=4,
+            scale=3.0,
+            weighting="discrete",
+        ),
+        max_hotness=2,
+    )
+    cfg = SequenceConfig(
+        phases=(),
+        demos_per_task=2,
+        signal_boundaries=True,
+        require_identifiable=True,
+        curriculum_sampler="constructive",
+        hotness=2,
+        surplus_tasks=1,
+    )
+    names = {
+        condition: f"{capability}__{condition}__fixed_surplus__seen__m04__t04__b0008"
+        for capability, conditions in {
+            "icl": ["ordinary"],
+            "composition": ["constituent", "matched_prefix", "no_history"],
+            "retention": ["repeat", "novel", "shared"],
+        }.items()
+        for condition in conditions
+    }
+    samples: dict[str, list[SequenceSample]] = {name: [] for name in names.values()}
+    for i in range(2):
+        samples[names["ordinary"]].append(
+            build_sequence(family, cfg, sequence_rng(4, i), fixed_demo_counts=(2,) * 4)
+        )
+        triplet = build_paired_composition_controls(
+            family,
+            cfg,
+            sequence_rng(4, 10 + i),
+            target_demos=3,
+            constituent_task_exposures=1,
+            fixed_demo_counts=(2,) * 4,
+        )
+        for condition, sample in zip(
+            ("constituent", "matched_prefix", "no_history"), triplet, strict=True
+        ):
+            samples[names[condition]].append(sample)
+
+        rng = sequence_rng(4, 20 + i)
+        repeat = build_sequence(
+            family,
+            cfg,
+            rng,
+            revisit_demos=3,
+            include_world=True,
+            fixed_demo_counts=(2,) * 4,
+        )
+        samples[names["repeat"]].append(repeat)
+        samples[names["novel"]].append(
+            build_paired_retention_control(family, repeat, rng, mode="novel")
+        )
+        samples[names["shared"]].append(
+            build_paired_retention_control(family, repeat, rng, mode="shared")
+        )
+
+    suites = {name: suite_from(group) for name, group in samples.items()}
+    torch.manual_seed(0)
+    model = GDNModel(d_in=4, d_out=4, d_model=32, n_layers=2, n_heads=2, d_ffw=64)
+    report = evaluate_suites(
+        model,
+        suites,
+        torch.device("cpu"),
+        bootstrap_seed=3,
+        bootstrap_replicates=50,
+    )
+
+    composition = "composition/fixed_surplus__seen__m04__t04__b0008"
+    retention = "retention/fixed_surplus__seen__m04__t04__b0008"
+    assert np.isfinite(report.scalars[f"{composition}/benefit_mean"])
+    assert np.isfinite(report.scalars[f"{retention}/savings_mean"])
+    assert np.isfinite(report.scalars[f"{retention}/episodic_savings_mean"])
+    assert f"{composition}/benefit_curve" in report.curves
+    assert f"{retention}/savings_curve" in report.curves
+    assert {row["capability"] for row in report.summary_rows} == {
+        "icl",
+        "composition",
+        "retention",
+    }
+    assert all(row["slice"] == "fixed_surplus" for row in report.summary_rows)
+    assert all(row["ci_low"] <= row["ci_high"] for row in report.summary_rows)
+    savings = next(
+        row["value"]
+        for row in report.summary_rows
+        if row["metric"] == "savings_mean"
+    )
+    episodic = next(
+        row["value"]
+        for row in report.summary_rows
+        if row["metric"] == "episodic_savings_mean"
+    )
+    module = next(
+        row["value"]
+        for row in report.summary_rows
+        if row["metric"] == "module_savings_mean"
+    )
+    assert savings == pytest.approx(episodic + module)
+
+
+def test_generalization_gap_definitions_use_matched_seen_cells() -> None:
+    rows = [
+        {
+            "capability": "icl",
+            "condition": "ordinary",
+            "metric": "nmse_aulc",
+            "slice": "matched_task_count",
+            "status": status,
+            "M": modules,
+            "value": value,
+        }
+        for status, modules, value in (
+            ("seen", 4, 1.0),
+            ("heldout", 6, 2.5),
+            ("seen", 8, 3.0),
+            ("ood", 10, 4.0),
+        )
+    ]
+    scalars: dict[str, float] = {}
+    _append_generalization_gaps(rows, scalars)
+    interpolation = next(row for row in rows if row["condition"] == "interpolation_gap")
+    ood = next(row for row in rows if row["condition"] == "ood_gap")
+    assert interpolation["value"] == pytest.approx(0.5)
+    assert ood["value"] == pytest.approx(1.0)
+    assert any("interpolation_gap" in key for key in scalars)
+    assert any("ood_gap" in key for key in scalars)

@@ -32,6 +32,12 @@ class FakeArtifact:
         self.files.append(path)
 
 
+class FakeTable:
+    def __init__(self, columns: list[str], data: list[list[Any]]) -> None:
+        self.columns = columns
+        self.data = data
+
+
 class FakeRun:
     def __init__(self, name: str | None = "different-sound-6") -> None:
         self.name = name
@@ -39,6 +45,7 @@ class FakeRun:
         self.entity, self.project = "an-entity", "a-project"
         self.logged: list[tuple[FakeArtifact, list[str]]] = []
         self.used: list[str] = []
+        self.records: list[tuple[dict[str, Any], int]] = []
 
     def log_artifact(self, artifact: FakeArtifact, aliases: list[str]) -> None:
         self.logged.append((artifact, aliases))
@@ -46,12 +53,20 @@ class FakeRun:
     def use_artifact(self, reference: str) -> None:
         self.used.append(reference)
 
+    def log(self, payload: dict[str, Any], step: int) -> None:
+        self.records.append((payload, step))
+
 
 class FakeWandb:
     """Stands in for the ``wandb`` module: records what ``init`` was given and
     hands back a run whose artifact calls are inspectable."""
 
     Artifact = FakeArtifact
+    Table = FakeTable
+
+    @staticmethod
+    def Plotly(figure: Any) -> Any:
+        return figure
 
     def __init__(self, run: FakeRun | None = None) -> None:
         self.captured: dict[str, Any] = {}
@@ -214,3 +229,71 @@ def test_artifact_names_survive_unnamed_and_awkwardly_named_runs() -> None:
     assert weights_artifact_name("t03malzi") == "weights-t03malzi"
     # `wandb.name` is free text from a hydra override, but artifact names are not.
     assert weights_artifact_name("pilot run #2") == "weights-pilot-run--2"
+
+
+def test_capability_rows_write_tables_and_named_panels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
+    summary = [
+        {
+            "capability": "icl",
+            "condition": "ordinary",
+            "slice": "fixed_surplus",
+            "suite": "icl-cell",
+            "status": "seen",
+            "sampler": "constructive",
+            "weighting": "discrete",
+            "M": 8,
+            "T": 8,
+            "S": 1,
+            "B_history": 256,
+            "L_history": 520,
+            "D_target": 32,
+            "D_min": 32.0,
+            "D_max": 32.0,
+            "D_mean": 32.0,
+            "D_cv": 0.0,
+            "constituent_exposure_min": None,
+            "constituent_exposure_max": None,
+            "intervening_tasks": None,
+            "prediction_token_delay": None,
+            "serialized_token_delay": None,
+            "metric": "nmse_aulc",
+            "value": 0.4,
+            "ci_low": 0.3,
+            "ci_high": 0.5,
+            "n_sequences": 16,
+        }
+    ]
+    curve_rows = [
+        {
+            "capability": "icl",
+            "condition": "ordinary",
+            "slice": "fixed_surplus",
+            "status": "seen",
+            "M": 8,
+            "T": 8,
+            "S": 1,
+            "B_history": 256,
+            "L_history": 520,
+            "curve_type": "learning_curve",
+            "x_name": "demo_index",
+            "x_value": 0,
+            "mse": 0.8,
+            "nmse": 0.4,
+            "ci_low": 0.3,
+            "ci_high": 0.5,
+            "n_sequences": 16,
+        }
+    ]
+    logger.log_eval({}, {}, 20, summary_rows=summary, curve_rows=curve_rows)
+
+    assert (tmp_path / "eval" / "step_0000020_summary.json").exists()
+    payload, step = run.records[-1]
+    assert step == 20
+    assert "eval-tables/capability_summary" in payload
+    assert "eval-tables/capability_curves" in payload
+    assert "capability/icl/aulc_vs_M" in payload
+    assert "capability/icl/learning_curve" in payload

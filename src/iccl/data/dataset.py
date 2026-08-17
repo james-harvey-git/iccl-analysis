@@ -23,6 +23,7 @@ from iccl.data.sequences import (
     PhaseConfig,
     SequenceConfig,
     SequenceSample,
+    assert_feasible,
     build_sequence,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
@@ -96,8 +97,20 @@ def teacher_config_from(cfg: DictConfig, num_modules: int | None = None) -> Teac
 def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
     demos = cfg.sequence.demos_per_task
     if isinstance(demos, int):
+        if demos < 1:
+            raise ValueError(f"demos_per_task must be >=1, got {demos}")
         demo_spec: int | tuple[int, int] | DemoCountConfig = demos
     elif hasattr(demos, "get") and demos.get("scope") is not None:
+        if demos.scope not in {"per_sequence", "per_task"}:
+            raise ValueError(
+                "demos_per_task.scope must be per_sequence or per_task, got "
+                f"{demos.scope!r}"
+            )
+        if int(demos.min) < 1 or int(demos.min) > int(demos.max):
+            raise ValueError(
+                "demos_per_task requires 1 <= min <= max, got "
+                f"[{demos.min}, {demos.max}]"
+            )
         demo_spec = DemoCountConfig(
             min=int(demos.min), max=int(demos.max), scope=str(demos.scope)
         )
@@ -107,6 +120,10 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
             raise ValueError(
                 f"demos_per_task range must contain [min, max], got {demo_values}"
             )
+        if demo_values[0] < 1 or demo_values[0] > demo_values[1]:
+            raise ValueError(
+                f"demos_per_task requires 1 <= min <= max, got {demo_values}"
+            )
         demo_spec = (demo_values[0], demo_values[1])
 
     surplus_raw = cfg.sequence.get("surplus_tasks")
@@ -114,6 +131,8 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
     if surplus_raw is None:
         surplus = None
     elif isinstance(surplus_raw, int):
+        if surplus_raw < 0:
+            raise ValueError(f"surplus_tasks must be >=0, got {surplus_raw}")
         surplus = surplus_raw
     else:
         surplus_values = tuple(int(value) for value in surplus_raw)
@@ -121,9 +140,13 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
             raise ValueError(
                 f"surplus_tasks range must contain [min, max], got {surplus_values}"
             )
+        if surplus_values[0] < 0 or surplus_values[0] > surplus_values[1]:
+            raise ValueError(
+                f"surplus_tasks requires 0 <= min <= max, got {surplus_values}"
+            )
         surplus = (surplus_values[0], surplus_values[1])
 
-    return SequenceConfig(
+    sequence = SequenceConfig(
         phases=tuple(
             PhaseConfig(num_tasks=p.num_tasks, hotness=tuple(p.hotness))
             for p in cfg.sequence.get("phases", [])
@@ -138,6 +161,7 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
         hotness=int(cfg.sequence.get("hotness", 2)),
         surplus_tasks=surplus,
     )
+    return sequence
 
 
 def make_family(
@@ -226,13 +250,16 @@ def sequence_dataset_from_config(
 ) -> SequenceDataset:
     """Build a dataset and one cached immutable task family per allowed ``M``."""
     module_counts = module_count_config_from(cfg)
+    sequence = sequence_config_from(cfg)
+    for num_modules in module_counts.allowed:
+        assert_feasible(sequence, num_modules)
     families = {
         num_modules: make_family(cfg, extra_hotness, num_modules=num_modules)
         for num_modules in module_counts.allowed
     }
     return SequenceDataset(
         families[module_counts.allowed[0]],
-        sequence_config_from(cfg),
+        sequence,
         base_seed=base_seed,
         num_sequences=num_sequences,
         final_task=final_task,

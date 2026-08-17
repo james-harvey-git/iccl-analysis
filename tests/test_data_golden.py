@@ -8,10 +8,13 @@ the update as a breaking change to dataset reproducibility (previously frozen
 eval sets no longer correspond to the new stream).
 """
 
+from typing import TypedDict
+
 import numpy as np
 import pytest
+from omegaconf import OmegaConf
 
-from iccl.data.dataset import sequence_rng
+from iccl.data.dataset import sequence_dataset_from_config, sequence_rng
 from iccl.data.sequences import PhaseConfig, SequenceConfig, build_sequence
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
@@ -71,3 +74,78 @@ def test_pilot_stream_is_unchanged(index: int) -> None:
     np.testing.assert_allclose(seq.tokens.std(), golden["tokens_std"], atol=1e-6)
     np.testing.assert_allclose(np.abs(seq.targets).sum(), golden["targets_abs_sum"], rtol=1e-5)
     np.testing.assert_allclose(seq.info["latents"].sum(), golden["latents_sum"], atol=1e-5)
+
+
+class VariableGolden(TypedDict):
+    index: int
+    M: int
+    S: int
+    demos: list[int]
+    tokens_mean: float
+    targets_abs_sum: float
+    latents_sum: float
+
+
+VARIABLE_GOLDEN: list[VariableGolden] = [
+    {
+        "index": 0,
+        "M": 7,
+        "S": 0,
+        "demos": [2, 3, 2, 4, 3, 4],
+        "tokens_mean": 0.096305415,
+        "targets_abs_sum": 63.689713,
+        "latents_sum": 8.6000004,
+    },
+    {
+        "index": 1,
+        "M": 5,
+        "S": 2,
+        "demos": [2, 2, 3, 2, 4, 2],
+        "tokens_mean": -0.080361843,
+        "targets_abs_sum": 39.106003,
+        "latents_sum": 9.3000002,
+    },
+    {
+        "index": 2,
+        "M": 4,
+        "S": 2,
+        "demos": [4, 4, 4, 2, 2],
+        "tokens_mean": 0.19349524,
+        "targets_abs_sum": 63.953129,
+        "latents_sum": 7.5999999,
+    },
+]
+
+
+@pytest.mark.parametrize("golden", VARIABLE_GOLDEN)
+def test_variable_world_stream_is_pinned(golden: VariableGolden) -> None:
+    cfg = OmegaConf.create(
+        {
+            "input_dim": 4,
+            "output_dim": 4,
+            "hidden_dims": [4],
+            "use_bias": True,
+            "num_modules": {"min": 4, "max": 7, "held_out": [6]},
+            "scale": 3.0,
+            "weighting": "discrete",
+            "sequence": {
+                "curriculum_sampler": "constructive",
+                "hotness": 2,
+                "surplus_tasks": [0, 2],
+                "demos_per_task": {"min": 2, "max": 4, "scope": "per_task"},
+                "signal_boundaries": True,
+                "require_identifiable": True,
+                "require_full_rank": False,
+            },
+        }
+    )
+    dataset = sequence_dataset_from_config(cfg, base_seed=19)
+    sample = dataset.build(int(golden["index"]))
+    assert sample.info["num_modules"] == golden["M"]
+    assert sample.info["num_surplus_tasks"] == golden["S"]
+    assert sample.info["demo_counts"].tolist() == golden["demos"]
+    np.testing.assert_allclose(sample.tokens.mean(), golden["tokens_mean"], atol=1e-7)
+    np.testing.assert_allclose(
+        np.abs(sample.targets).sum(), golden["targets_abs_sum"], rtol=1e-6
+    )
+    np.testing.assert_allclose(sample.info["latents"].sum(), golden["latents_sum"], atol=1e-6)

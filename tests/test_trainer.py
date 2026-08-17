@@ -226,6 +226,22 @@ def test_trainer_smoke_and_checkpoint(tmp_path: Path) -> None:
     assert (tmp_path / "run" / "checkpoints" / "last.pt").exists()
 
 
+def test_variable_world_mixed_length_training_smoke(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, num_steps=2, batch_size=4)
+    cfg.data.num_modules = {"min": 4, "max": 7, "held_out": [6]}
+    del cfg.data.sequence.phases
+    cfg.data.sequence.curriculum_sampler = "constructive"
+    cfg.data.sequence.hotness = 2
+    cfg.data.sequence.surplus_tasks = [0, 2]
+    cfg.data.sequence.demos_per_task = {"min": 2, "max": 5, "scope": "per_task"}
+
+    torch.manual_seed(0)
+    trainer = Trainer(cfg, out_dir=tmp_path / "variable")
+    trainer.fit()
+    assert math.isfinite(trainer.last_loss)
+    assert trainer.step == 2
+
+
 def test_checkpoint_resume_is_bit_exact(tmp_path: Path) -> None:
     torch.manual_seed(0)
     full = Trainer(make_cfg(tmp_path, num_steps=6, checkpoint_every=3), tmp_path / "full")

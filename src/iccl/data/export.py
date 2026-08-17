@@ -462,6 +462,7 @@ def _cell_metadata(
     *,
     sampling_kind: str,
     pair_group: str | None = None,
+    history_demo_counts: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     metadata = dict(
         base,
@@ -473,7 +474,7 @@ def _cell_metadata(
         num_modules=cell.num_modules,
         num_tasks=cell.num_tasks,
         num_surplus_tasks=cell.num_surplus,
-        demo_counts=cell.demo_counts,
+        demo_counts=history_demo_counts or cell.demo_counts,
         history_prediction_tokens=cell.prediction_tokens,
         history_serialized_tokens=cell.serialized_tokens,
         sampling_kind=sampling_kind,
@@ -521,6 +522,14 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
     written: set[str] = set()
     suite_count = 0
     stream_block = 0
+    matched_m_slices = {"fixed_surplus", "matched_task_count", "matched_prediction_tokens"}
+    composition_demo_count = {
+        slice_name: min(
+            min(cell.demo_counts) for cell in cells if cell.slice == slice_name
+        )
+        for slice_name in matched_m_slices
+        if any(cell.slice == slice_name for cell in cells)
+    }
 
     def write(
         samples: list[SequenceSample],
@@ -530,6 +539,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
         *,
         sampling_kind: str,
         pair_group: str | None = None,
+        history_demo_counts: tuple[int, ...] | None = None,
     ) -> None:
         nonlocal suite_count
         name = _suite_name(capability, condition, cell)
@@ -543,6 +553,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
             cell,
             sampling_kind=sampling_kind,
             pair_group=pair_group,
+            history_demo_counts=history_demo_counts,
         )
         export_suite(samples, out_dir / name, metadata, include_extended_info=True)
         suite_count += 1
@@ -580,6 +591,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
                         eval_cfg.capabilities.composition.constituent_task_exposures
                     ),
                     fixed_demo_counts=cell.demo_counts,
+                    constituent_demo_count=composition_demo_count.get(cell.slice),
                 )
                 for sample in triplet:
                     sample.info["pair_id"] = pair_id
@@ -587,6 +599,10 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
                 matched.append(triplet[1])
                 no_history.append(triplet[2])
             stream_block += 1
+            paired_demo_counts = tuple(
+                int(value)
+                for value in constituent[0].info["demo_counts"][: cell.num_tasks]
+            )
             write(
                 constituent,
                 "composition",
@@ -594,6 +610,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
                 cell,
                 sampling_kind="constructively_constrained",
                 pair_group=pair_group,
+                history_demo_counts=paired_demo_counts,
             )
             write(
                 matched,
@@ -602,6 +619,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
                 cell,
                 sampling_kind="paired_counterfactual",
                 pair_group=pair_group,
+                history_demo_counts=paired_demo_counts,
             )
             if "no_history" in eval_cfg.capabilities.composition.controls:
                 write(
@@ -611,6 +629,7 @@ def _export_variable_eval_sets(cfg: DictConfig) -> int:
                     cell,
                     sampling_kind="paired_counterfactual",
                     pair_group=pair_group,
+                    history_demo_counts=paired_demo_counts,
                 )
 
         if "retention" in capabilities:

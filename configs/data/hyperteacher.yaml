@@ -28,6 +28,8 @@ sequence:
 eval_sets:
   num_sequences: 256
   out_dir: data/eval_sets
+  bootstrap_seed: 0
+  bootstrap_replicates: 1000
   module_counts:
     seen_selection: endpoints_and_canonical
     canonical_seen: 8

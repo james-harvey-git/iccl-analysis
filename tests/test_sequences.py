@@ -16,6 +16,7 @@ from iccl.data.sequences import (
     PhaseConfig,
     SequenceConfig,
     _decode_prufer,
+    _task_categories,
     assert_feasible,
     build_paired_composition_controls,
     build_paired_control,
@@ -287,6 +288,23 @@ def test_prufer_decoder_enumerates_every_labelled_tree_once() -> None:
     assert len(trees) == 4 ** (4 - 2)
 
 
+def test_task_categories_are_exhaustive_and_order_relative() -> None:
+    latents = np.array(
+        [
+            [0.5, 0.6, 0.0, 0.0],
+            [0.0, 0.0, 0.7, 0.8],
+            [0.9, 0.6, 0.0, 0.0],
+            [0.5, 0.6, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(_task_categories(latents), [0, 0, 1, 2])
+    order = np.array([3, 1, 2, 0])
+    generation_relative = _task_categories(latents)[order]
+    presentation_relative = _task_categories(latents[order])
+    assert not np.array_equal(generation_relative, presentation_relative)
+
+
 @pytest.mark.parametrize("sampler", ["constructive", "rejection"])
 def test_variable_world_curricula_obey_connected_floor_and_provenance(sampler: str) -> None:
     family = make_family(num_modules=6)
@@ -380,9 +398,11 @@ def test_paired_composition_controls_match_prefix_shape_and_final_block() -> Non
         target_demos=4,
         constituent_task_exposures=1,
         fixed_demo_counts=demos,
+        constituent_demo_count=2,
     )
 
     np.testing.assert_array_equal(constituent.info["constituent_task_exposures"], [1, 1])
+    np.testing.assert_array_equal(constituent.info["constituent_demo_exposures"], [2, 2])
     np.testing.assert_array_equal(matched.info["constituent_task_exposures"], [0, 0])
     assert constituent.info["prior_target_support_count"] == 0
     assert matched.info["prior_target_support_count"] == 0
@@ -408,3 +428,4 @@ def test_paired_composition_controls_match_prefix_shape_and_final_block() -> Non
     np.testing.assert_array_equal(constituent.tokens[final_boundary:], no_history.tokens)
     np.testing.assert_array_equal(constituent.targets[final_boundary:], no_history.targets)
     assert no_history.info["num_curriculum_tasks"] == 0
+    assert constituent.info["demo_counts"][:6].sum() == sum(demos)

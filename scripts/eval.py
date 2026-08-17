@@ -51,13 +51,21 @@ def main(cfg: DictConfig) -> None:
     if is_artifact:
         # After start, so there is a run for the lineage edge to attach to.
         logger.use_artifact(reference.removeprefix(WANDB_SCHEME))
-    scalars, curves = evaluate_suites(
+    report = evaluate_suites(
         model,
         suites,
         device,
         autocast_dtype=resolve_autocast_dtype(cfg.training.precision, device),
+        bootstrap_seed=int(cfg.data.eval_sets.get("bootstrap_seed", 0)),
+        bootstrap_replicates=int(cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
     )
-    path = logger.log_eval(scalars, curves, step)
+    path = logger.log_eval(
+        report.scalars,
+        report.curves,
+        step,
+        summary_rows=report.summary_rows,
+        curve_rows=report.curve_rows,
+    )
     logger.finish()
     print(f"curves written to {path}")
 

@@ -34,10 +34,9 @@ TASK_ORIGIN_CODES = {
 }
 
 TASK_CATEGORY_CODES = {
-    "first": 0,
-    "novel_support": 1,
-    "seen_support_new_weights": 2,
-    "exact_repeat": 3,
+    "novel_support": 0,
+    "seen_support_new_weights": 1,
+    "exact_repeat": 2,
 }
 
 CURRICULUM_SAMPLER_CODES = {
@@ -177,9 +176,7 @@ def _task_categories(latents: np.ndarray) -> np.ndarray:
     for i, latent in enumerate(latents):
         support = tuple(int(m) for m in np.flatnonzero(latent))
         previous = seen.get(support)
-        if i == 0:
-            category = "first"
-        elif previous is None:
+        if previous is None:
             category = "novel_support"
         elif any(np.array_equal(latent, other) for other in previous):
             category = "exact_repeat"
@@ -391,7 +388,11 @@ def _rejection_curriculum(
                 continue
         return CurriculumSample(
             latents=latents,
-            task_origins=np.full(num_tasks, TASK_ORIGIN_CODES["legacy"], dtype=np.int8),
+            task_origins=np.array(
+                [TASK_ORIGIN_CODES["backbone"]] * (family.cfg.num_modules - 1)
+                + [TASK_ORIGIN_CODES["surplus"]] * num_surplus,
+                dtype=np.int8,
+            ),
             pre_shuffle_indices=np.arange(num_tasks, dtype=np.int64),
             generation_categories=_task_categories(latents),
             presentation_categories=_task_categories(latents),
@@ -857,7 +858,7 @@ def _composition_latents(
     *,
     num_tasks: int,
     constituent_task_exposures: int,
-) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+) -> tuple[np.ndarray, np.ndarray, tuple[int, int], np.ndarray]:
     """History exposing two target modules separately but never jointly."""
     num_modules = family.cfg.num_modules
     if num_modules < 4:
@@ -885,27 +886,33 @@ def _composition_latents(
         if len(remaining) > 2
         else np.empty(0, dtype=np.int64)
     )
-    edges = [
+    ordinary_edges = [
         (int(remaining[a]), int(remaining[b]))
         for a, b in _decode_prufer(local_prufer, len(remaining))
     ]
-    edges.extend(
-        [
-            (target[0], int(remaining[int(rng.integers(len(remaining)))])),
-            (target[1], int(remaining[int(rng.integers(len(remaining)))])),
-        ]
-    )
+    target_edges = [
+        (target[0], int(remaining[int(rng.integers(len(remaining)))])),
+        (target[1], int(remaining[int(rng.integers(len(remaining)))])),
+    ]
     for module in target:
         for _ in range(constituent_task_exposures - 1):
-            edges.append((module, int(remaining[int(rng.integers(len(remaining)))])))
-    while len(edges) < num_tasks:
+            target_edges.append(
+                (module, int(remaining[int(rng.integers(len(remaining)))]))
+            )
+    while len(ordinary_edges) + len(target_edges) < num_tasks:
         chosen = rng.choice(remaining, size=2, replace=False)
-        edges.append((int(chosen[0]), int(chosen[1])))
+        ordinary_edges.append((int(chosen[0]), int(chosen[1])))
 
+    edges = target_edges + ordinary_edges
     history = np.stack([_weighted_edge(family, edge, rng) for edge in edges])
-    history = history[rng.permutation(len(history))]
+    target_task_mask = np.array(
+        [True] * len(target_edges) + [False] * len(ordinary_edges), dtype=bool
+    )
+    order = rng.permutation(len(history))
+    history = history[order]
+    target_task_mask = target_task_mask[order]
     final_latent = _weighted_edge(family, target, rng)
-    return history, final_latent, target
+    return history, final_latent, target, target_task_mask
 
 
 def _refresh_latent_metadata(info: dict[str, Any], latents: np.ndarray) -> None:
@@ -998,8 +1005,12 @@ def build_no_history_control(sequence: SequenceSample) -> SequenceSample:
         "generation_attempts": 0,
         "task_origin": np.array([TASK_ORIGIN_CODES["final"]], dtype=np.int8),
         "pre_shuffle_index": np.array([0], dtype=np.int64),
-        "generation_category": np.array([TASK_CATEGORY_CODES["first"]], dtype=np.int8),
-        "presentation_category": np.array([TASK_CATEGORY_CODES["first"]], dtype=np.int8),
+        "generation_category": np.array(
+            [TASK_CATEGORY_CODES["novel_support"]], dtype=np.int8
+        ),
+        "presentation_category": np.array(
+            [TASK_CATEGORY_CODES["novel_support"]], dtype=np.int8
+        ),
         "history_prediction_tokens": np.array([0], dtype=np.int64),
         "history_serialized_tokens": np.array([0], dtype=np.int64),
         "target_first_prediction_index": np.array([offset], dtype=np.int64),
@@ -1018,14 +1029,39 @@ def build_paired_composition_controls(
     target_demos: int,
     constituent_task_exposures: int,
     fixed_demo_counts: tuple[int, ...],
+    constituent_demo_count: int | None = None,
 ) -> tuple[SequenceSample, SequenceSample, SequenceSample]:
     """Constituent history, target-free matched prefix, and no-history control."""
-    history, final_latent, target = _composition_latents(
+    history, final_latent, target, target_task_mask = _composition_latents(
         family,
         rng,
         num_tasks=len(fixed_demo_counts),
         constituent_task_exposures=constituent_task_exposures,
     )
+    composition_demo_counts = fixed_demo_counts
+    if constituent_demo_count is not None:
+        if constituent_demo_count < 1:
+            raise ValueError(
+                f"constituent_demo_count must be positive, got {constituent_demo_count}"
+            )
+        num_target_tasks = int(target_task_mask.sum())
+        other_tasks = len(target_task_mask) - num_target_tasks
+        remaining_budget = sum(fixed_demo_counts) - num_target_tasks * constituent_demo_count
+        if remaining_budget < other_tasks:
+            raise ValueError(
+                "composition constituent demo constraint leaves fewer than one demo per "
+                f"other task: B={sum(fixed_demo_counts)}, target_tasks={num_target_tasks}, "
+                f"target_D={constituent_demo_count}, other_tasks={other_tasks}"
+            )
+        counts = np.full(len(target_task_mask), constituent_demo_count, dtype=np.int64)
+        if other_tasks:
+            quotient, remainder = divmod(remaining_budget, other_tasks)
+            counts[~target_task_mask] = quotient
+            if remainder:
+                positions = np.flatnonzero(~target_task_mask)
+                selected = rng.choice(positions, size=remainder, replace=False)
+                counts[selected] += 1
+        composition_demo_counts = tuple(int(value) for value in counts)
     pool = sample_module_pool(family.cfg, rng)
     final = FinalTaskConfig(mode="composite", hotness=2, num_demos=target_demos)
     constituent = build_sequence(
@@ -1037,7 +1073,7 @@ def build_paired_composition_controls(
         world=pool,
         fixed_final_latent=final_latent,
         fixed_curriculum_latents=history,
-        fixed_demo_counts=fixed_demo_counts,
+        fixed_demo_counts=composition_demo_counts,
     )
 
     allowed = np.array([m for m in range(family.cfg.num_modules) if m not in target])
