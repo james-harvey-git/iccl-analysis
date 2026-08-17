@@ -63,7 +63,12 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
                     "signal_boundaries": True,
                     "require_identifiable": True,
                 },
-                "eval_sets": {"out_dir": str(tmp_path / "eval_sets")},
+                "eval_sets": {
+                    "out_dir": str(tmp_path / "eval_sets"),
+                    "best_metric": (
+                        "icl__ordinary__fixed_surplus__seen__m08__t08__b0032/nmse_last_demo"
+                    ),
+                },
             },
             "model": {
                 "d_model": 32,
@@ -280,7 +285,29 @@ def test_trainer_runs_eval_and_tracks_best(tmp_path: Path) -> None:
     seq_cfg = sequence_config_from(cfg.data)
     samples = [build_sequence(family, seq_cfg, sequence_rng(1, i)) for i in range(2)]
     out_dir = Path(cfg.data.eval_sets.out_dir)
-    export_suite(samples, out_dir / "in_dist", {"suite": "in_dist"})
+    name = "icl__ordinary__fixed_surplus__seen__m08__t08__b0032"
+    export_suite(
+        samples,
+        out_dir / name,
+        {
+            "suite": name,
+            "capability": "icl",
+            "condition": "ordinary",
+            "structural_slice": "fixed_surplus",
+            "variant": "",
+            "module_count_status": "seen",
+            "num_modules": 8,
+            "num_tasks": 8,
+            "num_surplus_tasks": 1,
+            "demo_counts": [4] * 8,
+            "history_prediction_tokens": 32,
+            "history_serialized_tokens": 72,
+            "config": {
+                "sequence": {"curriculum_sampler": "rejection"},
+                "weighting": "discrete",
+            },
+        },
+    )
 
     torch.manual_seed(0)
     trainer = Trainer(cfg, out_dir=tmp_path / "run")

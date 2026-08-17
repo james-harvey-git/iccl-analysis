@@ -1,5 +1,5 @@
-# Variable-world HyperTeacher curriculum. Use `data=hyperteacher_legacy` for the
-# fixed M=8, T=8, D=32 stream and fixed-world frozen suites.
+# Variable-world HyperTeacher curriculum. `data=hyperteacher_fixed` selects the
+# fixed M=8, T=8, D=32 training distribution.
 name: hyperteacher
 
 input_dim: 16
@@ -24,12 +24,14 @@ sequence:
   signal_boundaries: true
   require_identifiable: true
   require_full_rank: false
+  max_attempts: 1000
 
 eval_sets:
   num_sequences: 256
   out_dir: data/eval_sets
   bootstrap_seed: 0
   bootstrap_replicates: 1000
+  best_metric: icl__ordinary__fixed_surplus__seen__m08__t08__b0256/nmse_last_demo
   module_counts:
     seen_selection: endpoints_and_canonical
     canonical_seen: 8

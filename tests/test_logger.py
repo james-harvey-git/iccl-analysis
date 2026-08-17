@@ -290,7 +290,6 @@ def test_capability_rows_write_tables_and_named_panels(
     ]
     logger.log_eval({}, {}, 20, summary_rows=summary, curve_rows=curve_rows)
 
-    assert (tmp_path / "eval" / "step_0000020_summary.json").exists()
     payload, step = run.records[-1]
     assert step == 20
     assert "eval-tables/capability_summary" in payload

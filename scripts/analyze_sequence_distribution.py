@@ -26,9 +26,7 @@ def main(cfg: DictConfig) -> None:
     for relative, categories in report["categories"].items():
         for category, estimators in categories.items():
             if category == "p_surplus_zero":
-                metrics[f"distribution/categories/{relative}/p_surplus_zero"] = float(
-                    estimators
-                )
+                metrics[f"distribution/categories/{relative}/p_surplus_zero"] = float(estimators)
                 continue
             for estimator, estimate in estimators.items():
                 if "estimate" not in estimate:

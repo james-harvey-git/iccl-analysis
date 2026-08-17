@@ -1,21 +1,14 @@
-"""Golden-stream regression tests for the on-the-fly data pipeline.
+"""Golden fingerprints for fixed-world and variable-world sequence streams."""
 
-Pins the exact random stream produced by the pilot configuration under a fixed
-seed: any code change that alters sampling order, distributions, or tokenization
-fails here loudly instead of silently changing the training distribution. If a
-change is *intended* to alter the stream, regenerate the fingerprints and treat
-the update as a breaking change to dataset reproducibility (previously frozen
-eval sets no longer correspond to the new stream).
-"""
-
-from typing import TypedDict
+from pathlib import Path
 
 import numpy as np
 import pytest
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
+from iccl.data.curriculum import PhaseConfig, SequenceConfig
 from iccl.data.dataset import sequence_dataset_from_config, sequence_rng
-from iccl.data.sequences import PhaseConfig, SequenceConfig, build_sequence
+from iccl.data.sequences import build_sequence
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
 PILOT_FAMILY = TeacherConfig(
@@ -76,49 +69,36 @@ def test_pilot_stream_is_unchanged(index: int) -> None:
     np.testing.assert_allclose(seq.info["latents"].sum(), golden["latents_sum"], atol=1e-5)
 
 
-class VariableGolden(TypedDict):
-    index: int
-    M: int
-    S: int
-    demos: list[int]
-    tokens_mean: float
-    targets_abs_sum: float
-    latents_sum: float
+def test_fixed_config_selects_the_pinned_training_distribution() -> None:
+    config_path = Path(__file__).parents[1] / "configs/data/hyperteacher_fixed.yaml"
+    config = OmegaConf.load(config_path)
+    assert isinstance(config, DictConfig)
+    dataset = sequence_dataset_from_config(config, base_seed=0)
+    configured = dataset.build(0)
+    direct = build_sequence(
+        HyperTeacher(PILOT_FAMILY, max_hotness=2), PILOT_SEQUENCE, sequence_rng(0, 0)
+    )
+    np.testing.assert_array_equal(configured.tokens, direct.tokens)
+    np.testing.assert_array_equal(configured.info["latents"], direct.info["latents"])
 
 
-VARIABLE_GOLDEN: list[VariableGolden] = [
-    {
-        "index": 0,
-        "M": 7,
-        "S": 0,
-        "demos": [2, 3, 2, 4, 3, 4],
-        "tokens_mean": 0.096305415,
-        "targets_abs_sum": 63.689713,
-        "latents_sum": 8.6000004,
-    },
-    {
-        "index": 1,
-        "M": 5,
-        "S": 2,
-        "demos": [2, 2, 3, 2, 4, 2],
-        "tokens_mean": -0.080361843,
-        "targets_abs_sum": 39.106003,
-        "latents_sum": 9.3000002,
-    },
-    {
-        "index": 2,
-        "M": 4,
-        "S": 2,
-        "demos": [4, 4, 4, 2, 2],
-        "tokens_mean": 0.19349524,
-        "targets_abs_sum": 63.953129,
-        "latents_sum": 7.5999999,
-    },
-]
-
-
-@pytest.mark.parametrize("golden", VARIABLE_GOLDEN)
-def test_variable_world_stream_is_pinned(golden: VariableGolden) -> None:
+@pytest.mark.parametrize(
+    "index,modules,surplus,demos,tokens_mean,targets_sum,latents_sum",
+    [
+        (0, 7, 0, [2, 3, 2, 4, 3, 4], 0.096305415, 63.689713, 8.6000004),
+        (1, 5, 2, [2, 2, 3, 2, 4, 2], -0.080361843, 39.106003, 9.3000002),
+        (2, 4, 2, [4, 4, 4, 2, 2], 0.19349524, 63.953129, 7.5999999),
+    ],
+)
+def test_variable_world_stream_is_pinned(
+    index: int,
+    modules: int,
+    surplus: int,
+    demos: list[int],
+    tokens_mean: float,
+    targets_sum: float,
+    latents_sum: float,
+) -> None:
     cfg = OmegaConf.create(
         {
             "input_dim": 4,
@@ -140,12 +120,10 @@ def test_variable_world_stream_is_pinned(golden: VariableGolden) -> None:
         }
     )
     dataset = sequence_dataset_from_config(cfg, base_seed=19)
-    sample = dataset.build(int(golden["index"]))
-    assert sample.info["num_modules"] == golden["M"]
-    assert sample.info["num_surplus_tasks"] == golden["S"]
-    assert sample.info["demo_counts"].tolist() == golden["demos"]
-    np.testing.assert_allclose(sample.tokens.mean(), golden["tokens_mean"], atol=1e-7)
-    np.testing.assert_allclose(
-        np.abs(sample.targets).sum(), golden["targets_abs_sum"], rtol=1e-6
-    )
-    np.testing.assert_allclose(sample.info["latents"].sum(), golden["latents_sum"], atol=1e-6)
+    sample = dataset.build(index)
+    assert sample.info["num_modules"] == modules
+    assert sample.info["num_surplus_tasks"] == surplus
+    assert sample.info["demo_counts"].tolist() == demos
+    np.testing.assert_allclose(sample.tokens.mean(), tokens_mean, atol=1e-7)
+    np.testing.assert_allclose(np.abs(sample.targets).sum(), targets_sum, rtol=1e-6)
+    np.testing.assert_allclose(sample.info["latents"].sum(), latents_sum, atol=1e-6)

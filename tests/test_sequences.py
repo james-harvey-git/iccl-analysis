@@ -5,25 +5,28 @@ from typing import Any
 import numpy as np
 import pytest
 
+from iccl.data.controls import (
+    build_paired_composition_controls,
+    build_paired_retention_control,
+)
+from iccl.data.curriculum import (
+    TASK_ORIGIN_CODES,
+    DemoCountConfig,
+    PhaseConfig,
+    SequenceConfig,
+    assert_feasible,
+    check_compositional,
+    check_connected,
+    decode_prufer,
+    task_categories,
+)
 from iccl.data.dataset import sequence_rng
 from iccl.data.sequences import (
-    TASK_ORIGIN_CODES,
     TOKEN_BOUNDARY,
     TOKEN_X,
     TOKEN_Y,
-    DemoCountConfig,
     FinalTaskConfig,
-    PhaseConfig,
-    SequenceConfig,
-    _decode_prufer,
-    _task_categories,
-    assert_feasible,
-    build_paired_composition_controls,
-    build_paired_control,
-    build_paired_retention_control,
     build_sequence,
-    check_compositional,
-    check_connected,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
@@ -112,7 +115,7 @@ def test_unsignalled_sequences_have_no_boundary_tokens() -> None:
     assert (seq.info["demo_counts"] >= 3).all() and (seq.info["demo_counts"] <= 6).all()
 
 
-def test_composite_final_task_and_paired_control() -> None:
+def test_composite_final_task_is_not_in_the_history() -> None:
     family = make_family()
     cfg = make_seq_cfg()
     final = FinalTaskConfig(mode="composite", hotness=2, num_demos=2)
@@ -125,17 +128,6 @@ def test_composite_final_task_and_paired_control() -> None:
     demonstrated = {tuple(np.flatnonzero(lat)) for lat in latents[:-1]}
     assert final_support not in demonstrated
     assert seq.info["demo_counts"][-1] == 2
-
-    control = build_paired_control(family, cfg, seq, final, rng)
-    np.testing.assert_array_equal(control.info["latents"][0], latents[-1])
-    assert control.info["num_curriculum_tasks"] == 0
-    assert control.tokens.shape[0] == 2 * 2 + 1
-    # Same world: the same x must map to the same y under both sequences' teachers.
-    x_query = np.flatnonzero(control.token_type == TOKEN_X)[0]
-    from iccl.data.teacher import teacher_forward
-
-    y_a = teacher_forward(seq.info["world"], latents[-1], control.tokens[x_query : x_query + 1])
-    np.testing.assert_allclose(control.targets[x_query], y_a[0], rtol=1e-5)
 
 
 def test_revisit_appends_first_task() -> None:
@@ -282,7 +274,7 @@ def test_structured_graph_validation() -> None:
 
 def test_prufer_decoder_enumerates_every_labelled_tree_once() -> None:
     trees = {
-        tuple(sorted(tuple(sorted(edge)) for edge in _decode_prufer(np.array(code), 4)))
+        tuple(sorted(tuple(sorted(edge)) for edge in decode_prufer(np.array(code), 4)))
         for code in product(range(4), repeat=2)
     }
     assert len(trees) == 4 ** (4 - 2)
@@ -298,10 +290,10 @@ def test_task_categories_are_exhaustive_and_order_relative() -> None:
         ],
         dtype=np.float32,
     )
-    np.testing.assert_array_equal(_task_categories(latents), [0, 0, 1, 2])
+    np.testing.assert_array_equal(task_categories(latents), [0, 0, 1, 2])
     order = np.array([3, 1, 2, 0])
-    generation_relative = _task_categories(latents)[order]
-    presentation_relative = _task_categories(latents[order])
+    generation_relative = task_categories(latents)[order]
+    presentation_relative = task_categories(latents[order])
     assert not np.array_equal(generation_relative, presentation_relative)
 
 
@@ -377,9 +369,7 @@ def test_variable_world_validation_reports_conflicting_and_impossible_specs() ->
     with pytest.raises(ValueError, match="mutually exclusive"):
         assert_feasible(make_seq_cfg(surplus_tasks=1), num_modules=8)
     with pytest.raises(ValueError, match="exactly 2-hot"):
-        assert_feasible(
-            make_seq_cfg(phases=(), surplus_tasks=1, hotness=3), num_modules=8
-        )
+        assert_feasible(make_seq_cfg(phases=(), surplus_tasks=1, hotness=3), num_modules=8)
     with pytest.raises(ValueError, match="surplus_tasks must be >=1"):
         assert_feasible(
             make_seq_cfg(phases=(), surplus_tasks=0, require_full_rank=True),
@@ -414,9 +404,7 @@ def test_paired_composition_controls_match_prefix_shape_and_final_block() -> Non
         start, _ = constituent.info["task_spans"][task]
         count = constituent.info["demo_counts"][task]
         x_positions = start + 2 * np.arange(count)
-        np.testing.assert_array_equal(
-            constituent.tokens[x_positions], matched.tokens[x_positions]
-        )
+        np.testing.assert_array_equal(constituent.tokens[x_positions], matched.tokens[x_positions])
 
     final_boundary = constituent.info["boundaries"][-1]
     np.testing.assert_array_equal(

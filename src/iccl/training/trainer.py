@@ -24,37 +24,11 @@ from iccl.data.dataset import (
     collate_sequences,
     sequence_dataset_from_config,
 )
-from iccl.data.export import resolve_eval_cells
 from iccl.data.sequences import TOKEN_PAD
 from iccl.models.model import model_from_config
 from iccl.training.logger import RunLogger
 from iccl.training.metrics import evaluate_suites, load_eval_suites
 from iccl.utils import resolve_device
-
-BEST_METRIC = "in_dist/nmse_last_demo"
-
-
-def best_metric_name(cfg: DictConfig) -> str:
-    """Checkpoint-selection metric for the active frozen-suite schema."""
-    if cfg.data.eval_sets.get("capabilities") is None:
-        return BEST_METRIC
-    if "icl" not in cfg.data.eval_sets.capabilities.enabled:
-        return ""
-    canonical = int(cfg.data.eval_sets.module_counts.canonical_seen)
-    cells = resolve_eval_cells(cfg.data, int(cfg.seed))
-    if not cells:
-        raise ValueError("variable-world evaluation has no enabled structural cells")
-    candidates = [
-        cell
-        for cell in cells
-        if cell.slice == "fixed_surplus" and cell.num_modules == canonical
-    ]
-    cell = candidates[0] if candidates else cells[0]
-    name = (
-        f"icl__ordinary__{cell.slice}__{cell.status}__m{cell.num_modules:02d}__"
-        f"t{cell.num_tasks:02d}__b{cell.prediction_tokens:04d}"
-    )
-    return f"{name}/nmse_last_demo"
 
 
 def masked_mse(
@@ -176,7 +150,7 @@ class Trainer:
         self.scheduler = build_scheduler(self.optimizer, cfg.training)
         self.step = 0
         self.best_metric = float("inf")
-        self.best_metric_name = best_metric_name(cfg)
+        self.best_metric_name = str(cfg.data.eval_sets.get("best_metric", ""))
         self.last_loss = float("nan")
         self.snapshot_steps = resolve_snapshot_steps(cfg.training)
         self.logger = RunLogger(cfg, self.out_dir, job_type="train")
@@ -255,8 +229,7 @@ class Trainer:
                         "train/tokens_per_s": window_padded_tokens / elapsed,
                         "train/real_serialized_tokens_per_s": window_real_tokens / elapsed,
                         "train/padded_serialized_tokens_per_s": window_padded_tokens / elapsed,
-                        "train/padding_fraction": 1.0
-                        - window_real_tokens / window_padded_tokens,
+                        "train/padding_fraction": 1.0 - window_real_tokens / window_padded_tokens,
                         "train/mean_prediction_tokens_per_sequence": window_prediction_tokens
                         / window_sequences,
                         "train/mean_serialized_length": window_real_tokens / window_sequences,
@@ -294,9 +267,7 @@ class Trainer:
             self.device,
             autocast_dtype=self.autocast_dtype,
             bootstrap_seed=int(self.cfg.data.eval_sets.get("bootstrap_seed", 0)),
-            bootstrap_replicates=int(
-                self.cfg.data.eval_sets.get("bootstrap_replicates", 1000)
-            ),
+            bootstrap_replicates=int(self.cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
         )
         self.model.train()
         self.logger.log_eval(

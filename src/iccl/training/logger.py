@@ -11,8 +11,6 @@ uploaded as W&B artifacts, which survive the run directory and let W&B record
 which weights produced which numbers.
 """
 
-import json
-import math
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -143,36 +141,6 @@ def source_from_checkpoint(checkpoint: dict[str, Any]) -> SourceRun | None:
     return SourceRun(step=int(checkpoint["step"]), **reference)
 
 
-def _nan_to_none(curve: np.ndarray) -> list[float | None]:
-    """NaN-padded curve tail to a plottable list (NaN renders as a gap)."""
-    return [None if math.isnan(v) else float(v) for v in curve]
-
-
-def _curve_figure(history: list[tuple[int, np.ndarray]], title: str, xname: str) -> "go.Figure":
-    """A line-per-eval-step figure, each line colored by training progress so
-    later steps read as the curve moving over the earlier ones."""
-    import plotly.colors as pc
-    import plotly.graph_objects as go
-
-    figure = go.Figure()
-    for i, (step, curve) in enumerate(history):
-        fraction = i / (len(history) - 1) if len(history) > 1 else 1.0
-        color = pc.sample_colorscale("Viridis", fraction)[0]
-        figure.add_trace(
-            go.Scatter(
-                x=list(range(len(curve))),
-                y=_nan_to_none(curve),
-                mode="lines+markers",
-                name=f"step {step}",
-                line={"color": color},
-            )
-        )
-    figure.update_layout(
-        title=title, xaxis_title=xname, yaxis_title="normalized MSE", template="plotly_white"
-    )
-    return figure
-
-
 def _grouped_row_figure(
     rows: list[dict[str, Any]],
     *,
@@ -195,9 +163,7 @@ def _grouped_row_figure(
         label = ", ".join(
             f"{field}={value}" for field, value in zip(group_fields, group, strict=True)
         )
-        error = [
-            max(0.0, float(row["ci_high"]) - float(row[y_field])) for row in ordered
-        ]
+        error = [max(0.0, float(row["ci_high"]) - float(row[y_field])) for row in ordered]
         figure.add_trace(
             go.Scatter(
                 x=[row.get(x_field) for row in ordered],
@@ -224,61 +190,78 @@ def _grouped_row_figure(
     return figure
 
 
-def _structural_figures(summary_rows: list[dict[str, Any]]) -> dict[str, "go.Figure"]:
-    """Primary capability response panels over explicit structural axes."""
-    figures: dict[str, go.Figure] = {}
+def _summary_figures(summary_rows: list[dict[str, Any]]) -> dict[str, "go.Figure"]:
+    """Capability summaries projected onto the configured structural axes."""
     capability_metrics = {
-        "icl": ("nmse_aulc", "ordinary", "aulc"),
-        "composition": ("benefit_mean", "benefit", "benefit_mean"),
-        "retention": ("savings_mean", "savings", "savings_mean"),
+        "icl": ("ordinary", "nmse_aulc", "aulc"),
+        "composition": ("benefit", "benefit_mean", "benefit_mean"),
+        "retention": ("savings", "savings_mean", "savings_mean"),
     }
-    axis_specs = {
-        "M": (
-            "M",
-            "module count M",
-            {"fixed_surplus", "matched_task_count", "matched_prediction_tokens"},
-        ),
-        "task_count": (
-            "T",
-            "history task count T",
-            {"task_count", "matched_serialized_prefix"},
-        ),
+    axes = {
+        "M": ("M", {"fixed_surplus", "matched_task_count", "matched_prediction_tokens"}),
+        "task_count": ("T", {"task_count", "matched_serialized_prefix"}),
         "history_tokens": (
             "L_history",
-            "serialized history tokens L",
             {"task_count", "history_demos", "matched_prediction_tokens"},
         ),
-        "history_demos": (
-            "D_mean",
-            "mean history demos per task",
-            {"history_demos", "demo_allocation"},
-        ),
-        "demo_allocation": (
-            "variant",
-            "demo allocation pattern",
-            {"demo_allocation"},
-        ),
+        "history_demos": ("D_mean", {"history_demos", "demo_allocation"}),
+        "demo_allocation": ("variant", {"demo_allocation"}),
     }
-    for capability, (metric, condition, key_metric) in capability_metrics.items():
-        metric_rows = [
+    specifications = []
+    for capability, (condition, metric, label) in capability_metrics.items():
+        for axis, (field, slices) in axes.items():
+            specifications.append(
+                (
+                    capability,
+                    condition,
+                    metric,
+                    field,
+                    slices,
+                    f"capability/{capability}/{label}_vs_{axis}",
+                )
+            )
+    specifications.extend(
+        (
+            "composition",
+            "benefit",
+            "benefit_mean",
+            field,
+            None,
+            key,
+        )
+        for field, key in {
+            "constituent_exposure_min": "composition/benefit_vs_constituent_task_exposure",
+            "constituent_demo_exposure_min": "composition/benefit_vs_constituent_demo_exposure",
+        }.items()
+    )
+    specifications.extend(
+        ("retention", "savings", "savings_mean", field, None, key)
+        for field, key in {
+            "intervening_tasks": "retention/savings_vs_intervening_tasks",
+            "prediction_token_delay": "retention/savings_vs_prediction_token_delay",
+            "serialized_token_delay": "retention/savings_vs_serialized_token_delay",
+        }.items()
+    )
+    figures: dict[str, go.Figure] = {}
+    for capability, condition, metric, field, slices, key in specifications:
+        rows = [
             row
             for row in summary_rows
             if row["capability"] == capability
-            and row["metric"] == metric
             and row["condition"] == condition
+            and row["metric"] == metric
+            and row.get(field) is not None
+            and (slices is None or row["slice"] in slices)
         ]
-        for axis, (x_field, x_title, slices) in axis_specs.items():
-            rows = [row for row in metric_rows if row["slice"] in slices]
-            if not rows:
-                continue
-            figures[f"capability/{capability}/{key_metric}_vs_{axis}"] = _grouped_row_figure(
+        if rows:
+            figures[key] = _grouped_row_figure(
                 rows,
-                title=f"{capability}: {metric} vs {axis}",
-                x_field=x_field,
+                title=key,
+                x_field=field,
                 y_field="value",
-                x_title=x_title,
+                x_title=field,
                 y_title=metric,
-                group_fields=("slice", "status"),
+                group_fields=("slice", "status", "M"),
             )
     return figures
 
@@ -288,25 +271,19 @@ def _capability_curve_figures(curve_rows: list[dict[str, Any]]) -> dict[str, "go
     mapping = {
         ("icl", "learning_curve"): "capability/icl/learning_curve",
         ("icl", "task_position_curve"): "icl/nmse_by_task_position",
-        ("icl", "nmse_by_prediction_tokens_observed"): (
-            "icl/nmse_by_prediction_tokens_observed"
-        ),
-        ("icl", "nmse_by_unique_supports_observed"): (
-            "icl/nmse_by_unique_supports_observed"
-        ),
+        ("icl", "nmse_by_prediction_tokens_observed"): ("icl/nmse_by_prediction_tokens_observed"),
+        ("icl", "nmse_by_unique_supports_observed"): ("icl/nmse_by_unique_supports_observed"),
         ("icl", "nmse_by_modules_covered"): "icl/nmse_by_modules_covered",
         ("composition", "constituent_curve"): "capability/composition/constituent_curve",
         ("composition", "matched_prefix_curve"): "capability/composition/matched_prefix_curve",
         ("composition", "benefit_curve"): "capability/composition/benefit_curve",
         ("composition", "no_history_curve"): "capability/composition/no_history_curve",
         ("retention", "original_curve"): "capability/retention/original_curve",
-        ("retention", "repeat_curve"): "capability/retention/relearning_curve",
+        ("retention", "relearning_curve"): "capability/retention/relearning_curve",
         ("retention", "novel_curve"): "capability/retention/novel_control_curve",
         ("retention", "shared_curve"): "capability/retention/shared_control_curve",
         ("retention", "savings_curve"): "capability/retention/savings_curve",
-        ("retention", "episodic_savings_curve"): (
-            "capability/retention/episodic_savings_curve"
-        ),
+        ("retention", "episodic_savings_curve"): ("capability/retention/episodic_savings_curve"),
         ("retention", "module_savings_curve"): "capability/retention/module_savings_curve",
     }
     figures: dict[str, go.Figure] = {}
@@ -325,64 +302,6 @@ def _capability_curve_figures(curve_rows: list[dict[str, Any]]) -> dict[str, "go
                 x_title="demo index",
                 y_title="normalized MSE",
                 group_fields=("slice", "status", "M", "T", "condition"),
-            )
-    return figures
-
-
-def _secondary_capability_figures(
-    summary_rows: list[dict[str, Any]],
-) -> dict[str, "go.Figure"]:
-    """Constituent-exposure and retention-delay response panels."""
-    figures: dict[str, go.Figure] = {}
-    composition = [
-        row
-        for row in summary_rows
-        if row["capability"] == "composition"
-        and row["condition"] == "benefit"
-        and row["metric"] == "benefit_mean"
-    ]
-    composition_axes = {
-        "constituent_exposure_min": "composition/benefit_vs_constituent_task_exposure",
-        "constituent_demo_exposure_min": (
-            "composition/benefit_vs_constituent_demo_exposure"
-        ),
-    }
-    for field, key in composition_axes.items():
-        rows = [row for row in composition if row.get(field) is not None]
-        if rows:
-            figures[key] = _grouped_row_figure(
-                rows,
-                title=key,
-                x_field=field,
-                y_field="value",
-                x_title=field,
-                y_title="composition benefit",
-                group_fields=("slice", "status", "M"),
-            )
-
-    retention = [
-        row
-        for row in summary_rows
-        if row["capability"] == "retention"
-        and row["condition"] == "savings"
-        and row["metric"] == "savings_mean"
-    ]
-    retention_axes = {
-        "intervening_tasks": "retention/savings_vs_intervening_tasks",
-        "prediction_token_delay": "retention/savings_vs_prediction_token_delay",
-        "serialized_token_delay": "retention/savings_vs_serialized_token_delay",
-    }
-    for field, key in retention_axes.items():
-        rows = [row for row in retention if row.get(field) is not None]
-        if rows:
-            figures[key] = _grouped_row_figure(
-                rows,
-                title=key,
-                x_field=field,
-                y_field="value",
-                x_title=field,
-                y_title="retention savings",
-                group_fields=("slice", "status", "M"),
             )
     return figures
 
@@ -410,9 +329,6 @@ class RunLogger:
         self.job_type = job_type
         self.source = source
         self.run = None
-        # Per-curve list of (step, curve) across calls, so each curve is logged
-        # to W&B as one Plotly panel with a line per evaluation.
-        self.curve_history: dict[str, list[tuple[int, np.ndarray]]] = {}
         self.summary_history: list[dict[str, Any]] = []
         self.curve_row_history: list[dict[str, Any]] = []
 
@@ -518,25 +434,11 @@ class RunLogger:
             self.run.finish()
 
     def _log_curves(self, curves: dict[str, np.ndarray], step: int) -> Path:
-        """Curves to the run dir as one ``.npz`` per step, and with a live run to
-        an ``eval-curves/<suite>/<name>`` Plotly panel per curve, accumulating a
-        line per evaluation so curves can be watched sharpening over training.
-        Plotly panels carry no backing summary table, unlike
-        ``wandb.plot.line_series``."""
+        """Write one local curve archive per evaluation step."""
         eval_dir = self.out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
         path = eval_dir / f"step_{step:07d}.npz"
         np.savez(path, **{key.replace("/", "."): curve for key, curve in curves.items()})  # pyright: ignore[reportArgumentType]
-        if self.run is None:
-            return path
-        import wandb
-
-        for key, curve in curves.items():
-            history = self.curve_history.setdefault(key, [])
-            history.append((step, curve))
-            xname = "task position" if key.endswith("task_position_curve") else "demo index"
-            figure = _curve_figure(history, key, xname)
-            self.run.log({f"eval-curves/{key}": wandb.Plotly(figure)}, step=step)
         return path
 
     def _log_capability_tables(
@@ -551,14 +453,6 @@ class RunLogger:
         self.summary_history.extend(summary)
         self.curve_row_history.extend(curves)
 
-        eval_dir = self.out_dir / "eval"
-        eval_dir.mkdir(parents=True, exist_ok=True)
-        (eval_dir / f"step_{step:07d}_summary.json").write_text(
-            json.dumps(summary, indent=2, allow_nan=False)
-        )
-        (eval_dir / f"step_{step:07d}_curves.json").write_text(
-            json.dumps(curves, indent=2, allow_nan=False)
-        )
         if self.run is None:
             return
         import wandb
@@ -567,20 +461,17 @@ class RunLogger:
             "eval-tables/capability_summary": wandb.Table(
                 columns=cast(Any, SUMMARY_COLUMNS),
                 data=[
-                    [row.get(column) for column in SUMMARY_COLUMNS]
-                    for row in self.summary_history
+                    [row.get(column) for column in SUMMARY_COLUMNS] for row in self.summary_history
                 ],
             ),
             "eval-tables/capability_curves": wandb.Table(
                 columns=cast(Any, CURVE_COLUMNS),
                 data=[
-                    [row.get(column) for column in CURVE_COLUMNS]
-                    for row in self.curve_row_history
+                    [row.get(column) for column in CURVE_COLUMNS] for row in self.curve_row_history
                 ],
             ),
         }
-        figures = _structural_figures(summary_rows)
+        figures = _summary_figures(summary_rows)
         figures.update(_capability_curve_figures(curve_rows))
-        figures.update(_secondary_capability_figures(summary_rows))
         payload.update({key: wandb.Plotly(figure) for key, figure in figures.items()})
         self.run.log(payload, step=step)

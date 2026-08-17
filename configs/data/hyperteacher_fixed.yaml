@@ -1,0 +1,52 @@
+# Fixed M=8, T=8, D=32 training distribution.
+name: hyperteacher
+
+input_dim: 16
+output_dim: 16
+hidden_dims: [16]
+use_bias: true
+num_modules: 8
+scale: 1.7320508075688772  # sqrt(3)
+weighting: discrete        # binary | discrete | continuous
+
+sequence:
+  curriculum_sampler: rejection
+  phases:
+    - {num_tasks: 8, hotness: [2, 2]}
+  demos_per_task: 32
+  signal_boundaries: true
+  require_identifiable: true
+  require_full_rank: false
+  max_attempts: 1000
+  task_graph: random
+  graph_ordered: false
+
+eval_sets:
+  num_sequences: 256
+  out_dir: data/eval_sets
+  bootstrap_seed: 0
+  bootstrap_replicates: 1000
+  best_metric: icl__ordinary__fixed_surplus__seen__m08__t08__b0256/nmse_last_demo
+  module_counts:
+    seen_selection: endpoints_and_canonical
+    canonical_seen: 8
+    ood: []
+  capabilities:
+    enabled: [icl, composition, retention]
+    composition:
+      target_demos: 8
+      constituent_task_exposures: 1
+      controls: [matched_prefix, no_history]
+    retention:
+      revisit_demos: 16
+      controls: [novel, shared]
+  structural_slices:
+    enabled: [fixed_surplus]
+    fixed_surplus:
+      surplus_tasks: 1
+      history_demos_per_task: 32
+
+distribution_diagnostic:
+  num_sequences: 10000
+  bootstrap_seed: 0
+  bootstrap_replicates: 1000

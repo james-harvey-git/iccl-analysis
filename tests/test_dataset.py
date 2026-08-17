@@ -4,6 +4,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
+from iccl.data.curriculum import PhaseConfig, SequenceConfig
 from iccl.data.dataset import (
     SequenceDataset,
     collate_sequences,
@@ -11,7 +12,7 @@ from iccl.data.dataset import (
     sequence_dataset_from_config,
     sequence_rng,
 )
-from iccl.data.sequences import TOKEN_PAD, PhaseConfig, SequenceConfig
+from iccl.data.sequences import TOKEN_PAD
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
 
@@ -38,7 +39,14 @@ def make_dataset(
         signal_boundaries=True,
         require_identifiable=True,
     )
-    return SequenceDataset(family, cfg, base_seed=base_seed, num_sequences=num_sequences)
+    module_counts = module_count_config_from(OmegaConf.create({"num_modules": 8}))
+    return SequenceDataset(
+        {8: family},
+        module_counts,
+        cfg,
+        base_seed=base_seed,
+        num_sequences=num_sequences,
+    )
 
 
 def test_same_seed_and_index_reproduce_exactly() -> None:

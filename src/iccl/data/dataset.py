@@ -16,14 +16,16 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import IterableDataset, get_worker_info
 
-from iccl.data.sequences import (
-    TOKEN_PAD,
+from iccl.data.curriculum import (
     DemoCountConfig,
-    FinalTaskConfig,
     PhaseConfig,
     SequenceConfig,
-    SequenceSample,
     assert_feasible,
+)
+from iccl.data.sequences import (
+    TOKEN_PAD,
+    FinalTaskConfig,
+    SequenceSample,
     build_sequence,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
@@ -61,9 +63,7 @@ def module_count_config_from(cfg: DictConfig) -> ModuleCountConfig:
     minimum, maximum = int(spec.min), int(spec.max)
     held_out = tuple(int(value) for value in spec.get("held_out", []))
     if minimum < 2 or minimum > maximum:
-        raise ValueError(
-            f"num_modules requires 2 <= min <= max, got min={minimum}, max={maximum}"
-        )
+        raise ValueError(f"num_modules requires 2 <= min <= max, got min={minimum}, max={maximum}")
     if len(set(held_out)) != len(held_out):
         raise ValueError(f"num_modules.held_out contains duplicates: {held_out}")
     invalid = [value for value in held_out if not minimum < value < maximum]
@@ -103,27 +103,19 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
     elif hasattr(demos, "get") and demos.get("scope") is not None:
         if demos.scope not in {"per_sequence", "per_task"}:
             raise ValueError(
-                "demos_per_task.scope must be per_sequence or per_task, got "
-                f"{demos.scope!r}"
+                f"demos_per_task.scope must be per_sequence or per_task, got {demos.scope!r}"
             )
         if int(demos.min) < 1 or int(demos.min) > int(demos.max):
             raise ValueError(
-                "demos_per_task requires 1 <= min <= max, got "
-                f"[{demos.min}, {demos.max}]"
+                f"demos_per_task requires 1 <= min <= max, got [{demos.min}, {demos.max}]"
             )
-        demo_spec = DemoCountConfig(
-            min=int(demos.min), max=int(demos.max), scope=str(demos.scope)
-        )
+        demo_spec = DemoCountConfig(min=int(demos.min), max=int(demos.max), scope=str(demos.scope))
     else:
         demo_values = tuple(int(value) for value in demos)
         if len(demo_values) != 2:
-            raise ValueError(
-                f"demos_per_task range must contain [min, max], got {demo_values}"
-            )
+            raise ValueError(f"demos_per_task range must contain [min, max], got {demo_values}")
         if demo_values[0] < 1 or demo_values[0] > demo_values[1]:
-            raise ValueError(
-                f"demos_per_task requires 1 <= min <= max, got {demo_values}"
-            )
+            raise ValueError(f"demos_per_task requires 1 <= min <= max, got {demo_values}")
         demo_spec = (demo_values[0], demo_values[1])
 
     surplus_raw = cfg.sequence.get("surplus_tasks")
@@ -137,13 +129,9 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
     else:
         surplus_values = tuple(int(value) for value in surplus_raw)
         if len(surplus_values) != 2:
-            raise ValueError(
-                f"surplus_tasks range must contain [min, max], got {surplus_values}"
-            )
+            raise ValueError(f"surplus_tasks range must contain [min, max], got {surplus_values}")
         if surplus_values[0] < 0 or surplus_values[0] > surplus_values[1]:
-            raise ValueError(
-                f"surplus_tasks requires 0 <= min <= max, got {surplus_values}"
-            )
+            raise ValueError(f"surplus_tasks requires 0 <= min <= max, got {surplus_values}")
         surplus = (surplus_values[0], surplus_values[1])
 
     sequence = SequenceConfig(
@@ -160,6 +148,7 @@ def sequence_config_from(cfg: DictConfig) -> SequenceConfig:
         curriculum_sampler=cfg.sequence.get("curriculum_sampler", "rejection"),
         hotness=int(cfg.sequence.get("hotness", 2)),
         surplus_tasks=surplus,
+        max_attempts=int(cfg.sequence.get("max_attempts", 1000)),
     )
     return sequence
 
@@ -171,14 +160,10 @@ def make_family(
     phase can request (plus headroom for higher-hotness eval tasks)."""
     phases = cfg.sequence.get("phases", [])
     curriculum_hotness = (
-        max(int(p.hotness[1]) for p in phases)
-        if phases
-        else int(cfg.sequence.get("hotness", 2))
+        max(int(p.hotness[1]) for p in phases) if phases else int(cfg.sequence.get("hotness", 2))
     )
     max_hotness = max(curriculum_hotness, extra_hotness)
-    return HyperTeacher(
-        teacher_config_from(cfg, num_modules=num_modules), max_hotness=max_hotness
-    )
+    return HyperTeacher(teacher_config_from(cfg, num_modules=num_modules), max_hotness=max_hotness)
 
 
 class SequenceDataset(IterableDataset):
@@ -193,33 +178,23 @@ class SequenceDataset(IterableDataset):
 
     def __init__(
         self,
-        family: HyperTeacher,
+        families: dict[int, HyperTeacher],
+        module_counts: ModuleCountConfig,
         seq_cfg: SequenceConfig,
         base_seed: int,
         num_sequences: int | None = None,
         final_task: FinalTaskConfig | None = None,
         start_index: int = 0,
-        module_counts: ModuleCountConfig | None = None,
-        families: dict[int, HyperTeacher] | None = None,
     ) -> None:
-        self.family = family
+        if set(module_counts.allowed) - families.keys():
+            raise ValueError("a HyperTeacher family is required for every allowed M")
+        self.families = families
+        self.module_counts = module_counts
         self.seq_cfg = seq_cfg
         self.base_seed = base_seed
         self.num_sequences = num_sequences
         self.final_task = final_task
         self.start_index = start_index
-        self.module_counts = module_counts or ModuleCountConfig(
-            family.cfg.num_modules,
-            family.cfg.num_modules,
-            (),
-            (family.cfg.num_modules,),
-        )
-        self.families = families or {family.cfg.num_modules: family}
-        missing = set(self.module_counts.allowed) - self.families.keys()
-        if missing:
-            raise ValueError(
-                f"no HyperTeacher family configured for module counts {sorted(missing)}"
-            )
 
     def build(self, index: int, **kwargs: Any) -> SequenceSample:
         rng = sequence_rng(self.base_seed, index)
@@ -258,14 +233,13 @@ def sequence_dataset_from_config(
         for num_modules in module_counts.allowed
     }
     return SequenceDataset(
-        families[module_counts.allowed[0]],
+        families,
+        module_counts,
         sequence,
         base_seed=base_seed,
         num_sequences=num_sequences,
         final_task=final_task,
         start_index=start_index,
-        module_counts=module_counts,
-        families=families,
     )
 
 
