@@ -1,12 +1,11 @@
 """Evaluate one checkpoint or an explicit checkpoint trajectory.
 
-Re-scores finished weights without retraining. Use ``training.resume`` for one
-checkpoint or ``evaluation.checkpoints`` for an ordered trajectory. References
-may be local paths or ``wandb://entity/project/name:alias`` artifacts;
-downloaded artifacts are recorded as inputs so W&B ties the measurements to
-their source weights. The W&B run contains a compact summary, while complete
-aggregate rows and per-demo errors are written locally and optionally uploaded
-as one evaluation artifact.
+Re-scores finished weights without retraining. ``evaluation.checkpoints`` holds
+one reference or an ordered trajectory of local paths or
+``wandb://entity/project/name:alias`` artifacts. Downloaded artifacts are
+recorded as inputs so W&B ties the measurements to their source weights. The
+W&B run contains a compact summary, while complete aggregate rows and per-demo
+errors are written locally and optionally uploaded as one evaluation artifact.
 """
 
 from dataclasses import asdict
@@ -17,7 +16,12 @@ import torch
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.checkpoints import WANDB_SCHEME, resolve_checkpoint_path, source_from_checkpoint
+from iccl.checkpoints import (
+    WANDB_SCHEME,
+    evaluation_checkpoint_references,
+    resolve_checkpoint_path,
+    source_from_checkpoint,
+)
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
 from iccl.evaluation.results import write_evaluation_results
 from iccl.models.model import model_from_config
@@ -26,23 +30,11 @@ from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
 
 
-def checkpoint_references(cfg: DictConfig) -> list[str]:
-    """Explicit trajectory references, or the single training.resume value."""
-    references = [str(value) for value in cfg.evaluation.get("checkpoints", [])]
-    if references:
-        return references
-    if cfg.training.resume is not None:
-        return [str(cfg.training.resume)]
-    raise ValueError(
-        "set training.resume for one checkpoint or evaluation.checkpoints for a trajectory"
-    )
-
-
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
-    references = checkpoint_references(cfg)
+    references = evaluation_checkpoint_references(cfg)
     first_path, first_is_artifact = resolve_checkpoint_path(references[0])
     first_checkpoint = torch.load(first_path, map_location=device, weights_only=False)
     model = model_from_config(cfg).to(device)

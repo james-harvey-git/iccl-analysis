@@ -1,4 +1,10 @@
-"""Frozen, homogeneous evaluation suites for configured capability cells."""
+"""Generate reproducible frozen suites for validation and capability evaluation.
+
+The exporter expands homogeneous cells from the data config into deterministic
+sequence archives. Each array file is paired with metadata recording its
+resolved configuration and generation provenance, so training-time monitoring
+and standalone evaluation score the same examples.
+"""
 
 import json
 import subprocess

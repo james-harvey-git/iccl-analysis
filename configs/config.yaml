@@ -20,9 +20,9 @@ wandb:
   upload_weights: false
 
 evaluation:
-  # Empty uses training.resume; otherwise evaluate these local or wandb://
-  # checkpoint references in ascending training-step order within one eval run.
-  checkpoints: []
+  # One or more local or wandb:// checkpoint references. Multiple entries form
+  # one trajectory and must be ordered by increasing training step.
+  checkpoints: []  # required by scripts/eval.py; unrelated to training.resume
   upload_results: true  # upload complete numerical results; no-op with W&B disabled
 
 hydra:

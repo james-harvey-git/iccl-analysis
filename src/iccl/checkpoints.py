@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from omegaconf import DictConfig
+
 WANDB_SCHEME = "wandb://"
 
 
@@ -36,6 +38,14 @@ def source_from_checkpoint(checkpoint: dict[str, Any]) -> SourceRun | None:
     if reference is None:
         return None
     return SourceRun(step=int(checkpoint["step"]), **reference)
+
+
+def evaluation_checkpoint_references(cfg: DictConfig) -> list[str]:
+    """Resolve the explicitly configured evaluation checkpoint or trajectory."""
+    references = [str(value) for value in cfg.evaluation.get("checkpoints", [])]
+    if not references:
+        raise ValueError("evaluation.checkpoints must contain at least one checkpoint reference")
+    return references
 
 
 def resolve_checkpoint_path(reference: str) -> tuple[Path, bool]:

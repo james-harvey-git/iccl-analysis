@@ -16,7 +16,7 @@ log_every: 50       # optimizer-step cadence for training scalars
 validation_every: 1000  # training-distribution token MSE cadence; null disables
 monitor_every: 5000     # canonical capability-curve cadence; null disables
 checkpoint_every: 10000  # cadence of rolling last.pt, which resumption reads
-resume: null        # null | local checkpoint path; eval.py also accepts wandb:// references
+resume: null        # null | local full-state checkpoint used only to resume training
 
 # Step-tagged weights kept for interpretability and for re-scoring under metrics
 # defined after the run, unlike `last.pt`, which is overwritten. The saved steps

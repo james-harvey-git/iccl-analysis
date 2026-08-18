@@ -1,4 +1,10 @@
-"""Serialize sampled ICCL curricula into causal demonstration streams."""
+"""Build model-ready causal streams from sampled ICCL worlds and curricula.
+
+Each sequence samples or reuses a module pool, generates demonstrations for its
+curriculum and optional probe tasks, and serializes them as boundary, input and
+output tokens. Returned metadata preserves the task structure and prefix
+statistics needed by paired controls, evaluation and diagnostics.
+"""
 
 from dataclasses import dataclass, field
 from typing import Any
