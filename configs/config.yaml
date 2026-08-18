@@ -4,16 +4,16 @@ defaults:
   - training: default
   - _self_
 
-seed: 0
+seed: 0  # root seed for model initialization and indexed data streams
 
-# "auto" resolves to cuda > mps > cpu at runtime.
+# auto resolves cuda > mps > cpu; explicit values include cpu, mps, cuda, cuda:<index>.
 device: auto
 
 wandb:
-  mode: disabled # online | offline (`wandb sync` after) | disabled; cluster jobs pass online
+  mode: disabled  # online | offline (`wandb sync` after) | disabled
   project: iccl-analysis
   entity: jublett-university-of-oxford
-  name: null # null keeps W&B's generated name (e.g. `different-sound-6`)
+  name: null  # null keeps W&B's generated name (e.g. `different-sound-6`)
   # Uploads the final snapshot as an artifact at the end of a run; no-op when
   # mode is disabled. Covers only that automatic upload — promoting a full
   # series is `scripts/upload_snapshots.py`, which needs no flag.

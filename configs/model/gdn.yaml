@@ -3,17 +3,17 @@
 # for ablation.
 name: gdn
 
-d_model: 256
-n_heads: 4          # key head dim = d_model // n_heads
-n_layers: 4
-d_ffw: 1024
-expand_v: 2         # value heads are expand_v x wider than key heads
+d_model: 256        # residual-stream width; must be divisible by n_heads
+n_heads: 4          # key head width = d_model / n_heads
+n_layers: 4         # number of GDN blocks
+d_ffw: 1024         # SwiGLU hidden width in each block
+expand_v: 2         # value-head width / key-head width; product must be integral
 
-use_short_conv: true
-conv_size: 4
+use_short_conv: true  # causal depthwise convolution on q, k, and v projections
+conv_size: 4          # convolution kernel width; used only when use_short_conv=true
 use_gate: true      # silu-gated RMSNorm on the recurrence output
-allow_neg_eigval: false
-norm_eps: 1.0e-5
+allow_neg_eigval: false  # allow write strengths above 1 and negative update eigenvalues
+norm_eps: 1.0e-5    # epsilon for every RMSNorm
 
 # Sequence-mixing backend: fla | reference | auto (see iccl.models.ops).
 backend: auto

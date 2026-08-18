@@ -1,52 +1,54 @@
 # Fixed M=8, T=8, D=32 training distribution.
 name: hyperteacher
 
+# Dimensions of each per-sequence HyperTeacher world.
 input_dim: 16
 output_dim: 16
-hidden_dims: [16]
-use_bias: true
-num_modules: 8
-scale: 1.7320508075688772  # sqrt(3)
-weighting: discrete        # binary | discrete | continuous
+hidden_dims: [16]          # hidden widths of the primitive MLP; one value per layer
+use_bias: true             # include independently sampled primitive biases
+num_modules: 8             # M; positive integer >=2
+scale: 1.7320508075688772  # primitive weight variance scale; sqrt(3)
+weighting: discrete        # binary | discrete | continuous task weights
 
 sequence:
-  curriculum_sampler: rejection
+  curriculum_sampler: rejection  # fixed-phase random curricula use rejection sampling
+  # Fixed-phase form: num_tasks is per phase; hotness is inclusive [min, max].
   phases:
     - {num_tasks: 8, hotness: [2, 2]}
-  demos_per_task: 32
-  signal_boundaries: true
-  require_identifiable: true
-  require_full_rank: false
-  max_attempts: 1000
-  task_graph: random
-  graph_ordered: false
+  demos_per_task: 32        # positive int, [min, max], or {min, max, scope}
+  signal_boundaries: true   # insert a zero-loss boundary token before every task
+  require_identifiable: true  # require full module coverage and connected support
+  require_full_rank: false  # require task latents to span every used module
+  max_attempts: 1000        # resampling limit for constrained curricula
+  task_graph: random        # random | chain | ring | star; structured modes require 2-hot tasks
+  graph_ordered: false      # preserve structured edge order; ignored for task_graph=random
 
 eval_sets:
   num_sequences: 256       # per capability cell and training-distribution validation set
-  out_dir: data/eval_sets
-  bootstrap_seed: 0
-  bootstrap_replicates: 1000
+  out_dir: data/eval_sets   # frozen archives written by scripts/make_eval_sets.py
+  bootstrap_seed: 0        # independent seed for confidence intervals
+  bootstrap_replicates: 1000  # <2 disables bootstrap resampling
   best_metric: validation/token_mse  # evaluation scalar minimized when selecting best.pt
   module_counts:
-    seen_selection: endpoints_and_canonical
-    canonical_seen: 8
-    ood: []
+    seen_selection: endpoints_and_canonical  # evaluates min, max, and canonical_seen
+    canonical_seen: 8                        # must occur in the training support
+    ood: []                                  # unique integers greater than training max
   capabilities:
-    enabled: [icl, composition, retention]
+    enabled: [icl, composition, retention]  # any subset of these three values
     composition:
-      target_demos: 8
-      constituent_task_exposures: 1
-      controls: [matched_prefix, no_history]
+      target_demos: 8              # demonstrations of the final composed task
+      constituent_task_exposures: 1  # prior tasks containing each target module
+      controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
     retention:
-      revisit_demos: 16
-      controls: [novel, shared]
+      revisit_demos: 16            # demonstrations in the final revisit block
+      controls: [novel, shared]    # novel required; shared is same support/new weights
   structural_slices:
-    enabled: [fixed_surplus]
+    enabled: [fixed_surplus]       # names of the slice mappings to export
     fixed_surplus:
-      surplus_tasks: 1
+      surplus_tasks: 1             # T=M-1+S
       history_demos_per_task: 32
 
 distribution_diagnostic:
-  num_sequences: 10000
-  bootstrap_seed: 0
-  bootstrap_replicates: 1000
+  num_sequences: 10000       # sequences sampled by analyze_sequence_distribution.py
+  bootstrap_seed: 0          # independent seed for diagnostic confidence intervals
+  bootstrap_replicates: 1000  # <2 disables bootstrap resampling

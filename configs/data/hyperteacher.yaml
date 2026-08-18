@@ -2,52 +2,61 @@
 # fixed M=8, T=8, D=32 training distribution.
 name: hyperteacher
 
+# Dimensions of each per-sequence HyperTeacher world.
 input_dim: 16
 output_dim: 16
-hidden_dims: [16]
-use_bias: true
+hidden_dims: [16]          # hidden widths of the primitive MLP; one value per layer
+use_bias: true             # include independently sampled primitive biases
+# Sample M uniformly from the inclusive range after excluding held_out values.
 num_modules:
   min: 4
   max: 12
-  held_out: [6, 10]
-scale: 1.7320508075688772  # sqrt(3)
-weighting: discrete        # binary | discrete | continuous
+  held_out: [6, 10]        # unique integers strictly between min and max
+scale: 1.7320508075688772  # primitive weight variance scale; sqrt(3)
+weighting: discrete        # binary | discrete | continuous task weights
 
 sequence:
+  # Relative form: T=M-1+S. constructive builds a spanning-tree backbone;
+  # rejection samples all T tasks i.i.d. and conditions on the constraints.
   curriculum_sampler: constructive  # constructive | rejection
-  hotness: 2
-  surplus_tasks: 1          # int or inclusive [lo, hi]
+  hotness: 2                # active modules per task; relative form requires 2
+  surplus_tasks: 1          # non-negative int or inclusive [min, max]
+  # D may also be a positive int or inclusive [min, max]. This mapping makes
+  # the sampling scope explicit; min == max is a fixed value and consumes no RNG.
   demos_per_task:
     min: 24
     max: 40
     scope: per_task         # per_sequence | per_task
-  signal_boundaries: true
-  require_identifiable: true
-  require_full_rank: false
-  max_attempts: 1000
+  signal_boundaries: true   # insert a zero-loss boundary token before every task
+  require_identifiable: true  # require full module coverage and connected support
+  require_full_rank: false  # require task latents to span every used module
+  max_attempts: 1000        # resampling limit for constrained curricula
 
 eval_sets:
   num_sequences: 256       # per capability cell and training-distribution validation set
-  out_dir: data/eval_sets
-  bootstrap_seed: 0
-  bootstrap_replicates: 1000
+  out_dir: data/eval_sets   # frozen archives written by scripts/make_eval_sets.py
+  bootstrap_seed: 0        # independent seed for confidence intervals
+  bootstrap_replicates: 1000  # <2 disables bootstrap resampling
   best_metric: validation/token_mse  # evaluation scalar minimized when selecting best.pt
   module_counts:
-    seen_selection: endpoints_and_canonical
-    canonical_seen: 8
+    # Seen evaluation uses training min, max, and canonical_seen. held_out comes
+    # from num_modules.held_out; OOD values must be unique and greater than max.
+    seen_selection: endpoints_and_canonical  # only supported selection mode
+    canonical_seen: 8                        # must occur in the training support
     ood: [13, 16]
 
   capabilities:
-    enabled: [icl, composition, retention]
+    enabled: [icl, composition, retention]  # any subset of these three values
     composition:
-      target_demos: 16
-      constituent_task_exposures: 1
-      controls: [matched_prefix, no_history]
+      target_demos: 16             # demonstrations of the final composed task
+      constituent_task_exposures: 1  # prior tasks containing each target module
+      controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
     retention:
-      revisit_demos: 16
-      controls: [novel, shared]
+      revisit_demos: 16            # demonstrations in the final revisit block
+      controls: [novel, shared]    # novel required; shared is same support/new weights
 
   structural_slices:
+    # Each enabled name expands its mapping below into homogeneous (M,T,D) cells.
     enabled:
       - fixed_surplus
       - matched_task_count
@@ -58,39 +67,39 @@ eval_sets:
       - demo_allocation
 
     fixed_surplus:
-      surplus_tasks: 1
+      surplus_tasks: 1             # vary M with fixed S and D
       history_demos_per_task: 32
 
     matched_task_count:
-      task_count: 15
+      task_count: 15               # vary M with fixed T and D
       history_demos_per_task: 32
 
     matched_prediction_tokens:
-      prediction_tokens: 480
-      surplus_tasks: 1
+      prediction_tokens: 480       # fixed total history demonstrations B
+      surplus_tasks: 1             # sets T=M-1+S; B is divided across those tasks
 
     task_count:
-      module_count: 8
-      values: [7, 8, 10, 12, 15]
+      module_count: 8              # vary T at fixed M and D
+      values: [7, 8, 10, 12, 15]  # positive task counts satisfying T>=M-1
       history_demos_per_task: 32
 
     history_demos:
-      module_count: 8
+      module_count: 8              # vary uniform D at fixed M and T
       task_count: 8
-      values: [8, 16, 32, 64]
+      values: [8, 16, 32, 64]      # positive demos per task
 
     matched_serialized_prefix:
-      module_count: 8
-      serialized_tokens: 520
-      task_counts: [8, 10, 12]
+      module_count: 8              # vary T while fixing serialized history length L
+      serialized_tokens: 520       # L=2B+T with signalled task boundaries
+      task_counts: [8, 10, 12]     # B is divided as evenly as possible across tasks
 
     demo_allocation:
-      module_count: 8
+      module_count: 8              # compare allocations at fixed M, T, and B
       task_count: 8
       prediction_tokens: 256
-      patterns: [uniform, alternating, front_loaded, back_loaded]
+      patterns: [uniform, alternating, front_loaded, back_loaded]  # any subset
 
 distribution_diagnostic:
-  num_sequences: 10000
-  bootstrap_seed: 0
-  bootstrap_replicates: 1000
+  num_sequences: 10000       # sequences sampled by analyze_sequence_distribution.py
+  bootstrap_seed: 0          # independent seed for diagnostic confidence intervals
+  bootstrap_replicates: 1000  # <2 disables bootstrap resampling
