@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from jaxtyping import Float
 
-from iccl.data.export import load_suite, load_suite_metadata
+from iccl.data.export import VALIDATION_SUITE, load_suite, load_suite_metadata
 from iccl.models.model import GDNModel
 
 Suite = dict[str, Any]
@@ -108,6 +108,16 @@ def demo_nmse(
     """MSE divided by each task's output variance."""
     denominator = np.maximum(suite["base_mse"].mean(axis=-1), BASE_MSE_FLOOR)
     return demo_mse(preds, suite) / denominator[:, :, None]
+
+
+def token_mse(preds: np.ndarray, suite: Suite) -> float:
+    """Raw MSE pooled over every prediction-bearing token in a suite."""
+    mask = np.asarray(suite["loss_mask"], dtype=np.float64)
+    denominator = float(mask.sum())
+    if denominator <= 0:
+        raise ValueError("validation suite contains no prediction-bearing tokens")
+    squared_error = ((preds - suite["targets"]) ** 2).mean(axis=-1)
+    return float((squared_error * mask).sum() / denominator)
 
 
 def _last_task_values(errors: np.ndarray, counts: np.ndarray) -> np.ndarray:
@@ -636,8 +646,10 @@ def evaluate_suites(
     bootstrap_seed: int = 0,
     bootstrap_replicates: int = 1000,
 ) -> EvaluationReport:
-    """Evaluate all configured capabilities into scalars, curves, and table rows."""
+    """Evaluate the training objective and all configured capability suites."""
+    capability_suites: dict[str, Suite] = {}
     mses, nmses = {}, {}
+    validation_metric: float | None = None
     for name, suite in suites.items():
         predictions = predict_suite(
             model,
@@ -646,12 +658,19 @@ def evaluate_suites(
             batch_size=batch_size,
             autocast_dtype=autocast_dtype,
         )
+        if name == VALIDATION_SUITE:
+            validation_metric = token_mse(predictions, suite)
+            continue
+        capability_suites[name] = suite
         mses[name] = demo_mse(predictions, suite)
         nmses[name] = demo_nmse(predictions, suite)
-    return _evaluate(
-        suites,
+    report = _evaluate(
+        capability_suites,
         mses,
         nmses,
         bootstrap_seed=bootstrap_seed,
         bootstrap_replicates=bootstrap_replicates,
     )
+    if validation_metric is not None:
+        report.scalars[f"{VALIDATION_SUITE}/token_mse"] = validation_metric
+    return report

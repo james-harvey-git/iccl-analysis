@@ -65,9 +65,7 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
                 },
                 "eval_sets": {
                     "out_dir": str(tmp_path / "eval_sets"),
-                    "best_metric": (
-                        "icl__ordinary__fixed_surplus__seen__m08__t08__b0032/nmse_last_demo"
-                    ),
+                    "best_metric": "validation/token_mse",
                 },
             },
             "model": {
@@ -306,6 +304,15 @@ def test_trainer_runs_eval_and_tracks_best(tmp_path: Path) -> None:
                 "sequence": {"curriculum_sampler": "rejection"},
                 "weighting": "discrete",
             },
+        },
+    )
+    export_suite(
+        samples,
+        out_dir / "validation",
+        {
+            "suite": "validation",
+            "capability": "validation",
+            "condition": "training_distribution",
         },
     )
 

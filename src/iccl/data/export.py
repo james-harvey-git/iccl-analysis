@@ -19,11 +19,20 @@ from iccl.data.curriculum import (
     TASK_CATEGORY_CODES,
     TASK_ORIGIN_CODES,
 )
-from iccl.data.dataset import make_family, sequence_config_from, sequence_rng
+from iccl.data.dataset import (
+    collate_sequences,
+    make_family,
+    sequence_config_from,
+    sequence_dataset_from_config,
+    sequence_rng,
+    to_tensors,
+)
 from iccl.data.eval_cells import EvalCell, resolve_eval_cells
 from iccl.data.sequences import SequenceSample, build_sequence
 
 EVAL_SEED_OFFSET = 1_000_000
+VALIDATION_SEED_OFFSET = 2_000_000
+VALIDATION_SUITE = "validation"
 
 EXPORTED_INFO = (
     "num_modules",
@@ -56,6 +65,13 @@ def _stack(samples: list[SequenceSample], key: str) -> np.ndarray:
     return np.stack([sample.info[key] for sample in samples])
 
 
+def _write_arrays(arrays: dict[str, np.ndarray], path: Path, meta: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path.with_suffix(".npz"), allow_pickle=False, **arrays)
+    metadata = dict(meta, num_sequences=len(arrays["tokens"]), git_commit=_git_commit())
+    path.with_suffix(".meta.json").write_text(json.dumps(metadata, indent=2, default=str))
+
+
 def export_suite(samples: list[SequenceSample], path: Path, meta: dict[str, Any]) -> None:
     """Write one equally-shaped suite and its resolved metadata."""
     lengths = {len(sample.tokens) for sample in samples}
@@ -82,10 +98,30 @@ def export_suite(samples: list[SequenceSample], path: Path, meta: dict[str, Any]
             arrays[f"world_modules_{layer}"] = np.stack([pool.modules[layer] for pool in pools])
             arrays[f"world_biases_{layer}"] = np.stack([pool.biases[layer] for pool in pools])
         arrays["world_readout"] = np.stack([pool.readout for pool in pools])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path.with_suffix(".npz"), allow_pickle=False, **arrays)
-    metadata = dict(meta, num_sequences=len(samples), git_commit=_git_commit())
-    path.with_suffix(".meta.json").write_text(json.dumps(metadata, indent=2, default=str))
+    _write_arrays(arrays, path, meta)
+
+
+def export_training_validation(data_cfg: DictConfig, path: Path, *, count: int, seed: int) -> None:
+    """Freeze a padded sample from the on-the-fly training distribution."""
+    dataset = sequence_dataset_from_config(
+        data_cfg,
+        base_seed=seed + VALIDATION_SEED_OFFSET,
+        num_sequences=count,
+    )
+    samples = [dataset.build(index) for index in range(count)]
+    batch = collate_sequences([to_tensors(sample) for sample in samples])
+    arrays = {key: value.numpy() for key, value in batch.items()}
+    _write_arrays(
+        arrays,
+        path / VALIDATION_SUITE,
+        {
+            "suite": VALIDATION_SUITE,
+            "capability": "validation",
+            "condition": "training_distribution",
+            "config": OmegaConf.to_container(data_cfg, resolve=True),
+            "seed": seed,
+        },
+    )
 
 
 def suite_name(capability: str, condition: str, cell: EvalCell) -> str:
@@ -156,6 +192,7 @@ def export_eval_sets(cfg: DictConfig) -> int:
     out_dir = Path(eval_cfg.out_dir)
     count = int(eval_cfg.num_sequences)
     base_seed = int(cfg.seed) + EVAL_SEED_OFFSET
+    export_training_validation(data_cfg, out_dir, count=count, seed=int(cfg.seed))
     base_sequence = sequence_config_from(data_cfg)
     base_meta = {
         "config": OmegaConf.to_container(data_cfg, resolve=True),
@@ -173,7 +210,7 @@ def export_eval_sets(cfg: DictConfig) -> int:
         if any(cell.slice == name for cell in cells)
     }
     written: set[str] = set()
-    stream = suites_written = 0
+    stream, suites_written = 0, 1
 
     def write(
         samples: list[SequenceSample],

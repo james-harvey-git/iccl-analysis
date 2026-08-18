@@ -23,6 +23,7 @@ from iccl.training.metrics import (
     demo_nmse,
     evaluate_suites,
     load_eval_suites,
+    token_mse,
 )
 
 TEACHER = TeacherConfig(
@@ -98,6 +99,13 @@ def test_demo_nmse_hand_built() -> None:
     nmse = demo_nmse(preds, suite)
     np.testing.assert_allclose(mse, [[[1.0, 2.0], [0.0, 4.0]]])
     np.testing.assert_allclose(nmse, [[[0.5, 1.0], [0.0, 2.0]]])
+
+
+def test_token_mse_pools_prediction_tokens_globally() -> None:
+    targets = np.zeros((2, 3, 1), dtype=np.float32)
+    preds = np.array([[[1.0], [100.0], [100.0]], [[3.0], [3.0], [3.0]]])
+    suite = {"targets": targets, "loss_mask": np.array([[1, 0, 0], [1, 1, 1]])}
+    assert token_mse(preds, suite) == pytest.approx(7.0)
 
 
 def test_demo_errors_nan_pad_variable_demo_counts() -> None:

@@ -5,13 +5,17 @@ import numpy as np
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
+from iccl.data.dataset import collate_sequences, sequence_dataset_from_config, to_tensors
 from iccl.data.eval_cells import evaluation_module_counts, resolve_eval_cells
 from iccl.data.export import (
+    VALIDATION_SEED_OFFSET,
+    VALIDATION_SUITE,
     export_eval_sets,
     load_suite,
     load_suite_metadata,
     suite_paths,
 )
+from iccl.data.sequences import TOKEN_PAD
 
 
 def test_suite_paths_resolve_default_and_explicit_suites(tmp_path: Path) -> None:
@@ -151,10 +155,23 @@ def test_resolves_the_default_structural_matrix() -> None:
 
 def test_variable_export_writes_capability_condition_cells(tmp_path: Path) -> None:
     cfg = make_variable_cfg(tmp_path)
-    assert export_eval_sets(cfg) == 21
+    assert export_eval_sets(cfg) == 22
     paths = sorted(tmp_path.glob("*.npz"))
-    assert len(paths) == 21
+    assert len(paths) == 22
     assert not any("category_probe" in path.stem for path in paths)
+
+    validation = load_suite(tmp_path / VALIDATION_SUITE)
+    assert validation["tokens"].shape[0] == cfg.data.eval_sets.num_sequences
+    assert np.all(validation["loss_mask"][validation["token_type"] == TOKEN_PAD] == 0)
+    dataset = sequence_dataset_from_config(cfg.data, base_seed=cfg.seed + VALIDATION_SEED_OFFSET)
+    expected = collate_sequences(
+        [to_tensors(dataset.build(index)) for index in range(cfg.data.eval_sets.num_sequences)]
+    )
+    for key, value in expected.items():
+        np.testing.assert_array_equal(validation[key], value.numpy())
+    validation_meta = load_suite_metadata(tmp_path / f"{VALIDATION_SUITE}.meta.json")
+    assert validation_meta["condition"] == "training_distribution"
+    assert validation_meta["config"]["num_modules"] == {"min": 4, "max": 5, "held_out": []}
 
     constituent_path = next(path for path in paths if "composition__constituent" in path.stem)
     matched_path = Path(str(constituent_path).replace("__constituent__", "__matched_prefix__"))
@@ -186,4 +203,4 @@ def test_retention_export_resamples_histories_that_exhaust_all_supports(
         "task_count": 15,
         "history_demos_per_task": 2,
     }
-    assert export_eval_sets(cfg) == 3
+    assert export_eval_sets(cfg) == 4

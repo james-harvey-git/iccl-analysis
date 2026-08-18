@@ -277,11 +277,14 @@ class Trainer:
             summary_rows=report.summary_rows,
             curve_rows=report.curve_rows,
         )
-        if (
-            self.best_metric_name in report.scalars
-            and report.scalars[self.best_metric_name] < self.best_metric
-        ):
-            self.best_metric = report.scalars[self.best_metric_name]
+        if self.best_metric_name not in report.scalars:
+            raise KeyError(
+                f"best metric {self.best_metric_name!r} is absent from the frozen evaluation "
+                "sets; regenerate them with scripts/make_eval_sets.py"
+            )
+        metric = report.scalars[self.best_metric_name]
+        if metric < self.best_metric:
+            self.best_metric = metric
             self._save_checkpoint("best.pt")
 
     def _report_snapshot_plan(self) -> None:
@@ -335,6 +338,7 @@ class Trainer:
             "step": self.step,
             "samples_consumed": self.step * self.cfg.training.batch_size,
             "best_metric": self.best_metric,
+            "best_metric_name": self.best_metric_name,
             "torch_rng": torch.get_rng_state(),
             "numpy_rng": np.random.get_state(),
             "config": OmegaConf.to_container(self.cfg, resolve=True),
@@ -352,7 +356,11 @@ class Trainer:
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.step = ckpt["step"]
-        self.best_metric = ckpt["best_metric"]
+        self.best_metric = (
+            ckpt["best_metric"]
+            if ckpt.get("best_metric_name") == self.best_metric_name
+            else float("inf")
+        )
         torch.set_rng_state(ckpt["torch_rng"])
         np.random.set_state(ckpt["numpy_rng"])
         if self.device.type == "cuda" and "cuda_rng" in ckpt:
