@@ -11,7 +11,8 @@
 #
 #   # Short smoke run to validate the pipeline + W&B logging end to end
 #   sbatch scripts/cluster/train.slurm training.num_steps=2000 \
-#       training.eval_every=500 training.checkpoint_every=1000
+#       training.validation_every=500 training.monitor_every=1000 \
+#       training.checkpoint_every=1000
 #
 #   # Resume a run from its checkpoint
 #   sbatch scripts/cluster/train.slurm \

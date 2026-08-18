@@ -19,6 +19,12 @@ wandb:
   # series is `scripts/upload_snapshots.py`, which needs no flag.
   upload_weights: false
 
+evaluation:
+  # Empty uses training.resume; otherwise evaluate these local or wandb://
+  # checkpoint references in ascending training-step order within one eval run.
+  checkpoints: []
+  upload_results: true  # upload complete numerical results; no-op with W&B disabled
+
 hydra:
   run:
     dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}

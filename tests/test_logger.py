@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 from omegaconf import OmegaConf
 
-from iccl.training.logger import (
+from iccl.checkpoints import SourceRun, source_from_checkpoint
+from iccl.evaluation.metrics import EvaluationReport
+from iccl.reporting.logger import (
     RunLogger,
-    SourceRun,
+    evaluation_artifact_name,
     repo_relative,
-    source_from_checkpoint,
     weights_artifact_name,
 )
 
@@ -27,9 +28,13 @@ class FakeArtifact:
         self.name = name
         self.type = type
         self.files: list[str] = []
+        self.directories: list[str] = []
 
     def add_file(self, path: str) -> None:
         self.files.append(path)
+
+    def add_dir(self, path: str) -> None:
+        self.directories.append(path)
 
 
 class FakeTable:
@@ -46,6 +51,7 @@ class FakeRun:
         self.logged: list[tuple[FakeArtifact, list[str]]] = []
         self.used: list[str] = []
         self.records: list[tuple[dict[str, Any], int]] = []
+        self.finished = False
 
     def log_artifact(self, artifact: FakeArtifact, aliases: list[str]) -> None:
         self.logged.append((artifact, aliases))
@@ -55,6 +61,9 @@ class FakeRun:
 
     def log(self, payload: dict[str, Any], step: int) -> None:
         self.records.append((payload, step))
+
+    def finish(self) -> None:
+        self.finished = True
 
 
 class FakeWandb:
@@ -96,17 +105,23 @@ def start_with_fake_wandb(
     return logger, fake
 
 
-def test_log_eval_writes_curves_and_namespaces_scalars(tmp_path: Path) -> None:
+def test_validation_uses_the_model_selection_metric_name(tmp_path: Path) -> None:
     logger = make_logger(tmp_path)
     logger.start()
-    path = logger.log_eval(
-        {"retention/savings_mean": 0.33}, {"retention/savings_curve": np.array([0.1, 0.2])}, 40
-    )
-    assert path == tmp_path / "eval" / "step_0000040.npz"
-    with np.load(path) as data:
-        # Slashes are not valid in npz member names, so curve keys are dotted.
-        np.testing.assert_allclose(data["retention.savings_curve"], [0.1, 0.2])
+    logger.log_validation(0.33, 40)
     assert logger.run_reference() is None
+
+
+def test_metrics_from_one_optimizer_step_share_one_wandb_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
+    logger.log({"train/token_mse": 0.5}, 1000)
+    logger.log_validation(0.4, 1000)
+    logger.flush()
+
+    assert run.records == [({"train/token_mse": 0.5, "validation/token_mse": 0.4}, 1000)]
 
 
 def test_source_round_trips_through_a_checkpoint() -> None:
@@ -157,7 +172,7 @@ def test_a_source_run_becomes_a_link_a_tag_and_config(
 def test_a_source_run_does_not_disturb_a_disabled_logger(tmp_path: Path) -> None:
     logger = make_logger(tmp_path, source=SourceRun(step=100000, **REFERENCE))
     logger.start()
-    logger.log_eval({"in_dist/nmse_mean": 0.5}, {}, 100000)
+    logger.log_validation(0.5, 100000)
     logger.finish()
     assert logger.run is None
 
@@ -229,9 +244,10 @@ def test_artifact_names_survive_unnamed_and_awkwardly_named_runs() -> None:
     assert weights_artifact_name("t03malzi") == "weights-t03malzi"
     # `wandb.name` is free text from a hydra override, but artifact names are not.
     assert weights_artifact_name("pilot run #2") == "weights-pilot-run--2"
+    assert evaluation_artifact_name("pilot run #2") == "evaluation-pilot-run--2"
 
 
-def test_capability_rows_write_tables_and_named_panels(
+def test_full_evaluation_logs_one_primary_table_without_curve_panels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = FakeRun()
@@ -267,32 +283,87 @@ def test_capability_rows_write_tables_and_named_panels(
             "n_sequences": 16,
         }
     ]
-    curve_rows = [
-        {
-            "capability": "icl",
-            "condition": "ordinary",
-            "slice": "fixed_surplus",
-            "status": "seen",
-            "M": 8,
-            "T": 8,
-            "S": 1,
-            "B_history": 256,
-            "L_history": 520,
-            "curve_type": "learning_curve",
-            "x_name": "demo_index",
-            "x_value": 0,
-            "mse": 0.8,
-            "nmse": 0.4,
-            "ci_low": 0.3,
-            "ci_high": 0.5,
-            "n_sequences": 16,
-        }
-    ]
-    logger.log_eval({}, {}, 20, summary_rows=summary, curve_rows=curve_rows)
+    report = EvaluationReport({}, {}, summary, [], {})
+    logger.log_full_evaluation(report, 20)
+    logger.flush()
 
     payload, step = run.records[-1]
     assert step == 20
-    assert "eval-tables/capability_summary" in payload
-    assert "eval-tables/capability_curves" in payload
-    assert "capability/icl/aulc_vs_M" in payload
-    assert "capability/icl/learning_curve" in payload
+    assert set(payload) == {"evaluation/primary_summary"}
+    assert len(payload["evaluation/primary_summary"].data) == 1
+
+
+def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
+    summary_specs = (
+        ("icl", "ordinary", "nmse_aulc"),
+        ("composition", "benefit", "benefit_mean"),
+        ("retention", "savings", "savings_mean"),
+        ("retention", "episodic_savings", "episodic_savings_mean"),
+        ("retention", "module_savings", "module_savings_mean"),
+    )
+    summary = [
+        {"capability": capability, "condition": condition, "metric": metric, "value": 0.4}
+        for capability, condition, metric in summary_specs
+    ]
+    curve_specs = (
+        ("icl", "ordinary", "learning_curve"),
+        ("icl", "ordinary", "task_position_curve"),
+        ("composition", "constituent", "constituent_curve"),
+        ("composition", "matched_prefix", "matched_prefix_curve"),
+        ("composition", "no_history", "no_history_curve"),
+        ("retention", "original", "original_curve"),
+        ("retention", "repeat", "relearning_curve"),
+        ("retention", "novel", "novel_curve"),
+        ("retention", "shared", "shared_curve"),
+    )
+    curves = [
+        {
+            "capability": capability,
+            "condition": condition,
+            "curve_type": curve_type,
+            "x_value": 0,
+            "nmse": 0.4,
+            "ci_low": 0.3,
+            "ci_high": 0.5,
+        }
+        for capability, condition, curve_type in curve_specs
+    ]
+    path = logger.log_monitor(
+        EvaluationReport({}, {"icl/learning_curve": np.array([0.4])}, summary, curves, {}),
+        5000,
+    )
+    logger.flush()
+
+    payload, step = run.records[-1]
+    assert step == 5000
+    assert set(key for key in payload if key.startswith("monitor-curves/")) == {
+        "monitor-curves/icl_within_task",
+        "monitor-curves/icl_across_episode",
+        "monitor-curves/composition_final_task",
+        "monitor-curves/retention_final_task",
+    }
+    assert len(set(payload) - {key for key in payload if key.startswith("monitor-curves/")}) == 5
+    assert path == tmp_path / "monitor" / "step_0005000.npz"
+
+
+def test_evaluation_results_upload_as_one_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
+    logger.cfg.evaluation = {"upload_results": True}
+    results = tmp_path / "evaluation-results"
+    results.mkdir()
+    logger.upload_evaluation_results(results)
+
+    artifact, aliases = run.logged[0]
+    assert (artifact.name, artifact.type, aliases) == (
+        "evaluation-different-sound-6",
+        "evaluation",
+        ["latest"],
+    )
+    assert artifact.directories == [str(results)]

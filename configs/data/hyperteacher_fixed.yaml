@@ -29,6 +29,13 @@ eval_sets:
   bootstrap_seed: 0        # independent seed for confidence intervals
   bootstrap_replicates: 1000  # <2 disables bootstrap resampling
   best_metric: validation/token_mse  # evaluation scalar minimized when selecting best.pt
+  # One homogeneous cell used for the compact live capability monitor.
+  monitor:
+    structural_slice: fixed_surplus  # one name enabled under structural_slices
+    module_count: 8                  # M
+    task_count: 8                    # T
+    surplus_tasks: 1                 # S=T-(M-1)
+    history_demos_per_task: 32       # uniform history D
   module_counts:
     seen_selection: endpoints_and_canonical  # evaluates min, max, and canonical_seen
     canonical_seen: 8                        # must occur in the training support

@@ -7,7 +7,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 
 from iccl.data.diagnostics import analyze_sequence_distribution
-from iccl.training.logger import RunLogger
+from iccl.reporting.logger import RunLogger
 
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")

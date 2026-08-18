@@ -1,5 +1,6 @@
 """Capability metrics over homogeneous frozen evaluation cells."""
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,10 +24,15 @@ class EvaluationReport:
     curves: dict[str, np.ndarray]
     summary_rows: list[dict[str, Any]]
     curve_rows: list[dict[str, Any]]
+    raw_errors: dict[str, np.ndarray]
 
 
-def load_eval_suites(out_dir: Path) -> dict[str, Suite]:
-    """Load and validate every frozen suite in a directory."""
+def load_eval_suites(
+    out_dir: Path,
+    *,
+    select: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Suite]:
+    """Load selected frozen suites and validate paired conditions."""
     paths = sorted(out_dir.glob("*.npz"))
     if not paths:
         raise FileNotFoundError(
@@ -37,9 +43,16 @@ def load_eval_suites(out_dir: Path) -> dict[str, Suite]:
         metadata_path = path.with_suffix(".meta.json")
         if not metadata_path.exists():
             raise FileNotFoundError(f"frozen suite metadata not found: {metadata_path}")
+        metadata = load_suite_metadata(metadata_path)
+        if select is not None and not select(metadata):
+            continue
         suite: Suite = load_suite(path.with_suffix(""))
-        suite["__meta__"] = load_suite_metadata(metadata_path)
+        suite["__meta__"] = metadata
         suites[path.stem] = suite
+
+    if not suites:
+        qualifier = " matching the requested selection" if select is not None else ""
+        raise FileNotFoundError(f"no frozen eval suites{qualifier} found in {out_dir}")
 
     groups: dict[tuple[str, str], set[str]] = {}
     for suite in suites.values():
@@ -372,7 +385,7 @@ class _ReportBuilder:
 
     def build(self) -> EvaluationReport:
         _append_generalization_gaps(self.summary_rows, self.scalars)
-        return EvaluationReport(self.scalars, self.curves, self.summary_rows, self.curve_rows)
+        return EvaluationReport(self.scalars, self.curves, self.summary_rows, self.curve_rows, {})
 
 
 def _binned_task_curves(
@@ -673,4 +686,9 @@ def evaluate_suites(
     )
     if validation_metric is not None:
         report.scalars[f"{VALIDATION_SUITE}/token_mse"] = validation_metric
+    report.raw_errors = {
+        f"{name}/{kind}": values
+        for name in capability_suites
+        for kind, values in (("mse", mses[name]), ("nmse", nmses[name]))
+    }
     return report

@@ -16,8 +16,7 @@ from iccl.data.sequences import (
     build_sequence,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
-from iccl.models.model import GDNModel
-from iccl.training.metrics import (
+from iccl.evaluation.metrics import (
     _append_generalization_gaps,
     demo_mse,
     demo_nmse,
@@ -25,6 +24,7 @@ from iccl.training.metrics import (
     load_eval_suites,
     token_mse,
 )
+from iccl.models.model import GDNModel
 
 TEACHER = TeacherConfig(
     input_dim=4,

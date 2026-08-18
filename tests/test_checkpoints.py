@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from iccl.analysis.checkpoints import resolve_checkpoint_path
+from iccl.checkpoints import resolve_checkpoint_path
 
 
 class FakeArtifact:

@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 
-from iccl.training.logger import weights_artifact_name
+from iccl.reporting.logger import weights_artifact_name
 
 
 def run_reference(snapshot: Path) -> dict[str, Any]:

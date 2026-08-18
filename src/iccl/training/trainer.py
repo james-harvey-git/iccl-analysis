@@ -3,7 +3,7 @@
 Trains the sequence model on the on-the-fly ICCL stream with a masked MSE loss
 at every demonstration position. Single-device by design (the pilot model fits
 one GPU with room to spare; sweeps parallelize across GPUs via hydra multirun).
-Metric reporting belongs to ``iccl.training.logger``, which the standalone
+Metric reporting belongs to ``iccl.reporting.logger``, which the standalone
 evaluation entry point shares.
 """
 
@@ -25,9 +25,9 @@ from iccl.data.dataset import (
     sequence_dataset_from_config,
 )
 from iccl.data.sequences import TOKEN_PAD
+from iccl.evaluation.metrics import EvaluationReport, evaluate_suites, load_eval_suites
 from iccl.models.model import model_from_config
-from iccl.training.logger import RunLogger
-from iccl.training.metrics import evaluate_suites, load_eval_suites
+from iccl.reporting.logger import RunLogger
 from iccl.utils import resolve_device
 
 
@@ -129,10 +129,25 @@ def resolve_autocast_dtype(precision: str, device: torch.device) -> torch.dtype 
             raise ValueError(f"unknown precision: {precision}")
 
 
+def is_monitor_suite(metadata: dict[str, Any], monitor_cfg: DictConfig) -> bool:
+    """Whether frozen-suite metadata belongs to the canonical live monitor."""
+    if metadata.get("capability") not in {"icl", "composition", "retention"}:
+        return False
+    demos = tuple(int(value) for value in metadata.get("demo_counts", ()))
+    return (
+        metadata.get("structural_slice") == monitor_cfg.structural_slice
+        and int(metadata.get("num_modules", -1)) == int(monitor_cfg.module_count)
+        and int(metadata.get("num_tasks", -1)) == int(monitor_cfg.task_count)
+        and int(metadata.get("num_surplus_tasks", -1)) == int(monitor_cfg.surplus_tasks)
+        and len(demos) == int(monitor_cfg.task_count)
+        and demos == (int(monitor_cfg.history_demos_per_task),) * len(demos)
+    )
+
+
 class Trainer:
     """Owns the model, optimizer, eval harness, and checkpoint state for one run.
 
-    ``out_dir`` receives ``checkpoints/``, ``snapshots/`` and ``eval/``
+    ``out_dir`` receives ``checkpoints/``, ``snapshots/`` and ``monitor/``
     subdirectories; pass the hydra run dir from scripts. ``cfg.training.resume``
     restores a checkpoint and continues the data stream at the exact sample
     offset (bit-exact given the same batch size and worker count). Snapshot
@@ -179,8 +194,22 @@ class Trainer:
 
     def fit(self) -> None:
         train_cfg = self.cfg.training
-        eval_enabled = train_cfg.eval_every is not None
-        suites = load_eval_suites(Path(self.cfg.data.eval_sets.out_dir)) if eval_enabled else {}
+        validation_enabled = train_cfg.validation_every is not None
+        monitor_enabled = train_cfg.monitor_every is not None
+        eval_dir = Path(self.cfg.data.eval_sets.out_dir)
+        validation_suites = (
+            load_eval_suites(eval_dir, select=lambda meta: meta.get("capability") == "validation")
+            if validation_enabled
+            else {}
+        )
+        monitor_suites = (
+            load_eval_suites(
+                eval_dir,
+                select=lambda meta: is_monitor_suite(meta, self.cfg.data.eval_sets.monitor),
+            )
+            if monitor_enabled
+            else {}
+        )
         self.logger.start()
         self._report_snapshot_plan()
         loader = self._build_loader()
@@ -191,7 +220,6 @@ class Trainer:
         window_start = time.perf_counter()
         window_padded_tokens = 0
         window_real_tokens = 0
-        window_prediction_tokens = 0
         window_sequences = 0
         while self.step < train_cfg.num_steps:
             batch = {k: v.to(self.device, non_blocking=True) for k, v in next(batches).items()}
@@ -214,24 +242,18 @@ class Trainer:
             window_sequences += batch_sequences
             window_padded_tokens += int(batch["token_type"].numel())
             window_real_tokens += int((batch["token_type"] != TOKEN_PAD).sum().item())
-            window_prediction_tokens += int(batch["loss_mask"].sum().item())
 
             if self.step % train_cfg.log_every == 0:
                 elapsed = time.perf_counter() - window_start
                 self.logger.log(
                     {
-                        "train/loss": self.last_loss,
+                        "train/token_mse": self.last_loss,
                         "train/lr": float(self.scheduler.get_last_lr()[0]),
                         "train/grad_norm": float(grad_norm),
                         "train/sequences_per_s": train_cfg.log_every
                         * train_cfg.batch_size
                         / elapsed,
-                        "train/tokens_per_s": window_padded_tokens / elapsed,
-                        "train/real_serialized_tokens_per_s": window_real_tokens / elapsed,
-                        "train/padded_serialized_tokens_per_s": window_padded_tokens / elapsed,
                         "train/padding_fraction": 1.0 - window_real_tokens / window_padded_tokens,
-                        "train/mean_prediction_tokens_per_sequence": window_prediction_tokens
-                        / window_sequences,
                         "train/mean_serialized_length": window_real_tokens / window_sequences,
                     },
                     self.step,
@@ -239,17 +261,22 @@ class Trainer:
                 window_start = time.perf_counter()
                 window_padded_tokens = 0
                 window_real_tokens = 0
-                window_prediction_tokens = 0
                 window_sequences = 0
-            if eval_enabled and self.step % train_cfg.eval_every == 0:
-                self._evaluate(suites)
+            if validation_enabled and self.step % train_cfg.validation_every == 0:
+                self._validate(validation_suites)
+            if monitor_enabled and self.step % train_cfg.monitor_every == 0:
+                self._monitor(monitor_suites)
             if self.step % train_cfg.checkpoint_every == 0:
                 self._save_checkpoint("last.pt")
             if self.step in self.snapshot_steps:
                 self._save_snapshot()
+            if self.step < train_cfg.num_steps:
+                self.logger.flush()
 
-        if eval_enabled and self.step % train_cfg.eval_every != 0:
-            self._evaluate(suites)
+        if validation_enabled and self.step % train_cfg.validation_every != 0:
+            self._validate(validation_suites)
+        if monitor_enabled and self.step % train_cfg.monitor_every != 0:
+            self._monitor(monitor_suites)
         self._save_checkpoint("last.pt")
         final_snapshot = self._snapshot_path(self.step)
         if not final_snapshot.exists():
@@ -259,7 +286,7 @@ class Trainer:
         self.logger.upload_weights(final_snapshot)
         self.logger.finish()
 
-    def _evaluate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+    def _evaluation_report(self, suites: dict[str, dict[str, np.ndarray]]) -> EvaluationReport:
         self.model.eval()
         report = evaluate_suites(
             self.model,
@@ -270,22 +297,23 @@ class Trainer:
             bootstrap_replicates=int(self.cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
         )
         self.model.train()
-        self.logger.log_eval(
-            report.scalars,
-            report.curves,
-            self.step,
-            summary_rows=report.summary_rows,
-            curve_rows=report.curve_rows,
-        )
+        return report
+
+    def _validate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+        report = self._evaluation_report(suites)
         if self.best_metric_name not in report.scalars:
             raise KeyError(
                 f"best metric {self.best_metric_name!r} is absent from the frozen evaluation "
                 "sets; regenerate them with scripts/make_eval_sets.py"
             )
         metric = report.scalars[self.best_metric_name]
+        self.logger.log_validation(metric, self.step)
         if metric < self.best_metric:
             self.best_metric = metric
             self._save_checkpoint("best.pt")
+
+    def _monitor(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+        self.logger.log_monitor(self._evaluation_report(suites), self.step)
 
     def _report_snapshot_plan(self) -> None:
         """The resolved schedule and its disk cost, once at startup, so a

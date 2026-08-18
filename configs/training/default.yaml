@@ -13,7 +13,8 @@ precision: auto     # auto | bf16 | fp32; auto uses bf16 on CUDA and fp32 elsewh
 num_workers: 4      # DataLoader worker processes; 0 generates in the training process
 
 log_every: 50       # optimizer-step cadence for training scalars
-eval_every: 1000    # optimizer-step cadence; null disables in-training evaluation
+validation_every: 1000  # training-distribution token MSE cadence; null disables
+monitor_every: 5000     # canonical capability-curve cadence; null disables
 checkpoint_every: 10000  # cadence of rolling last.pt, which resumption reads
 resume: null        # null | local checkpoint path; eval.py also accepts wandb:// references
 
