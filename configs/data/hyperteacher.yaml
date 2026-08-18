@@ -31,7 +31,7 @@ eval_sets:
   out_dir: data/eval_sets
   bootstrap_seed: 0
   bootstrap_replicates: 1000
-  best_metric: validation/token_mse
+  best_metric: validation/token_mse  # evaluation scalar minimized when selecting best.pt
   module_counts:
     seen_selection: endpoints_and_canonical
     canonical_seen: 8
