@@ -25,6 +25,7 @@ wandb/
 
 # Data and model artifacts
 /data/
+/artifacts/
 checkpoints/
 *.ckpt
 *.pt
@@ -37,6 +38,9 @@ checkpoints/
 .DS_Store
 .vscode/
 .idea/
+
+# Local notebooks bound to a downloaded artifact rather than to the repository
+notebooks/explore_best_evaluation.ipynb
 
 # Local agent configuration
 CLAUDE.md
