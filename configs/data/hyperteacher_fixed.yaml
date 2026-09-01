@@ -24,36 +24,29 @@ sequence:
   graph_ordered: false      # preserve structured edge order; ignored for task_graph=random
 
 eval_sets:
-  num_sequences: 256       # per capability cell and training-distribution validation set
-  out_dir: data/eval_sets   # frozen archives written by scripts/make_eval_sets.py
+  num_sequences: 256       # per physical cell/condition and training validation
+  demos_per_task: 32       # positive D shared by every capability task block
+  out_dir: data/eval_sets  # frozen archives written by scripts/make_eval_sets.py
   bootstrap_seed: 0        # independent seed for confidence intervals
   bootstrap_replicates: 1000  # <2 disables bootstrap resampling
-  best_metric: validation/token_mse  # evaluation scalar minimized when selecting best.pt
-  # One homogeneous cell used for the compact live capability monitor.
-  monitor:
-    structural_slice: fixed_surplus  # one name enabled under structural_slices
-    module_count: 8                  # M
-    task_count: 8                    # T
-    surplus_tasks: 1                 # S=T-(M-1)
-    history_demos_per_task: 32       # uniform history D
+  best_metric: validation/token_mse  # raw token MSE on the training distribution
+  capabilities: [icl, composition, retention]  # any subset of these three values
+  canonical:
+    module_count: 8          # M for standalone evaluation and train-time monitoring
+    task_count: 8            # T; must satisfy T>=M-1
   module_counts:
-    seen_selection: endpoints_and_canonical  # evaluates min, max, and canonical_seen
-    canonical_seen: 8                        # must occur in the training support
-    ood: []                                  # unique integers greater than training max
-  capabilities:
-    enabled: [icl, composition, retention]  # any subset of these three values
-    composition:
-      target_demos: 8              # demonstrations of the final composed task
-      constituent_task_exposures: 1  # prior tasks containing each target module
-      controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
-    retention:
-      revisit_demos: 16            # demonstrations in the final revisit block
-      controls: [novel, shared]    # novel required; shared is same support/new weights
-  structural_slices:
-    enabled: [fixed_surplus]       # names of the slice mappings to export
-    fixed_surplus:
-      surplus_tasks: 1             # T=M-1+S
-      history_demos_per_task: 32
+    min: 4                  # inclusive evaluation range, independent of training bounds
+    max: 12
+  task_variation:
+    surplus_tasks:
+      min: 0                # inclusive S range; T=M-1+S
+      max: 3
+  composition:
+    constituent_task_exposures: 1  # prior tasks containing each target module
+    controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
+  retention:
+    repeat_positions: all   # balance repeats over every history position
+    controls: [novel, shared]  # novel required; shared omitted for binary weighting
 
 distribution_diagnostic:
   num_sequences: 10000       # sequences sampled by analyze_sequence_distribution.py

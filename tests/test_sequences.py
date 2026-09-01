@@ -130,13 +130,27 @@ def test_composite_final_task_is_not_in_the_history() -> None:
     assert seq.info["demo_counts"][-1] == 2
 
 
-def test_revisit_appends_first_task() -> None:
+def test_revisit_appends_the_selected_history_task() -> None:
     family = make_family()
     cfg = make_seq_cfg()
-    seq = build_sequence(family, cfg, sequence_rng(0, 0), revisit_demos=3)
+    seq = build_sequence(family, cfg, sequence_rng(0, 0), revisit_demos=3, revisit_task_index=5)
     latents = seq.info["latents"]
-    np.testing.assert_array_equal(latents[-1], latents[0])
+    np.testing.assert_array_equal(latents[-1], latents[5])
     assert seq.info["demo_counts"][-1] == 3
+    assert seq.info["original_task_position"] == 5
+    assert seq.info["intervening_tasks"] == 2
+    assert seq.info["prediction_token_delay"] == sum(seq.info["demo_counts"][6:-1])
+
+
+def test_revisit_rejects_an_out_of_range_history_position() -> None:
+    with pytest.raises(ValueError, match="revisit_task_index"):
+        build_sequence(
+            make_family(),
+            make_seq_cfg(),
+            sequence_rng(0, 0),
+            revisit_demos=3,
+            revisit_task_index=8,
+        )
 
 
 def test_paired_retention_control_shares_everything_but_the_final_task() -> None:
@@ -388,11 +402,10 @@ def test_paired_composition_controls_match_prefix_shape_and_final_block() -> Non
         target_demos=4,
         constituent_task_exposures=1,
         fixed_demo_counts=demos,
-        constituent_demo_count=2,
     )
 
     np.testing.assert_array_equal(constituent.info["constituent_task_exposures"], [1, 1])
-    np.testing.assert_array_equal(constituent.info["constituent_demo_exposures"], [2, 2])
+    np.testing.assert_array_equal(constituent.info["constituent_demo_exposures"], [3, 3])
     np.testing.assert_array_equal(matched.info["constituent_task_exposures"], [0, 0])
     assert constituent.info["prior_target_support_count"] == 0
     assert matched.info["prior_target_support_count"] == 0

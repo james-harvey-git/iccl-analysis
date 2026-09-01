@@ -1,21 +1,37 @@
-"""Resolve named evaluation slices into homogeneous structural cells."""
+"""Resolve the fixed-demo structural cells used by capability evaluation."""
 
 from dataclasses import dataclass
 
-import numpy as np
 from omegaconf import DictConfig
 
 from iccl.data.dataset import module_count_config_from
 
+EVAL_FAMILIES = ("canonical", "task_variation", "module_variation")
+_EVAL_KEYS = {
+    "num_sequences",
+    "demos_per_task",
+    "out_dir",
+    "bootstrap_seed",
+    "bootstrap_replicates",
+    "best_metric",
+    "capabilities",
+    "canonical",
+    "module_counts",
+    "task_variation",
+    "composition",
+    "retention",
+}
+
 
 @dataclass(frozen=True)
 class EvalCell:
-    slice: str
+    """One physical ``(M,T,D)`` cell with all logical family memberships."""
+
+    family_memberships: tuple[str, ...]
     status: str
     num_modules: int
     num_tasks: int
-    demo_counts: tuple[int, ...]
-    variant: str = ""
+    demos_per_task: int
 
     @property
     def num_surplus(self) -> int:
@@ -23,138 +39,83 @@ class EvalCell:
 
     @property
     def prediction_tokens(self) -> int:
-        return sum(self.demo_counts)
+        return self.num_tasks * self.demos_per_task
 
     @property
     def serialized_tokens(self) -> int:
         return 2 * self.prediction_tokens + self.num_tasks
 
+    @property
+    def demo_counts(self) -> tuple[int, ...]:
+        return (self.demos_per_task,) * self.num_tasks
+
+    @property
+    def cell_id(self) -> str:
+        return f"m{self.num_modules:02d}__t{self.num_tasks:02d}__d{self.demos_per_task:03d}"
+
+
+def _inclusive_bounds(config: DictConfig, name: str, minimum: int) -> range:
+    lo, hi = int(config.min), int(config.max)
+    if lo < minimum or hi < lo:
+        raise ValueError(f"{name} requires {minimum} <= min <= max, got [{lo}, {hi}]")
+    return range(lo, hi + 1)
+
 
 def evaluation_module_counts(data_cfg: DictConfig) -> tuple[tuple[int, ...], dict[int, str]]:
-    """Resolve selected seen, held-out interpolation, and OOD counts."""
-    train = module_count_config_from(data_cfg)
-    config = data_cfg.eval_sets.module_counts
-    if config.seen_selection != "endpoints_and_canonical":
-        raise ValueError(f"unknown seen_selection: {config.seen_selection!r}")
-    canonical = int(config.canonical_seen)
-    if canonical not in train.allowed:
-        raise ValueError(f"canonical_seen={canonical} is absent from {train.allowed}")
-    seen = tuple(sorted({train.min, canonical, train.max}))
-    ood = tuple(int(value) for value in config.get("ood", []))
-    if len(set(ood)) != len(ood) or any(value <= train.max for value in ood):
-        raise ValueError(f"OOD counts must be unique and greater than M_max={train.max}: {ood}")
-    groups = {"seen": seen, "heldout": train.held_out, "ood": ood}
-    values = [value for group in groups.values() for value in group]
-    if len(values) != len(set(values)):
-        raise ValueError("seen, held-out, and OOD module counts must be disjoint")
-    status = {value: name for name, group in groups.items() for value in group}
-    return tuple(sorted(status)), status
+    """Return the inclusive evaluation range and each count's training status."""
+    values = tuple(_inclusive_bounds(data_cfg.eval_sets.module_counts, "module_counts", 2))
+    training = module_count_config_from(data_cfg)
+    allowed, held_out = set(training.allowed), set(training.held_out)
+    statuses = {
+        value: "seen" if value in allowed else "heldout" if value in held_out else "ood"
+        for value in values
+    }
+    return values, statuses
 
 
-def even_demo_counts(total: int, tasks: int, seed: int) -> tuple[int, ...]:
-    """Allocate a prediction budget as evenly as possible across tasks."""
-    if tasks < 1 or total < tasks:
-        raise ValueError(f"prediction budget needs B>=T>=1, got B={total}, T={tasks}")
-    quotient, remainder = divmod(total, tasks)
-    counts = np.full(tasks, quotient, dtype=np.int64)
-    if remainder:
-        rng = np.random.Generator(np.random.Philox(key=np.array([seed, tasks], dtype=np.uint64)))
-        counts[rng.choice(tasks, size=remainder, replace=False)] += 1
-    return tuple(int(value) for value in counts)
+def resolve_eval_cells(data_cfg: DictConfig) -> list[EvalCell]:
+    """Deduplicate canonical, task-variation and module-variation cells."""
+    config = data_cfg.eval_sets
+    unknown = set(config.keys()) - _EVAL_KEYS
+    if unknown:
+        raise ValueError(f"unknown eval_sets fields: {sorted(unknown)}")
 
+    demos = int(config.demos_per_task)
+    if demos < 1:
+        raise ValueError(f"eval_sets.demos_per_task must be positive, got {demos}")
+    modules, statuses = evaluation_module_counts(data_cfg)
+    canonical_m = int(config.canonical.module_count)
+    canonical_t = int(config.canonical.task_count)
+    if canonical_m not in set(modules):
+        raise ValueError(
+            f"canonical M={canonical_m} is outside evaluation range [{modules[0]}, {modules[-1]}]"
+        )
+    if canonical_t < canonical_m - 1:
+        raise ValueError(f"canonical cell cannot cover M={canonical_m} with T={canonical_t}")
 
-def _cell(
-    name: str,
-    status: str,
-    modules: int,
-    tasks: int,
-    demos: tuple[int, ...],
-    variant: str = "",
-) -> EvalCell:
-    cell = EvalCell(name, status, modules, tasks, demos, variant)
-    if cell.num_surplus < 0:
-        raise ValueError(f"slice={name} cannot cover M={modules} with T={tasks}")
-    if len(demos) != tasks or min(demos) < 1:
-        raise ValueError(f"slice={name} needs {tasks} positive demo counts, got {demos}")
-    return cell
+    surplus = _inclusive_bounds(
+        config.task_variation.surplus_tasks, "task_variation.surplus_tasks", 0
+    )
+    memberships: dict[tuple[int, int, int], set[str]] = {}
 
+    def add(family: str, num_modules: int, num_tasks: int) -> None:
+        if num_tasks < num_modules - 1:
+            raise ValueError(f"{family} cannot cover M={num_modules} with T={num_tasks}")
+        memberships.setdefault((num_modules, num_tasks, demos), set()).add(family)
 
-def resolve_eval_cells(data_cfg: DictConfig, seed: int) -> list[EvalCell]:
-    """Expand every enabled one-dimensional structural slice."""
-    module_values, statuses = evaluation_module_counts(data_cfg)
-    slices = data_cfg.eval_sets.structural_slices
-    cells: list[EvalCell] = []
-    for name in slices.enabled:
-        config = slices[name]
-        if name in {"fixed_surplus", "matched_task_count", "matched_prediction_tokens"}:
-            for modules in module_values:
-                tasks = (
-                    int(config.task_count)
-                    if name == "matched_task_count"
-                    else modules - 1 + int(config.surplus_tasks)
-                )
-                demos = (
-                    even_demo_counts(int(config.prediction_tokens), tasks, seed + modules)
-                    if name == "matched_prediction_tokens"
-                    else (int(config.history_demos_per_task),) * tasks
-                )
-                cells.append(_cell(name, statuses[modules], modules, tasks, demos))
-            continue
+    add("canonical", canonical_m, canonical_t)
+    for num_modules in modules:
+        for extra in surplus:
+            add("task_variation", num_modules, num_modules - 1 + extra)
+        add("module_variation", num_modules, modules[-1])
 
-        modules = int(config.module_count)
-        if modules not in statuses:
-            raise ValueError(f"slice={name} uses M={modules}, which is not evaluated")
-        status = statuses[modules]
-        if name == "task_count":
-            demos = int(config.history_demos_per_task)
-            cells.extend(
-                _cell(name, status, modules, int(tasks), (demos,) * int(tasks))
-                for tasks in config["values"]
-            )
-        elif name == "history_demos":
-            tasks = int(config.task_count)
-            cells.extend(
-                _cell(
-                    name,
-                    status,
-                    modules,
-                    tasks,
-                    (int(demos),) * tasks,
-                    f"d{int(demos):03d}",
-                )
-                for demos in config["values"]
-            )
-        elif name == "matched_serialized_prefix":
-            length = int(config.serialized_tokens)
-            for tasks_raw in config.task_counts:
-                tasks = int(tasks_raw)
-                remainder = length - tasks
-                if remainder < 0 or remainder % 2:
-                    raise ValueError(
-                        f"matched prefix needs non-negative even L-T: L={length}, T={tasks}"
-                    )
-                demos = even_demo_counts(remainder // 2, tasks, seed + tasks)
-                cells.append(_cell(name, status, modules, tasks, demos))
-        elif name == "demo_allocation":
-            tasks, budget = int(config.task_count), int(config.prediction_tokens)
-            uniform = even_demo_counts(budget, tasks, seed)
-            if len(set(uniform)) != 1 or tasks % 2:
-                raise ValueError(
-                    f"demo allocations need even T and integer B/T: T={tasks}, B={budget}"
-                )
-            mean = uniform[0]
-            low, high = mean // 2, mean + (mean - mean // 2)
-            front = (high,) * (tasks // 2) + (low,) * (tasks // 2)
-            patterns = {
-                "uniform": uniform,
-                "alternating": tuple(low if index % 2 == 0 else high for index in range(tasks)),
-                "front_loaded": front,
-                "back_loaded": tuple(reversed(front)),
-            }
-            for pattern in config.patterns:
-                if pattern not in patterns:
-                    raise ValueError(f"unknown demo-allocation pattern: {pattern}")
-                cells.append(_cell(name, status, modules, tasks, patterns[pattern], str(pattern)))
-        else:
-            raise ValueError(f"unknown structural slice: {name}")
-    return cells
+    return [
+        EvalCell(
+            tuple(family for family in EVAL_FAMILIES if family in families),
+            statuses[num_modules],
+            num_modules,
+            num_tasks,
+            demos_per_task,
+        )
+        for (num_modules, num_tasks, demos_per_task), families in sorted(memberships.items())
+    ]

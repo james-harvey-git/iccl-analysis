@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
@@ -10,6 +9,7 @@ from iccl.data.eval_cells import evaluation_module_counts, resolve_eval_cells
 from iccl.data.export import (
     VALIDATION_SEED_OFFSET,
     VALIDATION_SUITE,
+    balanced_repeat_positions,
     export_eval_sets,
     load_suite,
     load_suite_metadata,
@@ -18,162 +18,129 @@ from iccl.data.export import (
 from iccl.data.sequences import TOKEN_PAD
 
 
-def test_suite_paths_resolve_default_and_explicit_suites(tmp_path: Path) -> None:
-    suite_path = tmp_path / "in_dist.npz"
-    metadata_path = tmp_path / "in_dist.meta.json"
-    suite_path.write_bytes(b"arrays")
-    metadata_path.write_text('{"suite": "in_dist"}')
-
-    assert suite_paths(tmp_path, "in_dist") == (suite_path, metadata_path)
-    assert suite_paths(tmp_path / "unused", "unused", tmp_path / "in_dist") == (
-        suite_path,
-        metadata_path,
-    )
-    assert load_suite_metadata(metadata_path) == {"suite": "in_dist"}
-
-
-def test_suite_paths_report_missing_array_and_metadata_files(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="frozen suite not found"):
-        suite_paths(tmp_path, "in_dist")
-
-    (tmp_path / "in_dist.npz").write_bytes(b"arrays")
-    with pytest.raises(FileNotFoundError, match="frozen suite metadata not found"):
-        suite_paths(tmp_path, "in_dist")
-
-
-def test_load_suite_metadata_requires_a_json_object(tmp_path: Path) -> None:
-    metadata_path = tmp_path / "in_dist.meta.json"
-    metadata_path.write_text("[]")
-    with pytest.raises(ValueError, match="JSON object"):
-        load_suite_metadata(metadata_path)
-
-
-def make_variable_cfg(out_dir: Path, *, all_slices: bool = False) -> DictConfig:
-    slices: dict[str, Any] = {
-        "enabled": ["fixed_surplus"],
-        "fixed_surplus": {"surplus_tasks": 1, "history_demos_per_task": 2},
-    }
-    if all_slices:
-        slices = {
-            "enabled": [
-                "fixed_surplus",
-                "matched_task_count",
-                "matched_prediction_tokens",
-                "task_count",
-                "history_demos",
-                "matched_serialized_prefix",
-                "demo_allocation",
-            ],
-            "fixed_surplus": {"surplus_tasks": 1, "history_demos_per_task": 32},
-            "matched_task_count": {"task_count": 15, "history_demos_per_task": 32},
-            "matched_prediction_tokens": {"prediction_tokens": 480, "surplus_tasks": 1},
-            "task_count": {
-                "module_count": 8,
-                "values": [7, 8, 10, 12, 15],
-                "history_demos_per_task": 32,
-            },
-            "history_demos": {"module_count": 8, "task_count": 8, "values": [8, 16, 32, 64]},
-            "matched_serialized_prefix": {
-                "module_count": 8,
-                "serialized_tokens": 520,
-                "task_counts": [8, 10, 12],
-            },
-            "demo_allocation": {
-                "module_count": 8,
-                "task_count": 8,
-                "prediction_tokens": 256,
-                "patterns": ["uniform", "alternating", "front_loaded", "back_loaded"],
-            },
-        }
-    module_spec = (
-        {"min": 4, "max": 12, "held_out": [6, 10]}
-        if all_slices
-        else {"min": 4, "max": 5, "held_out": []}
-    )
+def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig:
     return OmegaConf.create(
         {
-            "seed": 0,
+            "seed": 3,
             "data": {
                 "name": "hyperteacher",
                 "input_dim": 4,
                 "output_dim": 4,
                 "hidden_dims": [4],
                 "use_bias": True,
-                "num_modules": module_spec,
+                "num_modules": {"min": 4, "max": 6, "held_out": [5]},
                 "scale": 3.0,
                 "weighting": "discrete",
                 "sequence": {
                     "curriculum_sampler": "constructive",
                     "hotness": 2,
-                    "surplus_tasks": 1,
-                    "demos_per_task": 2,
+                    "surplus_tasks": [0, 1],
+                    "demos_per_task": {"min": 1, "max": 3, "scope": "per_task"},
                     "signal_boundaries": True,
                     "require_identifiable": True,
                     "require_full_rank": False,
+                    "max_attempts": 1000,
                 },
                 "eval_sets": {
-                    "num_sequences": 2,
+                    "num_sequences": 8,
+                    "demos_per_task": 2,
                     "out_dir": str(out_dir),
-                    "module_counts": {
-                        "seen_selection": "endpoints_and_canonical",
-                        "canonical_seen": 8 if all_slices else 4,
-                        "ood": [13, 16] if all_slices else [6],
+                    "bootstrap_seed": 0,
+                    "bootstrap_replicates": 20,
+                    "best_metric": "validation/token_mse",
+                    "capabilities": capabilities or ["icl", "composition", "retention"],
+                    "canonical": {"module_count": 4, "task_count": 4},
+                    "module_counts": {"min": 4, "max": 7},
+                    "task_variation": {"surplus_tasks": {"min": 0, "max": 1}},
+                    "composition": {
+                        "constituent_task_exposures": 1,
+                        "controls": ["matched_prefix", "no_history"],
                     },
-                    "capabilities": {
-                        "enabled": ["icl", "composition", "retention"],
-                        "composition": {
-                            "target_demos": 2,
-                            "constituent_task_exposures": 1,
-                            "controls": ["matched_prefix", "no_history"],
-                        },
-                        "retention": {"revisit_demos": 2, "controls": ["novel", "shared"]},
+                    "retention": {
+                        "repeat_positions": "all",
+                        "controls": ["novel", "shared"],
                     },
-                    "structural_slices": slices,
                 },
             },
         }
     )
 
 
-def test_resolves_the_default_structural_matrix() -> None:
-    cfg = make_variable_cfg(Path("unused"), all_slices=True)
+def test_suite_paths_and_metadata_validation(tmp_path: Path) -> None:
+    arrays = tmp_path / "in_dist.npz"
+    metadata = tmp_path / "in_dist.meta.json"
+    arrays.write_bytes(b"arrays")
+    metadata.write_text('{"suite": "in_dist"}')
+    assert suite_paths(tmp_path, "in_dist") == (arrays, metadata)
+    assert load_suite_metadata(metadata) == {"suite": "in_dist"}
+
+    metadata.write_text("[]")
+    with pytest.raises(ValueError, match="JSON object"):
+        load_suite_metadata(metadata)
+    arrays.unlink()
+    with pytest.raises(FileNotFoundError, match="frozen suite not found"):
+        suite_paths(tmp_path, "in_dist")
+
+
+def test_resolves_and_deduplicates_the_three_cell_families(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
     modules, statuses = evaluation_module_counts(cfg.data)
-    assert modules == (4, 6, 8, 10, 12, 13, 16)
-    assert statuses[6] == "heldout" and statuses[13] == "ood"
+    assert modules == (4, 5, 6, 7)
+    assert statuses == {4: "seen", 5: "heldout", 6: "seen", 7: "ood"}
 
-    cells = resolve_eval_cells(cfg.data, seed=0)
-    assert len(cells) == 37
-    matched_tasks = [cell for cell in cells if cell.slice == "matched_task_count"]
-    assert {cell.num_tasks for cell in matched_tasks} == {15}
-    assert {cell.prediction_tokens for cell in matched_tasks} == {480}
-    assert {cell.serialized_tokens for cell in matched_tasks} == {975}
-    matched_prediction = [cell for cell in cells if cell.slice == "matched_prediction_tokens"]
-    assert {cell.prediction_tokens for cell in matched_prediction} == {480}
-    matched_length = [cell for cell in cells if cell.slice == "matched_serialized_prefix"]
-    assert {cell.serialized_tokens for cell in matched_length} == {520}
+    cells = resolve_eval_cells(cfg.data)
+    assert len(cells) == 11
+    assert all(cell.demos_per_task == 2 for cell in cells)
+    assert {
+        (cell.num_modules, cell.num_tasks)
+        for cell in cells
+        if "module_variation" in cell.family_memberships
+    } == {
+        (4, 7),
+        (5, 7),
+        (6, 7),
+        (7, 7),
+    }
+    canonical = next(cell for cell in cells if "canonical" in cell.family_memberships)
+    assert (canonical.num_modules, canonical.num_tasks, canonical.num_surplus) == (4, 4, 1)
+    assert canonical.family_memberships == ("canonical", "task_variation")
+    overlap = next(cell for cell in cells if (cell.num_modules, cell.num_tasks) == (7, 7))
+    assert overlap.family_memberships == ("task_variation", "module_variation")
 
 
-def test_variable_export_writes_capability_condition_cells(tmp_path: Path) -> None:
-    cfg = make_variable_cfg(tmp_path)
-    assert export_eval_sets(cfg) == 22
-    paths = sorted(tmp_path.glob("*.npz"))
-    assert len(paths) == 22
-    assert not any("category_probe" in path.stem for path in paths)
+def test_removed_structural_slice_fields_are_rejected(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg.data.eval_sets.structural_slices = {"enabled": ["fixed_surplus"]}
+    with pytest.raises(ValueError, match="unknown eval_sets fields.*structural_slices"):
+        resolve_eval_cells(cfg.data)
+
+
+def test_repeat_positions_are_deterministic_and_balanced() -> None:
+    first = balanced_repeat_positions(19, 6, seed=7)
+    second = balanced_repeat_positions(19, 6, seed=7)
+    np.testing.assert_array_equal(first, second)
+    counts = np.bincount(first, minlength=6)
+    assert counts.max() - counts.min() == 1
+    assert set(first) == set(range(6))
+
+
+def test_export_uses_fixed_capability_d_and_variable_training_validation(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    (tmp_path / "obsolete.npz").write_bytes(b"stale")
+    (tmp_path / "obsolete.meta.json").write_text("{}")
+    assert export_eval_sets(cfg) == 78  # validation + 11 cells x seven conditions
+    assert not (tmp_path / "obsolete.npz").exists()
 
     validation = load_suite(tmp_path / VALIDATION_SUITE)
-    assert validation["tokens"].shape[0] == cfg.data.eval_sets.num_sequences
     assert np.all(validation["loss_mask"][validation["token_type"] == TOKEN_PAD] == 0)
     dataset = sequence_dataset_from_config(cfg.data, base_seed=cfg.seed + VALIDATION_SEED_OFFSET)
-    expected = collate_sequences(
-        [to_tensors(dataset.build(index)) for index in range(cfg.data.eval_sets.num_sequences)]
-    )
+    validation_samples = [dataset.build(index) for index in range(cfg.data.eval_sets.num_sequences)]
+    expected = collate_sequences([to_tensors(sample) for sample in validation_samples])
     for key, value in expected.items():
         np.testing.assert_array_equal(validation[key], value.numpy())
-    validation_meta = load_suite_metadata(tmp_path / f"{VALIDATION_SUITE}.meta.json")
-    assert validation_meta["condition"] == "training_distribution"
-    assert validation_meta["config"]["num_modules"] == {"min": 4, "max": 5, "held_out": []}
+    assert len({tuple(sample.info["demo_counts"]) for sample in validation_samples}) > 1
 
-    constituent_path = next(path for path in paths if "composition__constituent" in path.stem)
+    constituent_path = next(tmp_path.glob("composition__constituent__*.npz"))
     matched_path = Path(str(constituent_path).replace("__constituent__", "__matched_prefix__"))
     no_history_path = Path(str(constituent_path).replace("__constituent__", "__no_history__"))
     constituent = load_suite(constituent_path.with_suffix(""))
@@ -181,26 +148,26 @@ def test_variable_export_writes_capability_condition_cells(tmp_path: Path) -> No
     no_history = load_suite(no_history_path.with_suffix(""))
     np.testing.assert_array_equal(constituent["pair_id"], matched["pair_id"])
     np.testing.assert_array_equal(constituent["pair_id"], no_history["pair_id"])
-    np.testing.assert_array_equal(constituent["constituent_task_exposures"], [[1, 1]] * 2)
-    np.testing.assert_array_equal(matched["constituent_task_exposures"], [[0, 0]] * 2)
+    assert np.all(constituent["demo_counts"] == 2)
+    assert np.all(matched["demo_counts"] == 2)
+    assert np.all(no_history["demo_counts"] == 2)
+
+    repeat_path = next(tmp_path.glob("retention__repeat__m04__t04__d002.npz"))
+    repeat = load_suite(repeat_path.with_suffix(""))
+    assert np.all(repeat["demo_counts"] == 2)
+    np.testing.assert_array_equal(repeat["intervening_tasks"], 3 - repeat["original_task_position"])
+    counts = np.bincount(repeat["original_task_position"], minlength=4)
+    assert counts.max() - counts.min() <= 1
 
     metadata = load_suite_metadata(constituent_path.with_suffix(".meta.json"))
-    assert metadata["capability"] == "composition"
-    assert metadata["condition"] == "constituent"
-    assert metadata["structural_slice"] == "fixed_surplus"
+    assert metadata["demos_per_task"] == 2
+    assert metadata["family_memberships"]
+    assert len(metadata["archive_sha256"]) == 64
     assert metadata["enum_mappings"]["task_origin"]["backbone"] == 1
 
 
-def test_retention_export_resamples_histories_that_exhaust_all_supports(
-    tmp_path: Path,
-) -> None:
-    cfg = make_variable_cfg(tmp_path)
-    cfg.data.num_modules = 4
-    cfg.data.eval_sets.module_counts.ood = []
-    cfg.data.eval_sets.capabilities.enabled = ["retention"]
-    cfg.data.eval_sets.structural_slices.enabled = ["matched_task_count"]
-    cfg.data.eval_sets.structural_slices.matched_task_count = {
-        "task_count": 15,
-        "history_demos_per_task": 2,
-    }
-    assert export_eval_sets(cfg) == 4
+def test_retention_requires_enough_sequences_to_represent_every_position(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, ["retention"])
+    cfg.data.eval_sets.num_sequences = 6
+    with pytest.raises(ValueError, match="largest evaluated task count"):
+        export_eval_sets(cfg)

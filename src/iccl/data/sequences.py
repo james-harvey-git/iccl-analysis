@@ -121,6 +121,7 @@ def build_sequence(
     *,
     final_task: FinalTaskConfig | None = None,
     revisit_demos: int = 0,
+    revisit_task_index: int = 0,
     include_world: bool = False,
     world: ModulePool | None = None,
     fixed_final_latent: np.ndarray | None = None,
@@ -157,7 +158,12 @@ def build_sequence(
     if revisit_demos > 0:
         if not len(curriculum_latents):
             raise ValueError("revisit requires curriculum history")
-        latents.append(curriculum_latents[0])
+        if not 0 <= revisit_task_index < len(curriculum_latents):
+            raise ValueError(
+                "revisit_task_index must identify a curriculum task; "
+                f"got {revisit_task_index} for T={len(curriculum_latents)}"
+            )
+        latents.append(curriculum_latents[revisit_task_index])
         origins.append(TASK_ORIGIN_CODES["revisit"])
         source_order.append(len(source_order))
 
@@ -261,11 +267,14 @@ def build_sequence(
         "num_modules_covered": modules_covered,
     }
     if revisit_demos > 0:
-        original_last = task_spans[0][0] + 2 * (demo_counts[0] - 1)
+        original_last = task_spans[revisit_task_index][0] + 2 * (
+            demo_counts[revisit_task_index] - 1
+        )
         revisit_first = task_spans[-1][0]
         info.update(
-            intervening_tasks=len(curriculum_latents) - 1,
-            prediction_token_delay=int(history_prediction_tokens[-1] - demo_counts[0]),
+            original_task_position=revisit_task_index,
+            intervening_tasks=len(curriculum_latents) - 1 - revisit_task_index,
+            prediction_token_delay=sum(demo_counts[revisit_task_index + 1 : -1]),
             serialized_token_delay=revisit_first - original_last,
         )
     if include_world:

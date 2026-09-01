@@ -217,24 +217,6 @@ def _without_history(sequence: SequenceSample) -> SequenceSample:
     )
 
 
-def _composition_demo_counts(
-    configured: tuple[int, ...], mask: np.ndarray, constituent_demos: int | None
-) -> tuple[int, ...]:
-    if constituent_demos is None:
-        return configured
-    target_tasks = int(mask.sum())
-    other_tasks = len(mask) - target_tasks
-    remaining = sum(configured) - target_tasks * constituent_demos
-    if constituent_demos < 1 or remaining < other_tasks:
-        raise ValueError("constituent demo constraint cannot preserve the history budget")
-    counts = np.full(len(mask), constituent_demos, dtype=np.int64)
-    if other_tasks:
-        quotient, remainder = divmod(remaining, other_tasks)
-        counts[~mask] = quotient
-        counts[np.flatnonzero(~mask)[:remainder]] += 1
-    return tuple(int(value) for value in counts)
-
-
 def build_paired_composition_controls(
     family: HyperTeacher,
     cfg: SequenceConfig,
@@ -243,7 +225,6 @@ def build_paired_composition_controls(
     target_demos: int,
     constituent_task_exposures: int,
     fixed_demo_counts: tuple[int, ...],
-    constituent_demo_count: int | None = None,
 ) -> tuple[SequenceSample, SequenceSample, SequenceSample]:
     """Build constituent-history, matched-prefix, and no-history conditions."""
     history, final_latent, target, mask = _composition_latents(
@@ -252,7 +233,6 @@ def build_paired_composition_controls(
         tasks=len(fixed_demo_counts),
         exposures=constituent_task_exposures,
     )
-    demo_counts = _composition_demo_counts(fixed_demo_counts, mask, constituent_demo_count)
     pool = sample_module_pool(family.cfg, rng)
     final = FinalTaskConfig("composite", 2, target_demos)
     constituent = build_sequence(
@@ -264,7 +244,7 @@ def build_paired_composition_controls(
         world=pool,
         fixed_final_latent=final_latent,
         fixed_curriculum_latents=history,
-        fixed_demo_counts=demo_counts,
+        fixed_demo_counts=fixed_demo_counts,
     )
 
     allowed = np.array([module for module in range(family.cfg.num_modules) if module not in target])
