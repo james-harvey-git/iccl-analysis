@@ -10,6 +10,7 @@ errors are written locally and optionally uploaded as one evaluation artifact.
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, cast
 
 import hydra
 import torch
@@ -25,6 +26,7 @@ from iccl.checkpoints import (
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
 from iccl.evaluation.results import write_evaluation_results
 from iccl.models.model import model_from_config
+from iccl.reporting.figures import evaluation_figures, write_html_figures
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
@@ -78,7 +80,8 @@ def main(cfg: DictConfig) -> None:
             bootstrap_seed=int(cfg.data.eval_sets.get("bootstrap_seed", 0)),
             bootstrap_replicates=int(cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
         )
-        logger.log_full_evaluation(report, step)
+        figures = evaluation_figures(report.summary_rows, report.curve_rows)
+        resolved = cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True))
         result_path = write_evaluation_results(
             report,
             results_dir,
@@ -87,11 +90,17 @@ def main(cfg: DictConfig) -> None:
                 "checkpoint_reference": reference,
                 "checkpoint_path": str(path),
                 "source_run": None if source is None else asdict(source),
-                "evaluation_config": OmegaConf.to_container(cfg, resolve=True),
+                "resolved_config": resolved,
+                "evaluation_config": resolved["evaluation"],
+                "data_evaluation_config": resolved["data"]["eval_sets"],
+                "model_config": resolved["model"],
+                "reporting_config": resolved["wandb"],
                 "training_config": checkpoint.get("config"),
                 "suites": {name: suite["__meta__"] for name, suite in suites.items()},
             },
         )
+        write_html_figures(figures.items(), result_path / "plots")
+        logger.log_full_evaluation(report, step, figures, reference)
         print(f"evaluation results written to {result_path}")
     logger.upload_evaluation_results(results_dir)
     logger.finish()

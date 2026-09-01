@@ -107,6 +107,11 @@ def export_suite(samples: list[SequenceSample], path: Path, meta: dict[str, Any]
     lengths = {len(sample.tokens) for sample in samples}
     if len(lengths) != 1:
         raise ValueError(f"suite sequences must share a length, got {sorted(lengths)}")
+    for key in ("num_modules", "num_curriculum_tasks", "demo_counts"):
+        if all(key in sample.info for sample in samples):
+            reference = samples[0].info[key]
+            if any(not np.array_equal(reference, sample.info[key]) for sample in samples[1:]):
+                raise ValueError(f"suite {meta.get('suite', path.name)} mixes values for {key}")
     arrays = {
         key: np.stack([getattr(sample, key) for sample in samples])
         for key in ("tokens", "token_type", "targets", "loss_mask")
@@ -231,13 +236,23 @@ def export_eval_sets(cfg: DictConfig) -> int:
     if unknown:
         raise ValueError(f"unknown evaluation capabilities: {sorted(unknown)}")
     if "composition" in capabilities:
-        if "matched_prefix" not in eval_cfg.composition.controls:
+        composition_controls = {str(value) for value in eval_cfg.composition.controls}
+        invalid_controls = composition_controls - {"matched_prefix", "no_history"}
+        if invalid_controls:
+            raise ValueError(f"unknown composition controls: {sorted(invalid_controls)}")
+        if "matched_prefix" not in composition_controls:
             raise ValueError("composition requires its matched_prefix control")
         invalid = [cell.cell_id for cell in cells if cell.num_modules < 4]
         if invalid:
             raise ValueError(f"composition requires M>=4; invalid cells: {invalid}")
     if str(eval_cfg.retention.repeat_positions) != "all":
         raise ValueError("retention.repeat_positions must be 'all'")
+    retention_controls = {str(value) for value in eval_cfg.retention.controls}
+    invalid_controls = retention_controls - {"novel", "shared"}
+    if invalid_controls:
+        raise ValueError(f"unknown retention controls: {sorted(invalid_controls)}")
+    if "retention" in capabilities and "novel" not in retention_controls:
+        raise ValueError("retention requires its novel control")
 
     out_dir = Path(eval_cfg.out_dir)
     count = int(eval_cfg.num_sequences)
@@ -338,8 +353,6 @@ def export_eval_sets(cfg: DictConfig) -> int:
         if "retention" not in capabilities:
             continue
         modes = [str(value) for value in eval_cfg.retention.controls]
-        if "novel" not in modes:
-            raise ValueError("retention requires its novel control")
         if data_cfg.weighting == "binary":
             modes = [mode for mode in modes if mode != "shared"]
         repeats: list[SequenceSample] = []

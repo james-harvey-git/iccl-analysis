@@ -68,13 +68,6 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
                 "eval_sets": {
                     "out_dir": str(tmp_path / "eval_sets"),
                     "best_metric": "validation/token_mse",
-                    "monitor": {
-                        "structural_slice": "fixed_surplus",
-                        "module_count": 8,
-                        "task_count": 8,
-                        "surplus_tasks": 1,
-                        "history_demos_per_task": 4,
-                    },
                 },
             },
             "model": {
@@ -149,20 +142,14 @@ def test_masked_mse_ignores_unmasked_positions() -> None:
     assert masked_mse(preds, targets, mask).item() == pytest.approx(1.0)
 
 
-def test_canonical_monitor_selector_requires_the_exact_structural_cell(tmp_path: Path) -> None:
-    monitor = make_cfg(tmp_path).data.eval_sets.monitor
+def test_canonical_monitor_selector_uses_family_membership(tmp_path: Path) -> None:
     metadata = {
         "capability": "icl",
-        "structural_slice": "fixed_surplus",
-        "num_modules": 8,
-        "num_tasks": 8,
-        "num_surplus_tasks": 1,
-        "demo_counts": [4] * 8,
+        "family_memberships": ["canonical", "task_variation"],
     }
-    assert is_monitor_suite(metadata, monitor)
-    assert not is_monitor_suite(metadata | {"num_modules": 10}, monitor)
-    assert not is_monitor_suite(metadata | {"demo_counts": [8] * 8}, monitor)
-    assert not is_monitor_suite(metadata | {"capability": "validation"}, monitor)
+    assert is_monitor_suite(metadata)
+    assert not is_monitor_suite(metadata | {"family_memberships": ["task_variation"]})
+    assert not is_monitor_suite(metadata | {"capability": "validation"})
 
 
 def snapshot_steps(num_steps: int, **snapshots: Any) -> list[int]:
@@ -308,29 +295,6 @@ def test_trainer_runs_validation_and_tracks_best(tmp_path: Path) -> None:
     seq_cfg = sequence_config_from(cfg.data)
     samples = [build_sequence(family, seq_cfg, sequence_rng(1, i)) for i in range(2)]
     out_dir = Path(cfg.data.eval_sets.out_dir)
-    name = "icl__ordinary__fixed_surplus__seen__m08__t08__b0032"
-    export_suite(
-        samples,
-        out_dir / name,
-        {
-            "suite": name,
-            "capability": "icl",
-            "condition": "ordinary",
-            "structural_slice": "fixed_surplus",
-            "variant": "",
-            "module_count_status": "seen",
-            "num_modules": 8,
-            "num_tasks": 8,
-            "num_surplus_tasks": 1,
-            "demo_counts": [4] * 8,
-            "history_prediction_tokens": 32,
-            "history_serialized_tokens": 72,
-            "config": {
-                "sequence": {"curriculum_sampler": "rejection"},
-                "weighting": "discrete",
-            },
-        },
-    )
     export_suite(
         samples,
         out_dir / "validation",

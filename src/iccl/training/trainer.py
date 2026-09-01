@@ -129,19 +129,13 @@ def resolve_autocast_dtype(precision: str, device: torch.device) -> torch.dtype 
             raise ValueError(f"unknown precision: {precision}")
 
 
-def is_monitor_suite(metadata: dict[str, Any], monitor_cfg: DictConfig) -> bool:
+def is_monitor_suite(metadata: dict[str, Any]) -> bool:
     """Whether frozen-suite metadata belongs to the canonical live monitor."""
-    if metadata.get("capability") not in {"icl", "composition", "retention"}:
-        return False
-    demos = tuple(int(value) for value in metadata.get("demo_counts", ()))
-    return (
-        metadata.get("structural_slice") == monitor_cfg.structural_slice
-        and int(metadata.get("num_modules", -1)) == int(monitor_cfg.module_count)
-        and int(metadata.get("num_tasks", -1)) == int(monitor_cfg.task_count)
-        and int(metadata.get("num_surplus_tasks", -1)) == int(monitor_cfg.surplus_tasks)
-        and len(demos) == int(monitor_cfg.task_count)
-        and demos == (int(monitor_cfg.history_demos_per_task),) * len(demos)
-    )
+    return metadata.get("capability") in {
+        "icl",
+        "composition",
+        "retention",
+    } and "canonical" in metadata.get("family_memberships", ())
 
 
 class Trainer:
@@ -205,7 +199,7 @@ class Trainer:
         monitor_suites = (
             load_eval_suites(
                 eval_dir,
-                select=lambda meta: is_monitor_suite(meta, self.cfg.data.eval_sets.monitor),
+                select=is_monitor_suite,
             )
             if monitor_enabled
             else {}

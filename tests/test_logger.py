@@ -247,36 +247,29 @@ def test_artifact_names_survive_unnamed_and_awkwardly_named_runs() -> None:
     assert evaluation_artifact_name("pilot run #2") == "evaluation-pilot-run--2"
 
 
-def test_full_evaluation_logs_one_primary_table_without_curve_panels(
+def test_full_evaluation_logs_one_summary_table_and_explicit_figures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = FakeRun()
     logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
     summary = [
         {
+            "family_memberships": "canonical|task_variation",
+            "cell_id": "m08__t08__d032",
             "capability": "icl",
             "condition": "ordinary",
-            "slice": "fixed_surplus",
             "suite": "icl-cell",
-            "status": "seen",
+            "module_count_status": "seen",
             "sampler": "constructive",
             "weighting": "discrete",
             "M": 8,
             "T": 8,
             "S": 1,
-            "B_history": 256,
-            "L_history": 520,
-            "D_target": 32,
-            "D_min": 32.0,
-            "D_max": 32.0,
-            "D_mean": 32.0,
-            "D_cv": 0.0,
-            "constituent_exposure_min": None,
-            "constituent_exposure_max": None,
+            "D": 32,
+            "retention_component": None,
+            "original_task_position": None,
             "intervening_tasks": None,
-            "prediction_token_delay": None,
-            "serialized_token_delay": None,
-            "metric": "nmse_aulc",
+            "metric": "within_task_nmse_mean",
             "value": 0.4,
             "ci_low": 0.3,
             "ci_high": 0.5,
@@ -284,13 +277,15 @@ def test_full_evaluation_logs_one_primary_table_without_curve_panels(
         }
     ]
     report = EvaluationReport({}, {}, summary, [], {})
-    logger.log_full_evaluation(report, 20)
+    figure = object()
+    logger.log_full_evaluation(report, 20, {"evaluation/icl_within_task": figure}, "best.pt")
     logger.flush()
 
     payload, step = run.records[-1]
     assert step == 20
-    assert set(payload) == {"evaluation/primary_summary"}
-    assert len(payload["evaluation/primary_summary"].data) == 1
+    assert set(payload) == {"evaluation/summary", "evaluation/icl_within_task"}
+    assert len(payload["evaluation/summary"].data) == 1
+    assert payload["evaluation/icl_within_task"] is figure
 
 
 def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
@@ -299,7 +294,7 @@ def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
     run = FakeRun()
     logger, _ = start_with_fake_wandb(monkeypatch, tmp_path, run=run)
     summary_specs = (
-        ("icl", "ordinary", "nmse_aulc"),
+        ("icl", "ordinary", "within_task_nmse_mean"),
         ("composition", "benefit", "benefit_mean"),
         ("retention", "savings", "savings_mean"),
         ("retention", "episodic_savings", "episodic_savings_mean"),
@@ -310,15 +305,15 @@ def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
         for capability, condition, metric in summary_specs
     ]
     curve_specs = (
-        ("icl", "ordinary", "learning_curve"),
-        ("icl", "ordinary", "task_position_curve"),
-        ("composition", "constituent", "constituent_curve"),
-        ("composition", "matched_prefix", "matched_prefix_curve"),
-        ("composition", "no_history", "no_history_curve"),
-        ("retention", "original", "original_curve"),
-        ("retention", "repeat", "relearning_curve"),
-        ("retention", "novel", "novel_curve"),
-        ("retention", "shared", "shared_curve"),
+        ("icl", "ordinary", "within_task_learning"),
+        ("icl", "ordinary", "episode_learning"),
+        ("composition", "constituent", "composition_learning"),
+        ("composition", "matched_prefix", "composition_learning"),
+        ("composition", "no_history", "composition_learning"),
+        ("retention", "original", "retention_learning"),
+        ("retention", "repeat", "retention_learning"),
+        ("retention", "novel", "retention_learning"),
+        ("retention", "shared", "retention_learning"),
     )
     curves = [
         {

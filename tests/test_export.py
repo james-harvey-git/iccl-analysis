@@ -171,3 +171,10 @@ def test_retention_requires_enough_sequences_to_represent_every_position(tmp_pat
     cfg.data.eval_sets.num_sequences = 6
     with pytest.raises(ValueError, match="largest evaluated task count"):
         export_eval_sets(cfg)
+
+
+def test_binary_evaluation_omits_the_degenerate_shared_control(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, ["retention"])
+    cfg.data.weighting = "binary"
+    assert export_eval_sets(cfg) == 23  # validation + 11 cells x repeat/novel
+    assert not list(tmp_path.glob("retention__shared__*.npz"))

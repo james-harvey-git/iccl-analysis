@@ -1,4 +1,4 @@
-"""Compact scalar and Plotly views logged while training."""
+"""Compact scalar and Plotly views for the canonical training monitor."""
 
 from typing import Any
 
@@ -8,30 +8,23 @@ from iccl.visualization import grouped_figure
 
 
 def canonical_monitor_scalars(summary_rows: list[dict[str, Any]]) -> dict[str, float]:
-    """Longitudinal capability summaries for the configured monitor cell."""
+    """Longitudinal summaries from the canonical fixed-demo capability cell."""
     specifications = {
-        "monitor/icl_nmse_aulc": ("icl", "ordinary", "nmse_aulc"),
-        "monitor/composition_nmse_benefit": ("composition", "benefit", "benefit_mean"),
-        "monitor/retention_total_nmse_savings": ("retention", "savings", "savings_mean"),
+        "monitor/icl_within_task_nmse_mean": ("icl", "within_task_nmse_mean"),
+        "monitor/composition_nmse_benefit": ("composition", "benefit_mean"),
+        "monitor/retention_total_nmse_savings": ("retention", "savings_mean"),
         "monitor/retention_episodic_nmse_savings": (
             "retention",
-            "episodic_savings",
             "episodic_savings_mean",
         ),
-        "monitor/retention_module_nmse_savings": (
-            "retention",
-            "module_savings",
-            "module_savings_mean",
-        ),
+        "monitor/retention_module_nmse_savings": ("retention", "module_savings_mean"),
     }
     metrics: dict[str, float] = {}
-    for key, (capability, condition, metric) in specifications.items():
+    for key, (capability, metric) in specifications.items():
         matches = [
             row
             for row in summary_rows
-            if row["capability"] == capability
-            and row["condition"] == condition
-            and row["metric"] == metric
+            if row["capability"] == capability and row["metric"] == metric
         ]
         if len(matches) > 1:
             raise ValueError(f"canonical monitor has multiple rows for {key}")
@@ -41,54 +34,40 @@ def canonical_monitor_scalars(summary_rows: list[dict[str, Any]]) -> dict[str, f
 
 
 def canonical_monitor_figures(curve_rows: list[dict[str, Any]], step: int) -> dict[str, go.Figure]:
-    """Four NMSE panels for one canonical structural cell and training step."""
+    """Four nMSE panels for the canonical cell at one training step."""
     specifications = (
         (
             "monitor-curves/icl_within_task",
-            "ICL within task",
+            "Within-task ICL",
+            "within_task_learning",
             "demo index within task",
-            {"learning_curve": "ICL"},
+            ("condition",),
         ),
         (
             "monitor-curves/icl_across_episode",
-            "ICL across episode",
+            "ICCL across episode",
+            "episode_learning",
             "task position",
-            {"task_position_curve": "ICL"},
+            ("condition",),
         ),
         (
             "monitor-curves/composition_final_task",
             "Composition on final task",
+            "composition_learning",
             "final-task demo index",
-            {
-                "constituent_curve": "constituent history",
-                "matched_prefix_curve": "matched-prefix control",
-                "no_history_curve": "no-history control",
-            },
+            ("condition",),
         ),
         (
             "monitor-curves/retention_final_task",
             "Retention on final task",
+            "retention_learning",
             "final-task demo index",
-            {
-                "original_curve": "original learning",
-                "relearning_curve": "repeat/relearning",
-                "novel_curve": "novel-task control",
-                "shared_curve": "same-support/new-weights control",
-            },
+            ("condition",),
         ),
     )
     figures: dict[str, go.Figure] = {}
-    for key, title, x_title, names in specifications:
-        rows = [row for row in curve_rows if row["curve_type"] in names]
-        if key == "monitor-curves/retention_final_task" and rows:
-            maxima = {
-                curve_type: max(
-                    int(row["x_value"]) for row in rows if row["curve_type"] == curve_type
-                )
-                for curve_type in {str(row["curve_type"]) for row in rows}
-            }
-            matched_last_demo = min(maxima.values())
-            rows = [row for row in rows if int(row["x_value"]) <= matched_last_demo]
+    for key, title, curve_type, x_title, groups in specifications:
+        rows = [row for row in curve_rows if row["curve_type"] == curve_type]
         if rows:
             figures[key] = grouped_figure(
                 rows,
@@ -97,7 +76,6 @@ def canonical_monitor_figures(curve_rows: list[dict[str, Any]], step: int) -> di
                 y_field="nmse",
                 x_title=x_title,
                 y_title="normalized MSE",
-                group_fields=("curve_type",),
-                trace_names=names,
+                group_fields=groups,
             )
     return figures

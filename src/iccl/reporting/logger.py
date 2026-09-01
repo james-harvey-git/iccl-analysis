@@ -183,20 +183,17 @@ class RunLogger:
         self._print(metrics, step)
         return path
 
-    def log_full_evaluation(self, report: EvaluationReport, step: int) -> None:
-        """Log a compact index; detailed arrays and rows belong to the artifact."""
-        primary_metrics = {
-            "nmse_aulc",
-            "benefit_mean",
-            "savings_mean",
-            "episodic_savings_mean",
-            "module_savings_mean",
-        }
+    def log_full_evaluation(
+        self,
+        report: EvaluationReport,
+        step: int,
+        figures: dict[str, Any],
+        checkpoint_reference: str,
+    ) -> None:
+        """Log one summary table and the compact explicit evaluation figures."""
         rows = [
-            dict(row, step=step)
+            dict(row, step=step, checkpoint_reference=checkpoint_reference)
             for row in report.summary_rows
-            if row["metric"] in primary_metrics
-            or row["condition"] in {"interpolation_gap", "ood_gap"}
         ]
         metrics = (
             {"evaluation/validation_token_mse": report.scalars["validation/token_mse"]}
@@ -207,10 +204,11 @@ class RunLogger:
             import wandb
 
             payload: dict[str, Any] = dict(metrics)
-            payload["evaluation/primary_summary"] = wandb.Table(
+            payload["evaluation/summary"] = wandb.Table(
                 columns=cast(Any, SUMMARY_COLUMNS),
                 data=[[row.get(column) for column in SUMMARY_COLUMNS] for row in rows],
             )
+            payload.update({key: wandb.Plotly(figure) for key, figure in figures.items()})
             self._queue(payload, step)
         self._print(metrics | {"evaluation/primary_rows": float(len(rows))}, step)
 
