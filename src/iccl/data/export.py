@@ -245,8 +245,6 @@ def export_eval_sets(cfg: DictConfig) -> int:
         invalid = [cell.cell_id for cell in cells if cell.num_modules < 4]
         if invalid:
             raise ValueError(f"composition requires M>=4; invalid cells: {invalid}")
-    if str(eval_cfg.retention.repeat_positions) != "all":
-        raise ValueError("retention.repeat_positions must be 'all'")
     retention_controls = {str(value) for value in eval_cfg.retention.controls}
     invalid_controls = retention_controls - {"novel", "shared"}
     if invalid_controls:

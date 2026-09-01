@@ -9,8 +9,8 @@ Examples:
 import argparse
 from pathlib import Path
 
-from iccl.analysis.evaluation_plots import full_evaluation_figures, write_html_figures
 from iccl.evaluation.results import read_rows
+from iccl.reporting.figures import evaluation_figures, write_html_figures
 
 WANDB_SCHEME = "wandb://"
 
@@ -43,7 +43,7 @@ def main() -> None:
 
     total = 0
     for step_dir in step_dirs:
-        figures = full_evaluation_figures(
+        figures = evaluation_figures(
             read_rows(step_dir / "summary.csv"),
             read_rows(step_dir / "curves.csv"),
         )

@@ -57,7 +57,6 @@ def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig
                         "controls": ["matched_prefix", "no_history"],
                     },
                     "retention": {
-                        "repeat_positions": "all",
                         "controls": ["novel", "shared"],
                     },
                 },
@@ -106,6 +105,32 @@ def test_resolves_and_deduplicates_the_three_cell_families(tmp_path: Path) -> No
     assert canonical.family_memberships == ("canonical", "task_variation")
     overlap = next(cell for cell in cells if (cell.num_modules, cell.num_tasks) == (7, 7))
     assert overlap.family_memberships == ("task_variation", "module_variation")
+
+
+def test_explicit_evaluation_module_counts_are_supported(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg.data.eval_sets.module_counts = [4, 6, 8]
+    modules, statuses = evaluation_module_counts(cfg.data)
+    assert modules == (4, 6, 8)
+    assert statuses == {4: "seen", 6: "seen", 8: "ood"}
+    module_cells = [
+        cell
+        for cell in resolve_eval_cells(cfg.data)
+        if "module_variation" in cell.family_memberships
+    ]
+    assert {(cell.num_modules, cell.num_tasks) for cell in module_cells} == {
+        (4, 8),
+        (6, 8),
+        (8, 8),
+    }
+
+
+@pytest.mark.parametrize("values", [[], [1, 4], [4, 4]])
+def test_explicit_evaluation_module_counts_are_validated(tmp_path: Path, values: list[int]) -> None:
+    cfg = make_cfg(tmp_path)
+    cfg.data.eval_sets.module_counts = values
+    with pytest.raises(ValueError, match="module_counts"):
+        evaluation_module_counts(cfg.data)
 
 
 def test_removed_structural_slice_fields_are_rejected(tmp_path: Path) -> None:

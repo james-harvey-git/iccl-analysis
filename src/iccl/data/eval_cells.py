@@ -62,8 +62,19 @@ def _inclusive_bounds(config: DictConfig, name: str, minimum: int) -> range:
 
 
 def evaluation_module_counts(data_cfg: DictConfig) -> tuple[tuple[int, ...], dict[int, str]]:
-    """Return the inclusive evaluation range and each count's training status."""
-    values = tuple(_inclusive_bounds(data_cfg.eval_sets.module_counts, "module_counts", 2))
+    """Return configured evaluation counts and each count's training status."""
+    spec = data_cfg.eval_sets.module_counts
+    if isinstance(spec, DictConfig):
+        values = tuple(_inclusive_bounds(spec, "module_counts", 2))
+    else:
+        requested = tuple(int(value) for value in spec)
+        if not requested:
+            raise ValueError("module_counts list must not be empty")
+        if min(requested) < 2:
+            raise ValueError(f"module_counts values must be >=2, got {requested}")
+        if len(set(requested)) != len(requested):
+            raise ValueError(f"module_counts contains duplicates: {requested}")
+        values = tuple(sorted(requested))
     training = module_count_config_from(data_cfg)
     allowed, held_out = set(training.allowed), set(training.held_out)
     statuses = {
@@ -88,7 +99,7 @@ def resolve_eval_cells(data_cfg: DictConfig) -> list[EvalCell]:
     canonical_t = int(config.canonical.task_count)
     if canonical_m not in set(modules):
         raise ValueError(
-            f"canonical M={canonical_m} is outside evaluation range [{modules[0]}, {modules[-1]}]"
+            f"canonical M={canonical_m} is not in evaluation module counts {list(modules)}"
         )
     if canonical_t < canonical_m - 1:
         raise ValueError(f"canonical cell cannot cover M={canonical_m} with T={canonical_t}")

@@ -34,6 +34,8 @@ eval_sets:
   canonical:
     module_count: 8          # M for standalone evaluation and train-time monitoring
     task_count: 8            # T; must satisfy T>=M-1
+  # Inclusive mapping below; replace it with `module_counts: [6, 8, 12]`
+  # to evaluate only specific counts.
   module_counts:
     min: 4                  # inclusive evaluation range, independent of training bounds
     max: 12
@@ -44,8 +46,8 @@ eval_sets:
   composition:
     constituent_task_exposures: 1  # prior tasks containing each target module
     controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
+  # Retention repeats are balanced over every history-task position.
   retention:
-    repeat_positions: all   # balance repeats over every history position
     controls: [novel, shared]  # novel required; shared omitted for binary weighting
 
 distribution_diagnostic:
