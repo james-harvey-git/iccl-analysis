@@ -201,7 +201,39 @@ def test_retention_control_modes_pick_their_supports() -> None:
 
     shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
     np.testing.assert_array_equal(np.flatnonzero(shared), np.flatnonzero(revisited))
-    assert not np.array_equal(shared, revisited)
+    assert not any(np.array_equal(shared, latent) for latent in seq.info["latents"][:-1])
+
+
+def test_shared_retention_control_rejects_other_historical_latents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    family = make_family()
+    cfg = make_seq_cfg()
+    rng = sequence_rng(0, 0)
+    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
+    history = seq.info["latents"][:-1]
+    revisited = seq.info["latents"][-1]
+    active = np.flatnonzero(revisited)
+
+    def candidate(weights: tuple[float, ...]) -> np.ndarray:
+        latent = np.zeros_like(revisited)
+        latent[active] = weights
+        return latent
+
+    values = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    candidates = [candidate(weights) for weights in product(values, repeat=len(active))]
+    historical = next(latent for latent in candidates if not np.array_equal(latent, revisited))
+    history[1] = historical
+    unseen = next(
+        latent
+        for latent in candidates
+        if not any(np.array_equal(latent, previous) for previous in history)
+    )
+    candidates = iter([historical, unseen])
+    monkeypatch.setattr(family, "apply_weighting", lambda rng, pattern: next(candidates))
+
+    shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
+    np.testing.assert_array_equal(shared, unseen)
 
 
 def test_shared_retention_control_is_degenerate_under_binary_weighting() -> None:

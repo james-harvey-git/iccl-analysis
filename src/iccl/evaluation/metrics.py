@@ -15,7 +15,7 @@ from iccl.models.model import GDNModel
 
 Suite = dict[str, Any]
 BASE_MSE_FLOOR = 1e-12
-METRIC_VERSION = "fixed-d-capabilities-v1"
+METRIC_VERSION = "fixed-d-capabilities-v2"
 METRIC_DEFINITIONS = {
     "nmse": "per-demo output MSE divided by that task's mean output variance",
     "validation/token_mse": "raw output MSE pooled over training-distribution prediction tokens",

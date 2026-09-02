@@ -21,6 +21,11 @@ from iccl.data.sequences import (
 from iccl.data.teacher import HyperTeacher, sample_module_pool, teacher_forward
 
 
+def exact_latent_occurrences(history: np.ndarray, latent: np.ndarray) -> int:
+    """Count exact task-latent occurrences in a curriculum history."""
+    return sum(np.array_equal(previous, latent) for previous in history)
+
+
 def _retention_control_latent(
     family: HyperTeacher,
     history: np.ndarray,
@@ -44,9 +49,9 @@ def _retention_control_latent(
     pattern = (revisited > 0).astype(np.int8)
     for _ in range(max_attempts):
         latent = family.apply_weighting(rng, pattern)
-        if not np.array_equal(latent, revisited):
+        if exact_latent_occurrences(history, latent) == 0:
             return latent
-    raise RuntimeError(f"no distinct same-support task found in {max_attempts} attempts")
+    raise RuntimeError(f"no history-novel same-support task found in {max_attempts} attempts")
 
 
 def build_paired_retention_control(

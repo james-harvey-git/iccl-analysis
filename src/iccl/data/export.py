@@ -18,7 +18,11 @@ from typing import Any
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.controls import build_paired_composition_controls, build_paired_retention_control
+from iccl.data.controls import (
+    build_paired_composition_controls,
+    build_paired_retention_control,
+    exact_latent_occurrences,
+)
 from iccl.data.curriculum import (
     CURRICULUM_SAMPLER_CODES,
     TASK_CATEGORY_CODES,
@@ -272,6 +276,11 @@ def export_eval_sets(cfg: DictConfig) -> int:
             "task_category": TASK_CATEGORY_CODES,
             "curriculum_sampler": CURRICULUM_SAMPLER_CODES,
         },
+        "retention_contract": {
+            "repeat": "selected latent occurs exactly once in the history",
+            "novel": "support is absent from the history and uses covered modules",
+            "shared": "same support as the repeat latent but latent is absent from history",
+        },
     }
     written: set[str] = set()
     stream, suites_written = 0, 1
@@ -372,11 +381,16 @@ def export_eval_sets(cfg: DictConfig) -> int:
                 )
                 history = repeat.info["latents"][: cell.num_tasks]
                 supports = {tuple(np.flatnonzero(latent)) for latent in history}
-                if len(supports) < comb(cell.num_modules, sequence_cfg.hotness):
+                selected = history[int(revisit_position)]
+                if (
+                    len(supports) < comb(cell.num_modules, sequence_cfg.hotness)
+                    and exact_latent_occurrences(history, selected) == 1
+                ):
                     break
             else:
                 raise RuntimeError(
-                    f"retention cell {cell.cell_id} cannot reserve a novel support after "
+                    f"retention cell {cell.cell_id} cannot reserve a novel support and "
+                    "single-exposure repeat target after "
                     f"{sequence_cfg.max_attempts} histories"
                 )
             repeat.info["pair_id"] = pair_id

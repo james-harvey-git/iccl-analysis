@@ -1,3 +1,4 @@
+from math import comb
 from pathlib import Path
 
 import numpy as np
@@ -189,6 +190,35 @@ def test_export_uses_fixed_capability_d_and_variable_training_validation(tmp_pat
     assert metadata["family_memberships"]
     assert len(metadata["archive_sha256"]) == 64
     assert metadata["enum_mappings"]["task_origin"]["backbone"] == 1
+    assert metadata["retention_contract"]["repeat"].startswith("selected latent")
+
+
+def test_dense_retention_cells_reserve_a_single_exposure_repeat_target(
+    tmp_path: Path,
+) -> None:
+    cfg = make_cfg(tmp_path, ["retention"])
+    cfg.data.eval_sets.num_sequences = 12
+    cfg.data.eval_sets.module_counts = [4]
+    cfg.data.eval_sets.canonical.task_count = 12
+    cfg.data.eval_sets.task_variation.surplus_tasks = {"min": 9, "max": 9}
+    export_eval_sets(cfg)
+
+    repeat = load_suite(tmp_path / "retention__repeat__m04__t12__d002")
+    novel = load_suite(tmp_path / "retention__novel__m04__t12__d002")
+    shared = load_suite(tmp_path / "retention__shared__m04__t12__d002")
+    for index, position in enumerate(repeat["original_task_position"]):
+        history = repeat["latents"][index, :12]
+        selected = history[position]
+        supports = {tuple(np.flatnonzero(latent)) for latent in history}
+        assert len(supports) < comb(4, 2) < len(history)
+        assert sum(np.array_equal(selected, latent) for latent in history) == 1
+
+        novel_latent = novel["latents"][index, -1]
+        assert tuple(np.flatnonzero(novel_latent)) not in supports
+
+        shared_latent = shared["latents"][index, -1]
+        np.testing.assert_array_equal(np.flatnonzero(shared_latent), np.flatnonzero(selected))
+        assert not any(np.array_equal(shared_latent, latent) for latent in history)
 
 
 def test_retention_requires_enough_sequences_to_represent_every_position(tmp_path: Path) -> None:
