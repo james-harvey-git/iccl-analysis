@@ -11,11 +11,12 @@ import torch
 from jaxtyping import Float
 
 from iccl.data.export import VALIDATION_SUITE, load_suite, load_suite_metadata
+from iccl.evaluation.retention_position import evaluate_position_diagnostic
 from iccl.models.model import GDNModel
 
 Suite = dict[str, Any]
 BASE_MSE_FLOOR = 1e-12
-METRIC_VERSION = "fixed-d-capabilities-v2"
+METRIC_VERSION = "fixed-d-capabilities-v3"
 METRIC_DEFINITIONS = {
     "nmse": "per-demo output MSE divided by that task's mean output variance",
     "validation/token_mse": "raw output MSE pooled over training-distribution prediction tokens",
@@ -29,6 +30,10 @@ METRIC_DEFINITIONS = {
         "equal-delay mean over demos of shared-support nMSE minus exact-repeat nMSE"
     ),
     "module_savings_mean": "equal-delay mean over demos of novel nMSE minus shared-support nMSE",
+    "primacy_excess_mean": "within-world first-position savings minus mean interior savings",
+    "recency_excess_mean": "within-world last-position savings minus mean interior savings",
+    "edge_excess_mean": "within-world mean edge savings minus mean interior savings",
+    "rehearsal_effect_mean": "within-world controlled-rehearsal savings minus no-rehearsal savings",
 }
 
 
@@ -77,6 +82,7 @@ def load_eval_suites(
     required = {
         "composition": {"constituent", "matched_prefix"},
         "retention": {"repeat", "novel"},
+        "retention_position": {"repeat", "novel"},
     }
     for (capability, pair_group), conditions in groups.items():
         missing = required[capability] - set(conditions)
@@ -201,6 +207,7 @@ def _descriptor(name: str, suite: Suite) -> dict[str, Any]:
         "S": int(metadata["num_surplus_tasks"]),
         "D": int(metadata["demos_per_task"]),
         "pair_group": metadata.get("pair_group"),
+        "diagnostic_family": metadata.get("diagnostic_family"),
     }
 
 
@@ -227,27 +234,29 @@ class _ReportBuilder:
         seed: int,
         strata: np.ndarray | None = None,
         component: str | None = None,
+        extra: dict[str, Any] | None = None,
+        key_suffix: str = "",
     ) -> None:
         mean, low, high = _aggregate(
             values, seed=self.seed + seed, replicates=self.replicates, strata=strata
         )
         scalar = float(mean)
-        key = f"{descriptor['capability']}/{descriptor['cell_id']}/{metric}"
+        key = f"{descriptor['capability']}/{descriptor['cell_id']}/{metric}{key_suffix}"
         self.scalars[key] = scalar
-        self.summary_rows.append(
-            dict(
-                _base(descriptor),
-                condition=condition,
-                metric=metric,
-                retention_component=component,
-                original_task_position=None,
-                intervening_tasks=None,
-                value=scalar,
-                ci_low=float(low),
-                ci_high=float(high),
-                n_sequences=len(values),
-            )
+        row = dict(
+            _base(descriptor),
+            condition=condition,
+            metric=metric,
+            retention_component=component,
+            original_task_position=None,
+            intervening_tasks=None,
+            value=scalar,
+            ci_low=float(low),
+            ci_high=float(high),
+            n_sequences=len(values),
         )
+        row.update(extra or {})
+        self.summary_rows.append(row)
 
     def curve(
         self,
@@ -262,6 +271,7 @@ class _ReportBuilder:
         x_values: np.ndarray | None = None,
         strata: np.ndarray | None = None,
         component: str | None = None,
+        row_extras: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         mse_mean, _, _ = _aggregate(mse, seed=self.seed + seed, replicates=0, strata=strata)
         mean, low, high = _aggregate(
@@ -272,23 +282,24 @@ class _ReportBuilder:
         self.curves[key] = mean
         coordinates = np.arange(nmse.shape[1]) if x_values is None else x_values
         for index, coordinate in enumerate(coordinates):
-            self.curve_rows.append(
-                dict(
-                    _base(descriptor),
-                    condition=condition,
-                    curve_type=curve_type,
-                    retention_component=component,
-                    original_task_position=None,
-                    intervening_tasks=(int(coordinate) if x_name == "intervening_tasks" else None),
-                    x_name=x_name,
-                    x_value=int(coordinate),
-                    mse=float(mse_mean[index]),
-                    nmse=float(mean[index]),
-                    ci_low=float(low[index]),
-                    ci_high=float(high[index]),
-                    n_sequences=len(nmse),
-                )
+            value = int(coordinate)
+            row = dict(
+                _base(descriptor),
+                condition=condition,
+                curve_type=curve_type,
+                retention_component=component,
+                original_task_position=None,
+                intervening_tasks=(value if x_name == "intervening_tasks" else None),
+                x_name=x_name,
+                x_value=value,
+                mse=float(mse_mean[index]),
+                nmse=float(mean[index]),
+                ci_low=float(low[index]),
+                ci_high=float(high[index]),
+                n_sequences=len(nmse),
             )
+            row.update((row_extras or {}).get(value, {}))
+            self.curve_rows.append(row)
 
     def delay_curve(
         self,
@@ -410,6 +421,15 @@ def _evaluate(
             for condition, name in conditions.items()
         }
         seed = 100_000 + index * 1000
+        if capability == "retention_position":
+            evaluate_position_diagnostic(
+                report,
+                descriptor,
+                values,
+                raw_errors,
+                seed=seed,
+            )
+            continue
         if capability == "composition":
             for offset, condition in enumerate(("constituent", "matched_prefix", "no_history")):
                 if condition not in values:

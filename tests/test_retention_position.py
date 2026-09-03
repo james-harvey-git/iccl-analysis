@@ -190,6 +190,14 @@ def test_rehearsed_constituent_is_balanced_across_worlds() -> None:
     assert selected.count(0) == selected.count(1) == 4
 
 
+def test_controlled_rehearsal_supports_the_connectivity_floor() -> None:
+    group = build_rehearsal_position_group(
+        make_family(), make_cfg(), sequence_rng(5, 1), tasks=7, demos=2, group_id=0
+    )
+    assert all(len(samples) == 6 for samples in group.values())
+    assert {sample.info["original_task_position"] for sample in group["repeat"]} == {0, 3}
+
+
 def test_binary_groups_omit_shared_control() -> None:
     modes = ("novel",)
     paired = build_paired_position_group(

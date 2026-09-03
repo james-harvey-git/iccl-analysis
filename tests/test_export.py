@@ -18,6 +18,7 @@ from iccl.data.export import (
     suite_paths,
 )
 from iccl.data.sequences import TOKEN_PAD
+from iccl.evaluation.metrics import load_eval_suites
 
 
 def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig:
@@ -276,4 +277,15 @@ def test_position_diagnostic_exports_separate_paired_families(tmp_path: Path) ->
     )
     assert metadata["diagnostic_family"] == "paired_permutation"
     assert metadata["num_worlds"] == 2
+    assert metadata["schema_version"] == "retention-position-v1"
+    assert metadata["array_shapes"]["tokens"] == list(paired["tokens"].shape)
     assert metadata["family_memberships"] == ["position_diagnostic"]
+    assert len(load_eval_suites(root)) == 6
+
+    hashes = {
+        path.name: load_suite_metadata(path)["archive_sha256"] for path in root.glob("*.meta.json")
+    }
+    assert export_retention_position_sets(cfg) == 6
+    assert hashes == {
+        path.name: load_suite_metadata(path)["archive_sha256"] for path in root.glob("*.meta.json")
+    }

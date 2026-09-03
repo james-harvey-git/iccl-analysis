@@ -5,7 +5,7 @@ The rehearsal family holds a target and world fixed while controlling whether
 neither, one, or both target modules occur between the target and its revisit.
 """
 
-from itertools import combinations
+from math import comb
 
 import numpy as np
 
@@ -51,51 +51,6 @@ def _control_latents(
     }
 
 
-def _exposure_metadata(
-    history: np.ndarray,
-    target: np.ndarray,
-    position: int,
-    *,
-    group_id: int,
-    pair_id: int,
-    mode: str,
-    support_status: str,
-    designated_constituent: int = -1,
-    logical_task_ids: np.ndarray | None = None,
-) -> dict[str, object]:
-    target_support = np.asarray(_support(target), dtype=np.int64)
-    active = history != 0
-    before, after = active[:position], active[position + 1 :]
-    metadata: dict[str, object] = {
-        "position_group_id": group_id,
-        "pair_id": pair_id,
-        "world_index": group_id,
-        "sequence_index": pair_id,
-        "target_support": target_support,
-        "target_modules_seen_before": (
-            before[:, target_support].any(axis=0) if len(before) else np.zeros(2, dtype=bool)
-        ),
-        "target_module_pre_exposures": (
-            before[:, target_support].sum(axis=0) if len(before) else np.zeros(2, dtype=np.int64)
-        ),
-        "target_module_post_exposures": (
-            after[:, target_support].sum(axis=0) if len(after) else np.zeros(2, dtype=np.int64)
-        ),
-        "prior_target_latent_count": exact_latent_occurrences(history, target),
-        "prior_target_support_count": sum(
-            _support(latent) == tuple(target_support) for latent in history
-        ),
-        "rehearsal_mode": mode,
-        "support_status": support_status,
-        "designated_constituent": designated_constituent,
-    }
-    if logical_task_ids is not None:
-        metadata["logical_task_id"] = np.concatenate(
-            [logical_task_ids.astype(np.int64), np.array([-1], dtype=np.int64)]
-        )
-    return metadata
-
-
 def _annotate(
     sample: SequenceSample,
     history: np.ndarray,
@@ -109,19 +64,28 @@ def _annotate(
     designated_constituent: int = -1,
     logical_task_ids: np.ndarray | None = None,
 ) -> None:
+    target_support = np.asarray(_support(target), dtype=np.int64)
+    active = history != 0
+    before, after = active[:position], active[position + 1 :]
     sample.info.update(
-        _exposure_metadata(
-            history,
-            target,
-            position,
-            group_id=group_id,
-            pair_id=pair_id,
-            mode=mode,
-            support_status=support_status,
-            designated_constituent=designated_constituent,
-            logical_task_ids=logical_task_ids,
-        )
+        position_group_id=group_id,
+        pair_id=pair_id,
+        world_index=group_id,
+        sequence_index=pair_id,
+        target_support=target_support,
+        target_modules_seen_before=before[:, target_support].any(axis=0),
+        target_module_pre_exposures=before[:, target_support].sum(axis=0),
+        target_module_post_exposures=after[:, target_support].sum(axis=0),
+        prior_target_latent_count=exact_latent_occurrences(history, target),
+        prior_target_support_count=sum(
+            _support(latent) == tuple(target_support) for latent in history
+        ),
+        rehearsal_mode=mode,
+        support_status=support_status,
+        designated_constituent=designated_constituent,
     )
+    if logical_task_ids is not None:
+        sample.info["logical_task_id"] = np.append(logical_task_ids.astype(np.int64), -1)
 
 
 def _conditions(
@@ -158,7 +122,7 @@ def build_paired_position_group(
     supports = [_support(latent) for latent in history]
     counts = {support: supports.count(support) for support in set(supports)}
     eligible = [index for index, support in enumerate(supports) if counts[support] == 1]
-    if not eligible or len(counts) == len(tuple(combinations(range(family.cfg.num_modules), 2))):
+    if not eligible or len(counts) == comb(family.cfg.num_modules, 2):
         raise RuntimeError("paired position history has no unique target or reserved novel support")
     target_index = eligible[int(rng.integers(len(eligible)))]
     target = history[target_index]
@@ -227,25 +191,27 @@ def _controlled_histories(
     modules = family.cfg.num_modules
     target_modules = _support(target)
     remaining = rng.permutation([m for m in range(modules) if m not in target_modules])
-    extras = tasks - modules
+    extras = tasks - (modules - 1)
     if extras < 0:
         raise ValueError(
-            f"controlled rehearsal requires canonical T>=M, got M={modules}, T={tasks}"
+            f"controlled rehearsal requires canonical T>=M-1, got M={modules}, T={tasks}"
         )
 
     if position == 0:
         common_edges = [
             (int(remaining[index]), int(remaining[index + 1]))
-            for index in range(len(remaining) - 1)
+            for index in range(len(remaining) - 2)
         ] + [_random_edge(remaining, rng) for _ in range(extras)]
         prefix: list[np.ndarray] = []
-        common = _weighted_edges(family, common_edges, rng)
-        fillers = _weighted_edges(family, [_random_edge(remaining, rng) for _ in range(2)], rng)
+        bridge = weighted_edge(family, (int(remaining[0]), int(remaining[-1])), rng)
         variable = {
-            "none": fillers,
+            "none": [
+                weighted_edge(family, _random_edge(remaining, rng), rng),
+                bridge,
+            ],
             "one": [
                 weighted_edge(family, (designated, int(remaining[0])), rng),
-                fillers[1],
+                bridge,
             ],
             "both": [
                 weighted_edge(family, (target_modules[0], int(remaining[0])), rng),
@@ -262,23 +228,26 @@ def _controlled_histories(
         ]
         tail = remaining[position:]
         common_edges = [
-            (int(tail[index]), int(tail[index + 1])) for index in range(len(tail) - 1)
+            (int(tail[index]), int(tail[index + 1])) for index in range(len(tail) - 2)
         ] + [_random_edge(remaining, rng) for _ in range(extras)]
         prefix = _weighted_edges(family, prefix_edges, rng)
-        common = _weighted_edges(family, common_edges, rng)
-        filler = weighted_edge(family, _random_edge(remaining, rng), rng)
+        bridge = weighted_edge(family, (int(tail[0]), int(tail[-1])), rng)
         variable = {
             "none": [
                 weighted_edge(family, (int(remaining[position - 1]), int(tail[0])), rng),
-                filler,
+                bridge,
             ],
-            "one": [weighted_edge(family, (designated, int(tail[0])), rng), filler],
+            "one": [
+                weighted_edge(family, (designated, int(tail[0])), rng),
+                bridge,
+            ],
             "both": [
                 weighted_edge(family, (target_modules[0], int(tail[0])), rng),
                 weighted_edge(family, (target_modules[1], int(tail[-1])), rng),
             ],
         }
 
+    common = _weighted_edges(family, common_edges, rng)
     suffix_order = rng.permutation(len(common) + 2)
     histories = {}
     for mode in REHEARSAL_MODES:

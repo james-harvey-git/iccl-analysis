@@ -66,3 +66,25 @@ def test_evaluation_results_round_trip_rows_and_raw_metadata(tmp_path: Path) -> 
         "dtype": "int64",
     }
     assert {"python", "numpy", "torch", "platform"} <= manifest["runtime"].keys()
+
+
+def test_diagnostic_columns_round_trip_without_affecting_standard_rows(tmp_path: Path) -> None:
+    row = structural_row() | {
+        "capability": "retention_position",
+        "condition": "rehearsal_effect",
+        "metric": "rehearsal_effect_mean",
+        "value": 0.2,
+        "diagnostic_family": "controlled_rehearsal",
+        "rehearsal_mode": "one",
+        "support_status": "connected_id",
+        "original_task_position": 3,
+        "intervening_tasks": 4,
+    }
+    path = write_evaluation_results(
+        EvaluationReport({}, {}, [row], [], {}), tmp_path, 10, {"checkpoint_reference": "x.pt"}
+    )
+    restored = read_rows(path / "summary.csv")[0]
+    assert restored["diagnostic_family"] == "controlled_rehearsal"
+    assert restored["rehearsal_mode"] == "one"
+    assert restored["support_status"] == "connected_id"
+    assert restored["original_task_position"] == 3

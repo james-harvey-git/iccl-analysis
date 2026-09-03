@@ -94,3 +94,54 @@ def test_installed_wandb_adapter_preserves_plotly_dropdowns() -> None:
     media = wandb.Plotly(figure)
     serialized = json.loads(Path(vars(media)["_path"]).read_text())
     assert serialized["layout"]["updatemenus"][0]["buttons"][0]["label"] == "cell"
+
+
+def test_position_diagnostic_adds_only_two_compact_figures() -> None:
+    rows = []
+    for component in ("total", "module", "episodic"):
+        for position in range(4):
+            rows.append(
+                curve_row("m04__t04__d032", 4, "retention_position", position)
+                | {
+                    "capability": "retention_position",
+                    "condition": "savings",
+                    "diagnostic_family": "paired_permutation",
+                    "retention_component": component,
+                    "original_task_position": position,
+                    "intervening_tasks": 3 - position,
+                }
+            )
+        for mode in ("none", "one", "both"):
+            for position in (0, 1):
+                rows.append(
+                    curve_row("m04__t04__d032", 4, "retention_rehearsal", position)
+                    | {
+                        "capability": "retention_position",
+                        "condition": mode,
+                        "diagnostic_family": "controlled_rehearsal",
+                        "retention_component": component,
+                        "rehearsal_mode": mode,
+                        "original_task_position": position,
+                        "intervening_tasks": 3 - position,
+                        "support_status": (
+                            "disconnected_ood"
+                            if mode == "none" and position == 0
+                            else "connected_id"
+                        ),
+                    }
+                )
+
+    figures = evaluation_figures([], rows)
+    assert set(figures) == {
+        "evaluation/retention_position",
+        "evaluation/retention_rehearsal",
+    }
+    assert len(cast(Any, figures["evaluation/retention_position"].data)) == 3
+    rehearsal = figures["evaluation/retention_rehearsal"]
+    assert len(cast(Any, rehearsal.data)) == 9
+    assert len(cast(Any, rehearsal.layout).updatemenus[0].buttons) == 3
+    assert sum(bool(trace.visible) for trace in cast(Any, rehearsal.data)) == 3
+    none = next(
+        trace for trace in cast(Any, rehearsal.data) if trace.name == "no constituent rehearsal"
+    )
+    assert "x" in list(none.marker.symbol)

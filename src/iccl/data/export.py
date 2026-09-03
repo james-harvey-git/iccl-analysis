@@ -435,9 +435,11 @@ def export_retention_position_sets(cfg: DictConfig) -> int:
     demos = int(eval_cfg.demos_per_task)
     if worlds < 1:
         raise ValueError(f"position_diagnostic.num_worlds must be positive, got {worlds}")
-    if modules < 4 or tasks < modules or demos < 1:
+    middle = (tasks - 1) // 2
+    if modules < 4 or tasks < modules - 1 or tasks - 1 - middle < 2 or demos < 1:
         raise ValueError(
-            "retention position diagnostic requires M>=4, T>=M, and D>=1; "
+            "retention position diagnostic requires M>=4, T>=M-1, at least two "
+            "post-middle tasks, and D>=1; "
             f"got M={modules}, T={tasks}, D={demos}"
         )
 
@@ -507,6 +509,7 @@ def export_retention_position_sets(cfg: DictConfig) -> int:
         "config": OmegaConf.to_container(data_cfg, resolve=True),
         "seed": int(cfg.seed),
         "num_worlds": worlds,
+        "schema_version": "retention-position-v1",
         "enum_mappings": {
             "task_origin": TASK_ORIGIN_CODES,
             "task_category": TASK_CATEGORY_CODES,
@@ -532,6 +535,10 @@ def export_retention_position_sets(cfg: DictConfig) -> int:
                 pair_group=pair_group,
             )
             metadata.update(suite=name, diagnostic_family=diagnostic_family)
+            metadata["array_shapes"] = {
+                key: [len(samples), *getattr(samples[0], key).shape]
+                for key in ("tokens", "token_type", "targets", "loss_mask")
+            }
             export_suite(samples, out_dir / name, metadata)
             suites_written += 1
     print(f"exported {suites_written} retention-position suites to {out_dir}/")

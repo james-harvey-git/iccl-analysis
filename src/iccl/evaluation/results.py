@@ -25,6 +25,7 @@ STRUCTURAL_COLUMNS = [
     "D",
 ]
 RETENTION_COLUMNS = ["retention_component", "original_task_position", "intervening_tasks"]
+DIAGNOSTIC_COLUMNS = ["diagnostic_family", "rehearsal_mode", "support_status"]
 SUMMARY_COLUMNS = [
     "step",
     "checkpoint_reference",
@@ -33,6 +34,7 @@ SUMMARY_COLUMNS = [
     "condition",
     "metric",
     *RETENTION_COLUMNS,
+    *DIAGNOSTIC_COLUMNS,
     "value",
     "ci_low",
     "ci_high",
@@ -46,6 +48,7 @@ CURVE_COLUMNS = [
     "condition",
     "curve_type",
     *RETENTION_COLUMNS,
+    *DIAGNOSTIC_COLUMNS,
     "x_name",
     "x_value",
     "mse",
