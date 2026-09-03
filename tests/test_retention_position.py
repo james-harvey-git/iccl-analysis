@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 
 from iccl.data.curriculum import SequenceConfig, check_connected
@@ -52,9 +54,7 @@ def block(sample: SequenceSample, task: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_paired_position_group_moves_identical_complete_task_blocks() -> None:
-    group = build_paired_position_group(
-        make_family(), make_cfg(), sequence_rng(4, 2), tasks=8, demos=3, group_id=7
-    )
+    group = build_paired_position_group(make_family(), make_cfg(), sequence_rng(4, 2), group_id=7)
     assert set(group) == {"repeat", "novel", "shared"}
     assert all(len(samples) == 8 for samples in group.values())
     repeats = group["repeat"]
@@ -95,9 +95,7 @@ def test_paired_position_group_moves_identical_complete_task_blocks() -> None:
 
 
 def test_paired_position_controls_are_aligned_and_support_valid() -> None:
-    group = build_paired_position_group(
-        make_family(), make_cfg(), sequence_rng(1, 9), tasks=8, demos=3, group_id=0
-    )
+    group = build_paired_position_group(make_family(), make_cfg(), sequence_rng(1, 9), group_id=0)
     for position in range(8):
         repeat, novel, shared = (group[name][position] for name in ("repeat", "novel", "shared"))
         history = repeat.info["latents"][:8]
@@ -115,7 +113,7 @@ def test_paired_position_controls_are_aligned_and_support_valid() -> None:
 
 def test_controlled_rehearsal_grid_has_exact_exposures_and_connectivity_labels() -> None:
     group = build_rehearsal_position_group(
-        make_family(), make_cfg(), sequence_rng(8, 3), tasks=8, demos=3, group_id=2
+        make_family(), make_cfg(), sequence_rng(8, 3), group_id=2
     )
     assert all(len(samples) == 6 for samples in group.values())
     seen_cells = set()
@@ -135,7 +133,7 @@ def test_controlled_rehearsal_grid_has_exact_exposures_and_connectivity_labels()
 
 def test_controlled_rehearsal_reuses_world_inputs_and_control_latents() -> None:
     group = build_rehearsal_position_group(
-        make_family(), make_cfg(), sequence_rng(2, 4), tasks=8, demos=3, group_id=5
+        make_family(), make_cfg(), sequence_rng(2, 4), group_id=5
     )
     repeats = group["repeat"]
     world = repeats[0].info["world"]
@@ -178,7 +176,7 @@ def test_rehearsed_constituent_is_balanced_across_worlds() -> None:
     selected = []
     for group_id in range(8):
         group = build_rehearsal_position_group(
-            family, cfg, sequence_rng(12, group_id), tasks=8, demos=2, group_id=group_id
+            family, cfg, sequence_rng(12, group_id), group_id=group_id
         )
         one = next(
             sample
@@ -191,9 +189,8 @@ def test_rehearsed_constituent_is_balanced_across_worlds() -> None:
 
 
 def test_controlled_rehearsal_supports_the_connectivity_floor() -> None:
-    group = build_rehearsal_position_group(
-        make_family(), make_cfg(), sequence_rng(5, 1), tasks=7, demos=2, group_id=0
-    )
+    cfg = replace(make_cfg(), surplus_tasks=0, demos_per_task=2)
+    group = build_rehearsal_position_group(make_family(), cfg, sequence_rng(5, 1), group_id=0)
     assert all(len(samples) == 6 for samples in group.values())
     assert {sample.info["original_task_position"] for sample in group["repeat"]} == {0, 3}
 
@@ -204,8 +201,6 @@ def test_binary_groups_omit_shared_control() -> None:
         make_family("binary"),
         make_cfg(),
         sequence_rng(3, 1),
-        tasks=8,
-        demos=2,
         group_id=0,
         control_modes=modes,
     )
@@ -213,8 +208,6 @@ def test_binary_groups_omit_shared_control() -> None:
         make_family("binary"),
         make_cfg(),
         sequence_rng(3, 2),
-        tasks=8,
-        demos=2,
         group_id=0,
         control_modes=modes,
     )

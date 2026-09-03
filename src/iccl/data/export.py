@@ -477,33 +477,25 @@ def export_retention_position_sets(cfg: DictConfig) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     _clear_archives(out_dir)
 
+    builders = (
+        ("paired_permutation", build_paired_position_group, 0),
+        ("controlled_rehearsal", build_rehearsal_position_group, 1),
+    )
     families = {
-        "paired_permutation": {condition: [] for condition in ("repeat", *controls)},
-        "controlled_rehearsal": {condition: [] for condition in ("repeat", *controls)},
+        name: {condition: [] for condition in ("repeat", *controls)} for name, _, _ in builders
     }
     base_seed = int(cfg.seed) + EVAL_SEED_OFFSET + RETENTION_POSITION_SEED_OFFSET
     for group_id in range(worlds):
-        paired = build_paired_position_group(
-            family,
-            sequence_cfg,
-            sequence_rng(base_seed, group_id),
-            tasks=tasks,
-            demos=demos,
-            group_id=group_id,
-            control_modes=controls,
-        )
-        rehearsal = build_rehearsal_position_group(
-            family,
-            sequence_cfg,
-            sequence_rng(base_seed + 1, group_id),
-            tasks=tasks,
-            demos=demos,
-            group_id=group_id,
-            control_modes=controls,
-        )
-        for condition in families["paired_permutation"]:
-            families["paired_permutation"][condition].extend(paired[condition])
-            families["controlled_rehearsal"][condition].extend(rehearsal[condition])
+        for name, builder, offset in builders:
+            generated = builder(
+                family,
+                sequence_cfg,
+                sequence_rng(base_seed + offset, group_id),
+                group_id=group_id,
+                control_modes=controls,
+            )
+            for condition, samples in generated.items():
+                families[name][condition].extend(samples)
 
     base_meta = {
         "config": OmegaConf.to_container(data_cfg, resolve=True),

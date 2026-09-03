@@ -25,6 +25,12 @@ def _support(latent: np.ndarray) -> tuple[int, ...]:
     return tuple(int(module) for module in np.flatnonzero(latent))
 
 
+def _dimensions(family: HyperTeacher, cfg: SequenceConfig) -> tuple[int, int]:
+    if not isinstance(cfg.surplus_tasks, int) or not isinstance(cfg.demos_per_task, int):
+        raise ValueError("position diagnostics require fixed surplus_tasks and demos_per_task")
+    return family.cfg.num_modules - 1 + cfg.surplus_tasks, cfg.demos_per_task
+
+
 def _task_inputs(sample: SequenceSample, tasks: int, input_dim: int) -> tuple[np.ndarray, ...]:
     return tuple(
         sample.tokens[start + 2 * np.arange(count), :input_dim].copy()
@@ -105,12 +111,11 @@ def build_paired_position_group(
     cfg: SequenceConfig,
     rng: np.random.Generator,
     *,
-    tasks: int,
-    demos: int,
     group_id: int,
     control_modes: tuple[str, ...] = ("novel", "shared"),
 ) -> dict[str, list[SequenceSample]]:
     """Move one frozen target block through all positions in one sampled history."""
+    tasks, demos = _dimensions(family, cfg)
     base = build_sequence(
         family,
         cfg,
@@ -288,12 +293,11 @@ def build_rehearsal_position_group(
     cfg: SequenceConfig,
     rng: np.random.Generator,
     *,
-    tasks: int,
-    demos: int,
     group_id: int,
     control_modes: tuple[str, ...] = ("novel", "shared"),
 ) -> dict[str, list[SequenceSample]]:
     """Build paired first/middle by none/one/both constituent rehearsals."""
+    tasks, demos = _dimensions(family, cfg)
     middle = (tasks - 1) // 2
     if family.cfg.num_modules < 4 or middle < 1 or tasks - 1 - middle < 2:
         raise ValueError("controlled rehearsal needs M>=4 and two post-middle task slots")
