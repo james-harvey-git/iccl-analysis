@@ -3,7 +3,7 @@
 Trains the sequence model on the on-the-fly ICCL stream with a masked MSE loss
 at every demonstration position. Single-device by design (the pilot model fits
 one GPU with room to spare; sweeps parallelize across GPUs via hydra multirun).
-Metric reporting belongs to ``iccl.training.logger``, which the standalone
+Metric reporting belongs to ``iccl.reporting.logger``, which the standalone
 evaluation entry point shares.
 """
 
@@ -21,17 +21,14 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from iccl.data.dataset import (
-    SequenceDataset,
     collate_sequences,
-    make_family,
-    sequence_config_from,
+    sequence_dataset_from_config,
 )
+from iccl.data.sequences import TOKEN_PAD
+from iccl.evaluation.metrics import EvaluationReport, evaluate_suites, load_eval_suites
 from iccl.models.model import model_from_config
-from iccl.training.logger import RunLogger
-from iccl.training.metrics import evaluate_suites, load_eval_suites
+from iccl.reporting.logger import RunLogger
 from iccl.utils import resolve_device
-
-BEST_METRIC = "in_dist/nmse_last_demo"
 
 
 def masked_mse(
@@ -132,10 +129,19 @@ def resolve_autocast_dtype(precision: str, device: torch.device) -> torch.dtype 
             raise ValueError(f"unknown precision: {precision}")
 
 
+def is_monitor_suite(metadata: dict[str, Any]) -> bool:
+    """Whether frozen-suite metadata belongs to the canonical live monitor."""
+    return metadata.get("capability") in {
+        "icl",
+        "composition",
+        "retention",
+    } and "canonical" in metadata.get("family_memberships", ())
+
+
 class Trainer:
     """Owns the model, optimizer, eval harness, and checkpoint state for one run.
 
-    ``out_dir`` receives ``checkpoints/``, ``snapshots/`` and ``eval/``
+    ``out_dir`` receives ``checkpoints/``, ``snapshots/`` and ``monitor/``
     subdirectories; pass the hydra run dir from scripts. ``cfg.training.resume``
     restores a checkpoint and continues the data stream at the exact sample
     offset (bit-exact given the same batch size and worker count). Snapshot
@@ -153,6 +159,7 @@ class Trainer:
         self.scheduler = build_scheduler(self.optimizer, cfg.training)
         self.step = 0
         self.best_metric = float("inf")
+        self.best_metric_name = str(cfg.data.eval_sets.get("best_metric", ""))
         self.last_loss = float("nan")
         self.snapshot_steps = resolve_snapshot_steps(cfg.training)
         self.logger = RunLogger(cfg, self.out_dir, job_type="train")
@@ -163,10 +170,8 @@ class Trainer:
 
     def _build_loader(self) -> DataLoader:
         train_cfg = self.cfg.training
-        family = make_family(self.cfg.data)
-        dataset = SequenceDataset(
-            family,
-            sequence_config_from(self.cfg.data),
+        dataset = sequence_dataset_from_config(
+            self.cfg.data,
             base_seed=self.cfg.seed,
             start_index=self.step * train_cfg.batch_size,
         )
@@ -183,8 +188,22 @@ class Trainer:
 
     def fit(self) -> None:
         train_cfg = self.cfg.training
-        eval_enabled = train_cfg.eval_every is not None
-        suites = load_eval_suites(Path(self.cfg.data.eval_sets.out_dir)) if eval_enabled else {}
+        validation_enabled = train_cfg.validation_every is not None
+        monitor_enabled = train_cfg.monitor_every is not None
+        eval_dir = Path(self.cfg.data.eval_sets.out_dir)
+        validation_suites = (
+            load_eval_suites(eval_dir, select=lambda meta: meta.get("capability") == "validation")
+            if validation_enabled
+            else {}
+        )
+        monitor_suites = (
+            load_eval_suites(
+                eval_dir,
+                select=is_monitor_suite,
+            )
+            if monitor_enabled
+            else {}
+        )
         self.logger.start()
         self._report_snapshot_plan()
         loader = self._build_loader()
@@ -192,7 +211,10 @@ class Trainer:
         grad_clip = train_cfg.grad_clip if train_cfg.grad_clip is not None else float("inf")
 
         self.model.train()
-        window_start, window_tokens = time.perf_counter(), 0
+        window_start = time.perf_counter()
+        window_padded_tokens = 0
+        window_real_tokens = 0
+        window_sequences = 0
         while self.step < train_cfg.num_steps:
             batch = {k: v.to(self.device, non_blocking=True) for k, v in next(batches).items()}
             ctx = (
@@ -210,32 +232,45 @@ class Trainer:
             self.scheduler.step()
             self.step += 1
             self.last_loss = loss.item()
-            window_tokens += batch["tokens"].shape[0] * batch["tokens"].shape[1]
+            batch_sequences = batch["tokens"].shape[0]
+            window_sequences += batch_sequences
+            window_padded_tokens += int(batch["token_type"].numel())
+            window_real_tokens += int((batch["token_type"] != TOKEN_PAD).sum().item())
 
             if self.step % train_cfg.log_every == 0:
                 elapsed = time.perf_counter() - window_start
                 self.logger.log(
                     {
-                        "train/loss": self.last_loss,
+                        "train/token_mse": self.last_loss,
                         "train/lr": float(self.scheduler.get_last_lr()[0]),
                         "train/grad_norm": float(grad_norm),
                         "train/sequences_per_s": train_cfg.log_every
                         * train_cfg.batch_size
                         / elapsed,
-                        "train/tokens_per_s": window_tokens / elapsed,
+                        "train/padding_fraction": 1.0 - window_real_tokens / window_padded_tokens,
+                        "train/mean_serialized_length": window_real_tokens / window_sequences,
                     },
                     self.step,
                 )
-                window_start, window_tokens = time.perf_counter(), 0
-            if eval_enabled and self.step % train_cfg.eval_every == 0:
-                self._evaluate(suites)
+                window_start = time.perf_counter()
+                window_padded_tokens = 0
+                window_real_tokens = 0
+                window_sequences = 0
+            if validation_enabled and self.step % train_cfg.validation_every == 0:
+                self._validate(validation_suites)
+            if monitor_enabled and self.step % train_cfg.monitor_every == 0:
+                self._monitor(monitor_suites)
             if self.step % train_cfg.checkpoint_every == 0:
                 self._save_checkpoint("last.pt")
             if self.step in self.snapshot_steps:
                 self._save_snapshot()
+            if self.step < train_cfg.num_steps:
+                self.logger.flush()
 
-        if eval_enabled and self.step % train_cfg.eval_every != 0:
-            self._evaluate(suites)
+        if validation_enabled and self.step % train_cfg.validation_every != 0:
+            self._validate(validation_suites)
+        if monitor_enabled and self.step % train_cfg.monitor_every != 0:
+            self._monitor(monitor_suites)
         self._save_checkpoint("last.pt")
         final_snapshot = self._snapshot_path(self.step)
         if not final_snapshot.exists():
@@ -245,16 +280,34 @@ class Trainer:
         self.logger.upload_weights(final_snapshot)
         self.logger.finish()
 
-    def _evaluate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+    def _evaluation_report(self, suites: dict[str, dict[str, np.ndarray]]) -> EvaluationReport:
         self.model.eval()
-        scalars, curves = evaluate_suites(
-            self.model, suites, self.device, autocast_dtype=self.autocast_dtype
+        report = evaluate_suites(
+            self.model,
+            suites,
+            self.device,
+            autocast_dtype=self.autocast_dtype,
+            bootstrap_seed=int(self.cfg.data.eval_sets.get("bootstrap_seed", 0)),
+            bootstrap_replicates=int(self.cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
         )
         self.model.train()
-        self.logger.log_eval(scalars, curves, self.step)
-        if BEST_METRIC in scalars and scalars[BEST_METRIC] < self.best_metric:
-            self.best_metric = scalars[BEST_METRIC]
+        return report
+
+    def _validate(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+        report = self._evaluation_report(suites)
+        if self.best_metric_name not in report.scalars:
+            raise KeyError(
+                f"best metric {self.best_metric_name!r} is absent from the frozen evaluation "
+                "sets; regenerate them with scripts/make_eval_sets.py"
+            )
+        metric = report.scalars[self.best_metric_name]
+        self.logger.log_validation(metric, self.step)
+        if metric < self.best_metric:
+            self.best_metric = metric
             self._save_checkpoint("best.pt")
+
+    def _monitor(self, suites: dict[str, dict[str, np.ndarray]]) -> None:
+        self.logger.log_monitor(self._evaluation_report(suites), self.step)
 
     def _report_snapshot_plan(self) -> None:
         """The resolved schedule and its disk cost, once at startup, so a
@@ -307,6 +360,7 @@ class Trainer:
             "step": self.step,
             "samples_consumed": self.step * self.cfg.training.batch_size,
             "best_metric": self.best_metric,
+            "best_metric_name": self.best_metric_name,
             "torch_rng": torch.get_rng_state(),
             "numpy_rng": np.random.get_state(),
             "config": OmegaConf.to_container(self.cfg, resolve=True),
@@ -324,7 +378,11 @@ class Trainer:
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
         self.step = ckpt["step"]
-        self.best_metric = ckpt["best_metric"]
+        self.best_metric = (
+            ckpt["best_metric"]
+            if ckpt.get("best_metric_name") == self.best_metric_name
+            else float("inf")
+        )
         torch.set_rng_state(ckpt["torch_rng"])
         np.random.set_state(ckpt["numpy_rng"])
         if self.device.type == "cuda" and "cuda_rng" in ckpt:

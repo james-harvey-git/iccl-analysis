@@ -1,31 +1,31 @@
 # Optimization defaults follow the source paper's hyperteacher config.
-batch_size: 128
-num_steps: 100000
+batch_size: 128      # sequences per optimizer step
+num_steps: 100000   # optimizer steps; terminal weights are always snapshotted
 
-optimizer: adamw
-lr: 3.0e-4
-warmup_steps: 1000
-schedule: constant # constant | cosine
-weight_decay: 0.003
-grad_clip: null
+optimizer: adamw    # adamw is the only supported optimizer
+lr: 3.0e-4          # peak learning rate after linear warmup
+warmup_steps: 1000  # linear warmup length in optimizer steps
+schedule: constant  # constant | cosine after warmup
+weight_decay: 0.003  # applied to matrix parameters only
+grad_clip: null     # null disables; otherwise maximum global gradient norm
 
-# auto -> bf16 autocast on CUDA, full fp32 elsewhere.
-precision: auto
-num_workers: 4
+precision: auto     # auto | bf16 | fp32; auto uses bf16 on CUDA and fp32 elsewhere
+num_workers: 4      # DataLoader worker processes; 0 generates in the training process
 
-log_every: 50
-eval_every: 1000 # null disables in-training evaluation
-checkpoint_every: 10000 # cadence of the rolling `last.pt`, which resumption reads
-resume: null # path to a checkpoint to restore and continue from
+log_every: 50       # optimizer-step cadence for training scalars
+validation_every: 1000  # training-distribution token MSE cadence; null disables
+monitor_every: 5000     # canonical capability-curve cadence; null disables
+checkpoint_every: 10000  # cadence of rolling last.pt, which resumption reads
+resume: null        # null | local full-state checkpoint used only to resume training
 
 # Step-tagged weights kept for interpretability and for re-scoring under metrics
 # defined after the run, unlike `last.pt`, which is overwritten. The saved steps
 # are the union of the three generators below plus `num_steps`, deduplicated.
 # Defaults give 2k, 5k, then every 10k: 12 snapshots, ~254 MB at pilot size.
 snapshots:
-  every: 10000 # linear cadence; null disables
-  at: [2000, 5000] # explicit extra steps
-  log: null # {count: N, start: S} -> N log-spaced steps in [S, num_steps]
+  every: 10000      # positive linear cadence; null disables
+  at: [2000, 5000]  # explicit extra positive steps; out-of-range values are ignored
+  log: null         # null | {count: N, start: S}; N log-spaced steps in [S, num_steps]
   # Weights alone serve interp and re-scoring; optimizer state (~3x the size) is
   # only needed to branch training from a mid-run step.
   include_optimizer_state: false

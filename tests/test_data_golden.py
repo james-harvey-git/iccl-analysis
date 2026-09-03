@@ -1,18 +1,14 @@
-"""Golden-stream regression tests for the on-the-fly data pipeline.
+"""Golden fingerprints for fixed-world and variable-world sequence streams."""
 
-Pins the exact random stream produced by the pilot configuration under a fixed
-seed: any code change that alters sampling order, distributions, or tokenization
-fails here loudly instead of silently changing the training distribution. If a
-change is *intended* to alter the stream, regenerate the fingerprints and treat
-the update as a breaking change to dataset reproducibility (previously frozen
-eval sets no longer correspond to the new stream).
-"""
+from pathlib import Path
 
 import numpy as np
 import pytest
+from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.dataset import sequence_rng
-from iccl.data.sequences import PhaseConfig, SequenceConfig, build_sequence
+from iccl.data.curriculum import PhaseConfig, SequenceConfig
+from iccl.data.dataset import sequence_dataset_from_config, sequence_rng
+from iccl.data.sequences import build_sequence
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
 PILOT_FAMILY = TeacherConfig(
@@ -71,3 +67,63 @@ def test_pilot_stream_is_unchanged(index: int) -> None:
     np.testing.assert_allclose(seq.tokens.std(), golden["tokens_std"], atol=1e-6)
     np.testing.assert_allclose(np.abs(seq.targets).sum(), golden["targets_abs_sum"], rtol=1e-5)
     np.testing.assert_allclose(seq.info["latents"].sum(), golden["latents_sum"], atol=1e-5)
+
+
+def test_fixed_config_selects_the_pinned_training_distribution() -> None:
+    config_path = Path(__file__).parents[1] / "configs/data/hyperteacher_fixed.yaml"
+    config = OmegaConf.load(config_path)
+    assert isinstance(config, DictConfig)
+    dataset = sequence_dataset_from_config(config, base_seed=0)
+    configured = dataset.build(0)
+    direct = build_sequence(
+        HyperTeacher(PILOT_FAMILY, max_hotness=2), PILOT_SEQUENCE, sequence_rng(0, 0)
+    )
+    np.testing.assert_array_equal(configured.tokens, direct.tokens)
+    np.testing.assert_array_equal(configured.info["latents"], direct.info["latents"])
+
+
+@pytest.mark.parametrize(
+    "index,modules,surplus,demos,tokens_mean,targets_sum,latents_sum",
+    [
+        (0, 7, 0, [2, 3, 2, 4, 3, 4], 0.096305415, 63.689713, 8.6000004),
+        (1, 5, 2, [2, 2, 3, 2, 4, 2], -0.080361843, 39.106003, 9.3000002),
+        (2, 4, 2, [4, 4, 4, 2, 2], 0.19349524, 63.953129, 7.5999999),
+    ],
+)
+def test_variable_world_stream_is_pinned(
+    index: int,
+    modules: int,
+    surplus: int,
+    demos: list[int],
+    tokens_mean: float,
+    targets_sum: float,
+    latents_sum: float,
+) -> None:
+    cfg = OmegaConf.create(
+        {
+            "input_dim": 4,
+            "output_dim": 4,
+            "hidden_dims": [4],
+            "use_bias": True,
+            "num_modules": {"min": 4, "max": 7, "held_out": [6]},
+            "scale": 3.0,
+            "weighting": "discrete",
+            "sequence": {
+                "curriculum_sampler": "constructive",
+                "hotness": 2,
+                "surplus_tasks": [0, 2],
+                "demos_per_task": {"min": 2, "max": 4, "scope": "per_task"},
+                "signal_boundaries": True,
+                "require_identifiable": True,
+                "require_full_rank": False,
+            },
+        }
+    )
+    dataset = sequence_dataset_from_config(cfg, base_seed=19)
+    sample = dataset.build(index)
+    assert sample.info["num_modules"] == modules
+    assert sample.info["num_surplus_tasks"] == surplus
+    assert sample.info["demo_counts"].tolist() == demos
+    np.testing.assert_allclose(sample.tokens.mean(), tokens_mean, atol=1e-7)
+    np.testing.assert_allclose(np.abs(sample.targets).sum(), targets_sum, rtol=1e-6)
+    np.testing.assert_allclose(sample.info["latents"].sum(), latents_sum, atol=1e-6)

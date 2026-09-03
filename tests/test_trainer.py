@@ -14,6 +14,7 @@ from iccl.training.trainer import (
     Trainer,
     build_optimizer,
     build_scheduler,
+    is_monitor_suite,
     masked_mse,
     resolve_snapshot_steps,
     split_decay_params,
@@ -33,7 +34,8 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
         "precision": "fp32",
         "num_workers": 0,
         "log_every": 100,
-        "eval_every": None,
+        "validation_every": None,
+        "monitor_every": None,
         "checkpoint_every": 100,
         "resume": None,
         "snapshots": {
@@ -63,7 +65,10 @@ def make_cfg(tmp_path: Path, **training_overrides: Any) -> DictConfig:
                     "signal_boundaries": True,
                     "require_identifiable": True,
                 },
-                "eval_sets": {"out_dir": str(tmp_path / "eval_sets")},
+                "eval_sets": {
+                    "out_dir": str(tmp_path / "eval_sets"),
+                    "best_metric": "validation/token_mse",
+                },
             },
             "model": {
                 "d_model": 32,
@@ -135,6 +140,16 @@ def test_masked_mse_ignores_unmasked_positions() -> None:
     assert masked_mse(preds, targets, mask).item() == pytest.approx(1.0)
     preds[0, 1] = 100.0  # unmasked position must not contribute
     assert masked_mse(preds, targets, mask).item() == pytest.approx(1.0)
+
+
+def test_canonical_monitor_selector_uses_family_membership(tmp_path: Path) -> None:
+    metadata = {
+        "capability": "icl",
+        "family_memberships": ["canonical", "task_variation"],
+    }
+    assert is_monitor_suite(metadata)
+    assert not is_monitor_suite(metadata | {"family_memberships": ["task_variation"]})
+    assert not is_monitor_suite(metadata | {"capability": "validation"})
 
 
 def snapshot_steps(num_steps: int, **snapshots: Any) -> list[int]:
@@ -226,6 +241,22 @@ def test_trainer_smoke_and_checkpoint(tmp_path: Path) -> None:
     assert (tmp_path / "run" / "checkpoints" / "last.pt").exists()
 
 
+def test_variable_world_mixed_length_training_smoke(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, num_steps=2, batch_size=4)
+    cfg.data.num_modules = {"min": 4, "max": 7, "held_out": [6]}
+    del cfg.data.sequence.phases
+    cfg.data.sequence.curriculum_sampler = "constructive"
+    cfg.data.sequence.hotness = 2
+    cfg.data.sequence.surplus_tasks = [0, 2]
+    cfg.data.sequence.demos_per_task = {"min": 2, "max": 5, "scope": "per_task"}
+
+    torch.manual_seed(0)
+    trainer = Trainer(cfg, out_dir=tmp_path / "variable")
+    trainer.fit()
+    assert math.isfinite(trainer.last_loss)
+    assert trainer.step == 2
+
+
 def test_checkpoint_resume_is_bit_exact(tmp_path: Path) -> None:
     torch.manual_seed(0)
     full = Trainer(make_cfg(tmp_path, num_steps=6, checkpoint_every=3), tmp_path / "full")
@@ -251,24 +282,31 @@ def test_checkpoint_resume_is_bit_exact(tmp_path: Path) -> None:
         assert torch.equal(full_state[key], resumed_state[key]), key
 
 
-def test_eval_requires_frozen_suites(tmp_path: Path) -> None:
-    cfg = make_cfg(tmp_path, eval_every=2)
+def test_validation_requires_frozen_suites(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, validation_every=2)
     trainer = Trainer(cfg, out_dir=tmp_path / "run")
     with pytest.raises(FileNotFoundError, match="make_eval_sets"):
         trainer.fit()
 
 
-def test_trainer_runs_eval_and_tracks_best(tmp_path: Path) -> None:
-    cfg = make_cfg(tmp_path, num_steps=2, eval_every=2)
+def test_trainer_runs_validation_and_tracks_best(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, num_steps=2, validation_every=2)
     family = make_family(cfg.data)
     seq_cfg = sequence_config_from(cfg.data)
     samples = [build_sequence(family, seq_cfg, sequence_rng(1, i)) for i in range(2)]
     out_dir = Path(cfg.data.eval_sets.out_dir)
-    export_suite(samples, out_dir / "in_dist", {"suite": "in_dist"})
+    export_suite(
+        samples,
+        out_dir / "validation",
+        {
+            "suite": "validation",
+            "capability": "validation",
+            "condition": "training_distribution",
+        },
+    )
 
     torch.manual_seed(0)
     trainer = Trainer(cfg, out_dir=tmp_path / "run")
     trainer.fit()
     assert math.isfinite(trainer.best_metric)
     assert (tmp_path / "run" / "checkpoints" / "best.pt").exists()
-    assert (tmp_path / "run" / "eval" / "step_0000002.npz").exists()

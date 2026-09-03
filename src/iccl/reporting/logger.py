@@ -1,9 +1,7 @@
 """The W&B run for one training or evaluation job, mirrored to stdout.
 
-Two entry points report the same evaluation: the trainer periodically during a
-run, and ``scripts/eval.py`` once against a saved checkpoint. Metric namespacing
-(``eval-scalars/``, ``eval-curves/``), the accumulating Plotly curve panels, and
-the run's setup live here so the two cannot drift apart.
+Training reports a small validation and canonical-capability monitor. Full
+frozen-suite evaluations write portable numerical artifacts for later plotting.
 
 A checkpoint records the identity of the run that wrote it, so an evaluation of
 that checkpoint can name its source run and link back to it. Weights can also be
@@ -11,17 +9,18 @@ uploaded as W&B artifacts, which survive the run directory and let W&B record
 which weights produced which numbers.
 """
 
-import math
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
-if TYPE_CHECKING:
-    import plotly.graph_objects as go
+from iccl.checkpoints import SourceRun
+from iccl.evaluation.metrics import EvaluationReport
+from iccl.evaluation.results import SUMMARY_COLUMNS
+from iccl.reporting.monitor import canonical_monitor_figures, canonical_monitor_scalars
 
 # W&B artifact names admit only these characters.
 _ARTIFACT_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
@@ -32,6 +31,11 @@ def weights_artifact_name(label: str) -> str:
     owns its own version chain and the lineage graph ties versions to the run
     that produced them."""
     return f"weights-{_ARTIFACT_UNSAFE.sub('-', label)}"
+
+
+def evaluation_artifact_name(label: str) -> str:
+    """Artifact name for one evaluation run's complete numerical results."""
+    return f"evaluation-{_ARTIFACT_UNSAFE.sub('-', label)}"
 
 
 def repo_relative(path: Path | str) -> str:
@@ -50,75 +54,9 @@ def repo_relative(path: Path | str) -> str:
     return str(resolved)
 
 
-@dataclass(frozen=True)
-class SourceRun:
-    """The W&B run that produced an evaluated checkpoint."""
-
-    entity: str | None
-    project: str | None
-    run_id: str
-    name: str | None
-    step: int
-
-    @property
-    def label(self) -> str:
-        """Display name, falling back to the id: an offline run is not named
-        until it syncs, and cluster jobs train offline."""
-        return self.name or self.run_id
-
-    @property
-    def url(self) -> str | None:
-        """Canonical run URL. Built from the ids rather than taken from the live
-        run, whose own ``url`` is unset offline; the id survives ``wandb sync``,
-        so the link resolves once the run is uploaded. Assumes wandb.ai."""
-        if self.entity is None or self.project is None:
-            return None
-        return f"https://wandb.ai/{self.entity}/{self.project}/runs/{self.run_id}"
-
-
-def source_from_checkpoint(checkpoint: dict[str, Any]) -> SourceRun | None:
-    """The run a checkpoint came from, or None when it carries no reference —
-    it was trained with W&B disabled, or written before the reference existed.
-    An evaluation of such a checkpoint simply stands alone."""
-    reference = checkpoint.get("wandb_run")
-    if reference is None:
-        return None
-    return SourceRun(step=int(checkpoint["step"]), **reference)
-
-
-def _nan_to_none(curve: np.ndarray) -> list[float | None]:
-    """NaN-padded curve tail to a plottable list (NaN renders as a gap)."""
-    return [None if math.isnan(v) else float(v) for v in curve]
-
-
-def _curve_figure(history: list[tuple[int, np.ndarray]], title: str, xname: str) -> "go.Figure":
-    """A line-per-eval-step figure, each line colored by training progress so
-    later steps read as the curve moving over the earlier ones."""
-    import plotly.colors as pc
-    import plotly.graph_objects as go
-
-    figure = go.Figure()
-    for i, (step, curve) in enumerate(history):
-        fraction = i / (len(history) - 1) if len(history) > 1 else 1.0
-        color = pc.sample_colorscale("Viridis", fraction)[0]
-        figure.add_trace(
-            go.Scatter(
-                x=list(range(len(curve))),
-                y=_nan_to_none(curve),
-                mode="lines+markers",
-                name=f"step {step}",
-                line={"color": color},
-            )
-        )
-    figure.update_layout(
-        title=title, xaxis_title=xname, yaxis_title="normalized MSE", template="plotly_white"
-    )
-    return figure
-
-
 class RunLogger:
     """Metric sink for one job: a W&B run when ``cfg.wandb.mode`` allows one,
-    always stdout, and always the curve ``.npz`` files in ``out_dir/eval/``.
+    always stdout, and canonical curve ``.npz`` files in ``out_dir/monitor/``.
 
     ``start`` opens the W&B run. It is separate from construction so a caller
     can build its model and fail before a run is created. ``source`` names the
@@ -139,9 +77,8 @@ class RunLogger:
         self.job_type = job_type
         self.source = source
         self.run = None
-        # Per-curve list of (step, curve) across calls, so each curve is logged
-        # to W&B as one Plotly panel with a line per evaluation.
-        self.curve_history: dict[str, list[tuple[int, np.ndarray]]] = {}
+        self._pending_step: int | None = None
+        self._pending_payload: dict[str, Any] = {}
 
     def start(self) -> None:
         if self.cfg.wandb.mode == "disabled":
@@ -167,7 +104,11 @@ class RunLogger:
                 if self.source.url
                 else f"`{self.source.label}`"
             )
-            notes = f"Checkpoint from {link} at step {self.source.step}."
+            notes = (
+                f"Checkpoint trajectory from {link}."
+                if self.job_type == "eval-trajectory"
+                else f"Checkpoint from {link} at step {self.source.step}."
+            )
         self.run = wandb.init(
             project=self.cfg.wandb.project,
             entity=self.cfg.wandb.entity,
@@ -196,15 +137,80 @@ class RunLogger:
         }
 
     def log(self, metrics: dict[str, float], step: int) -> None:
-        if self.run is not None:
-            self.run.log(metrics, step=step)
+        self._queue(metrics, step)
+        self._print(metrics, step)
+
+    def _queue(self, payload: dict[str, Any], step: int) -> None:
+        """Merge all values produced at one optimizer step into one W&B record."""
+        if self.run is None:
+            return
+        if self._pending_step is not None and self._pending_step != step:
+            self.flush()
+        self._pending_step = step
+        self._pending_payload.update(payload)
+
+    def flush(self) -> None:
+        """Commit the pending W&B record, if any."""
+        if self.run is not None and self._pending_step is not None:
+            self.run.log(self._pending_payload, step=self._pending_step)
+        self._pending_step = None
+        self._pending_payload = {}
+
+    @staticmethod
+    def _print(metrics: dict[str, float], step: int) -> None:
         rendered = ", ".join(f"{key}={value:.4g}" for key, value in metrics.items())
         print(f"step {step}: {rendered}")
 
-    def log_eval(self, scalars: dict[str, float], curves: dict[str, np.ndarray], step: int) -> Path:
-        """Report one evaluation, returning the path the curves were written to."""
-        self.log({f"eval-scalars/{key}": value for key, value in scalars.items()}, step)
-        return self._log_curves(curves, step)
+    def log_validation(self, token_mse: float, step: int) -> None:
+        """Report the training-distribution objective used for model selection."""
+        self.log({"validation/token_mse": token_mse}, step)
+
+    def log_monitor(self, report: EvaluationReport, step: int) -> Path:
+        """Report one version of the compact canonical capability monitor."""
+        metrics = canonical_monitor_scalars(report.summary_rows)
+        path = self._log_curves(report.curves, step, directory="monitor")
+        if self.run is not None:
+            import wandb
+
+            payload: dict[str, Any] = dict(metrics)
+            payload.update(
+                {
+                    key: wandb.Plotly(figure)
+                    for key, figure in canonical_monitor_figures(report.curve_rows, step).items()
+                }
+            )
+            self._queue(payload, step)
+        self._print(metrics, step)
+        return path
+
+    def log_full_evaluation(
+        self,
+        report: EvaluationReport,
+        step: int,
+        figures: dict[str, Any],
+        checkpoint_reference: str,
+    ) -> None:
+        """Log one summary table and the compact explicit evaluation figures."""
+        rows = [
+            dict(row, step=step, checkpoint_reference=checkpoint_reference)
+            for row in report.summary_rows
+        ]
+        metrics = (
+            {"evaluation/validation_token_mse": report.scalars["validation/token_mse"]}
+            if "validation/token_mse" in report.scalars
+            else {}
+        )
+        if self.run is not None:
+            import wandb
+
+            payload: dict[str, Any] = dict(metrics)
+            payload["evaluation/summary"] = wandb.Table(
+                columns=cast(Any, SUMMARY_COLUMNS),
+                data=[[row.get(column) for column in SUMMARY_COLUMNS] for row in rows],
+            )
+            payload.update({key: wandb.Plotly(figure) for key, figure in figures.items()})
+            self._queue(payload, step)
+        self._print(metrics | {"evaluation/primary_rows": float(len(rows))}, step)
 
     def upload_weights(self, path: Path) -> None:
         """The final snapshot as a versioned W&B artifact, so weights outlive the
@@ -223,6 +229,20 @@ class RunLogger:
         size_mb = path.stat().st_size / 1e6
         print(f"uploading {path.name} ({size_mb:.0f} MB) as {artifact.name}:final")
 
+    def upload_evaluation_results(self, path: Path) -> None:
+        """Upload complete evaluation rows and per-demo errors when configured."""
+        enabled = bool(self.cfg.get("evaluation", {}).get("upload_results", True))
+        if self.run is None or not enabled:
+            return
+        import wandb
+
+        artifact = wandb.Artifact(
+            evaluation_artifact_name(self.run.name or self.run.id), type="evaluation"
+        )
+        artifact.add_dir(str(path))
+        self.run.log_artifact(artifact, aliases=["latest"])
+        print(f"uploading evaluation results as {artifact.name}:latest")
+
     def use_artifact(self, reference: str) -> None:
         """Records this run as a consumer of an artifact, drawing the lineage
         edge from weights to the numbers computed from them."""
@@ -231,26 +251,13 @@ class RunLogger:
 
     def finish(self) -> None:
         if self.run is not None:
+            self.flush()
             self.run.finish()
 
-    def _log_curves(self, curves: dict[str, np.ndarray], step: int) -> Path:
-        """Curves to the run dir as one ``.npz`` per step, and with a live run to
-        an ``eval-curves/<suite>/<name>`` Plotly panel per curve, accumulating a
-        line per evaluation so curves can be watched sharpening over training.
-        Plotly panels carry no backing summary table, unlike
-        ``wandb.plot.line_series``."""
-        eval_dir = self.out_dir / "eval"
+    def _log_curves(self, curves: dict[str, np.ndarray], step: int, *, directory: str) -> Path:
+        """Write one local curve archive per monitor step."""
+        eval_dir = self.out_dir / directory
         eval_dir.mkdir(parents=True, exist_ok=True)
         path = eval_dir / f"step_{step:07d}.npz"
         np.savez(path, **{key.replace("/", "."): curve for key, curve in curves.items()})  # pyright: ignore[reportArgumentType]
-        if self.run is None:
-            return path
-        import wandb
-
-        for key, curve in curves.items():
-            history = self.curve_history.setdefault(key, [])
-            history.append((step, curve))
-            xname = "task position" if key.endswith("task_position_curve") else "demo index"
-            figure = _curve_figure(history, key, xname)
-            self.run.log({f"eval-curves/{key}": wandb.Plotly(figure)}, step=step)
         return path

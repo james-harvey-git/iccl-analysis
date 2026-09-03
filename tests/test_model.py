@@ -4,13 +4,12 @@ import pytest
 import torch
 from omegaconf import OmegaConf
 
+from iccl.data.curriculum import PhaseConfig, SequenceConfig
 from iccl.data.dataset import collate_sequences, sequence_rng, to_tensors
 from iccl.data.sequences import (
     TOKEN_BOUNDARY,
     TOKEN_PAD,
     TOKEN_X,
-    PhaseConfig,
-    SequenceConfig,
     build_sequence,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig

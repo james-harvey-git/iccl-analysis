@@ -1,5 +1,4 @@
-# Variable-world HyperTeacher curriculum. `data=hyperteacher_fixed` selects the
-# fixed M=8, T=8, D=32 training distribution.
+# Fixed M=8, T=8, D=32 training distribution.
 name: hyperteacher
 
 # Dimensions of each per-sequence HyperTeacher world.
@@ -7,30 +6,22 @@ input_dim: 16
 output_dim: 16
 hidden_dims: [16]          # hidden widths of the primitive MLP; one value per layer
 use_bias: true             # include independently sampled primitive biases
-# Sample M uniformly from the inclusive range after excluding held_out values.
-num_modules:
-  min: 4
-  max: 12
-  held_out: [6, 10]        # unique integers strictly between min and max
+num_modules: 8             # M; positive integer >=2
 scale: 1.7320508075688772  # primitive weight variance scale; sqrt(3)
 weighting: discrete        # binary | discrete | continuous task weights
 
 sequence:
-  # Relative form: T=M-1+S. constructive builds a spanning-tree backbone;
-  # rejection samples all T tasks i.i.d. and conditions on the constraints.
-  curriculum_sampler: constructive  # constructive | rejection
-  hotness: 2                # active modules per task; relative form requires 2
-  surplus_tasks: [0, 3]     # non-negative int or inclusive [min, max]
-  # D may also be a positive int or inclusive [min, max]. This mapping makes
-  # the sampling scope explicit; min == max is a fixed value and consumes no RNG.
-  demos_per_task:
-    min: 24
-    max: 40
-    scope: per_task         # per_sequence | per_task
+  curriculum_sampler: rejection  # fixed-phase random curricula use rejection sampling
+  # Fixed-phase form: num_tasks is per phase; hotness is inclusive [min, max].
+  phases:
+    - {num_tasks: 8, hotness: [2, 2]}
+  demos_per_task: 32        # positive int, [min, max], or {min, max, scope}
   signal_boundaries: true   # insert a zero-loss boundary token before every task
   require_identifiable: true  # require full module coverage and connected support
   require_full_rank: false  # require task latents to span every used module
   max_attempts: 1000        # resampling limit for constrained curricula
+  task_graph: random        # random | chain | ring | star; structured modes require 2-hot tasks
+  graph_ordered: false      # preserve structured edge order; ignored for task_graph=random
 
 eval_sets:
   num_sequences: 256       # per physical cell/condition and training validation

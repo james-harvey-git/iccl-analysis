@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from omegaconf import OmegaConf
 
-from iccl.analysis.checkpoints import resolve_checkpoint_path
+from iccl.checkpoints import evaluation_checkpoint_references, resolve_checkpoint_path
 
 
 class FakeArtifact:
@@ -77,3 +78,18 @@ def test_wandb_reference_requires_exactly_one_checkpoint(
 
     with pytest.raises(ValueError, match=rf"holds {len(names)} checkpoints"):
         resolve_checkpoint_path("wandb://entity/project/weights:v3")
+
+
+def test_evaluation_requires_its_own_checkpoint_list() -> None:
+    cfg = OmegaConf.create(
+        {"evaluation": {"checkpoints": []}, "training": {"resume": "training-state.pt"}}
+    )
+
+    with pytest.raises(ValueError, match="evaluation.checkpoints"):
+        evaluation_checkpoint_references(cfg)
+
+
+def test_evaluation_preserves_the_configured_trajectory_order() -> None:
+    cfg = OmegaConf.create({"evaluation": {"checkpoints": ["step_2.pt", "step_10.pt"]}})
+
+    assert evaluation_checkpoint_references(cfg) == ["step_2.pt", "step_10.pt"]

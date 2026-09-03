@@ -1,23 +1,32 @@
 from dataclasses import replace
+from itertools import product
 from typing import Any
 
 import numpy as np
 import pytest
 
+from iccl.data.controls import (
+    build_paired_composition_controls,
+    build_paired_retention_control,
+)
+from iccl.data.curriculum import (
+    TASK_ORIGIN_CODES,
+    DemoCountConfig,
+    PhaseConfig,
+    SequenceConfig,
+    assert_feasible,
+    check_compositional,
+    check_connected,
+    decode_prufer,
+    task_categories,
+)
 from iccl.data.dataset import sequence_rng
 from iccl.data.sequences import (
     TOKEN_BOUNDARY,
     TOKEN_X,
     TOKEN_Y,
     FinalTaskConfig,
-    PhaseConfig,
-    SequenceConfig,
-    assert_feasible,
-    build_paired_control,
-    build_paired_retention_control,
     build_sequence,
-    check_compositional,
-    check_connected,
 )
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
@@ -106,7 +115,7 @@ def test_unsignalled_sequences_have_no_boundary_tokens() -> None:
     assert (seq.info["demo_counts"] >= 3).all() and (seq.info["demo_counts"] <= 6).all()
 
 
-def test_composite_final_task_and_paired_control() -> None:
+def test_composite_final_task_is_not_in_the_history() -> None:
     family = make_family()
     cfg = make_seq_cfg()
     final = FinalTaskConfig(mode="composite", hotness=2, num_demos=2)
@@ -120,25 +129,28 @@ def test_composite_final_task_and_paired_control() -> None:
     assert final_support not in demonstrated
     assert seq.info["demo_counts"][-1] == 2
 
-    control = build_paired_control(family, cfg, seq, final, rng)
-    np.testing.assert_array_equal(control.info["latents"][0], latents[-1])
-    assert control.info["num_curriculum_tasks"] == 0
-    assert control.tokens.shape[0] == 2 * 2 + 1
-    # Same world: the same x must map to the same y under both sequences' teachers.
-    x_query = np.flatnonzero(control.token_type == TOKEN_X)[0]
-    from iccl.data.teacher import teacher_forward
 
-    y_a = teacher_forward(seq.info["world"], latents[-1], control.tokens[x_query : x_query + 1])
-    np.testing.assert_allclose(control.targets[x_query], y_a[0], rtol=1e-5)
-
-
-def test_revisit_appends_first_task() -> None:
+def test_revisit_appends_the_selected_history_task() -> None:
     family = make_family()
     cfg = make_seq_cfg()
-    seq = build_sequence(family, cfg, sequence_rng(0, 0), revisit_demos=3)
+    seq = build_sequence(family, cfg, sequence_rng(0, 0), revisit_demos=3, revisit_task_index=5)
     latents = seq.info["latents"]
-    np.testing.assert_array_equal(latents[-1], latents[0])
+    np.testing.assert_array_equal(latents[-1], latents[5])
     assert seq.info["demo_counts"][-1] == 3
+    assert seq.info["original_task_position"] == 5
+    assert seq.info["intervening_tasks"] == 2
+    assert seq.info["prediction_token_delay"] == sum(seq.info["demo_counts"][6:-1])
+
+
+def test_revisit_rejects_an_out_of_range_history_position() -> None:
+    with pytest.raises(ValueError, match="revisit_task_index"):
+        build_sequence(
+            make_family(),
+            make_seq_cfg(),
+            sequence_rng(0, 0),
+            revisit_demos=3,
+            revisit_task_index=8,
+        )
 
 
 def test_paired_retention_control_shares_everything_but_the_final_task() -> None:
@@ -189,7 +201,39 @@ def test_retention_control_modes_pick_their_supports() -> None:
 
     shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
     np.testing.assert_array_equal(np.flatnonzero(shared), np.flatnonzero(revisited))
-    assert not np.array_equal(shared, revisited)
+    assert not any(np.array_equal(shared, latent) for latent in seq.info["latents"][:-1])
+
+
+def test_shared_retention_control_rejects_other_historical_latents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    family = make_family()
+    cfg = make_seq_cfg()
+    rng = sequence_rng(0, 0)
+    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
+    history = seq.info["latents"][:-1]
+    revisited = seq.info["latents"][-1]
+    active = np.flatnonzero(revisited)
+
+    def candidate(weights: tuple[float, ...]) -> np.ndarray:
+        latent = np.zeros_like(revisited)
+        latent[active] = weights
+        return latent
+
+    values = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    candidates = [candidate(weights) for weights in product(values, repeat=len(active))]
+    historical = next(latent for latent in candidates if not np.array_equal(latent, revisited))
+    history[1] = historical
+    unseen = next(
+        latent
+        for latent in candidates
+        if not any(np.array_equal(latent, previous) for previous in history)
+    )
+    candidates = iter([historical, unseen])
+    monkeypatch.setattr(family, "apply_weighting", lambda rng, pattern: next(candidates))
+
+    shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
+    np.testing.assert_array_equal(shared, unseen)
 
 
 def test_shared_retention_control_is_degenerate_under_binary_weighting() -> None:
@@ -272,3 +316,149 @@ def test_structured_graph_validation() -> None:
     too_few = make_seq_cfg(phases=(PhaseConfig(num_tasks=5, hotness=(2, 2)),), task_graph="star")
     with pytest.raises(ValueError, match="needs >= 7 tasks"):
         build_sequence(family, too_few, sequence_rng(0, 0))
+
+
+def test_prufer_decoder_enumerates_every_labelled_tree_once() -> None:
+    trees = {
+        tuple(sorted(tuple(sorted(edge)) for edge in decode_prufer(np.array(code), 4)))
+        for code in product(range(4), repeat=2)
+    }
+    assert len(trees) == 4 ** (4 - 2)
+
+
+def test_task_categories_are_exhaustive_and_order_relative() -> None:
+    latents = np.array(
+        [
+            [0.5, 0.6, 0.0, 0.0],
+            [0.0, 0.0, 0.7, 0.8],
+            [0.9, 0.6, 0.0, 0.0],
+            [0.5, 0.6, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    np.testing.assert_array_equal(task_categories(latents), [0, 0, 1, 2])
+    order = np.array([3, 1, 2, 0])
+    generation_relative = task_categories(latents)[order]
+    presentation_relative = task_categories(latents[order])
+    assert not np.array_equal(generation_relative, presentation_relative)
+
+
+@pytest.mark.parametrize("sampler", ["constructive", "rejection"])
+def test_variable_world_curricula_obey_connected_floor_and_provenance(sampler: str) -> None:
+    family = make_family(num_modules=6)
+    cfg = make_seq_cfg(
+        phases=(),
+        curriculum_sampler=sampler,
+        hotness=2,
+        surplus_tasks=2,
+    )
+    seq = build_sequence(family, cfg, sequence_rng(11, 4))
+    latents = seq.info["latents"]
+
+    assert latents.shape == (7, 6)
+    assert seq.info["num_modules"] == 6
+    assert seq.info["num_surplus_tasks"] == 2
+    assert seq.info["num_curriculum_tasks"] == 7
+    assert seq.info["generation_attempts"] >= 1
+    assert check_compositional(latents > 0, 6)
+    assert check_connected(latents > 0)
+    np.testing.assert_array_equal(np.sort(seq.info["pre_shuffle_index"]), np.arange(7))
+    if sampler == "constructive":
+        origins = seq.info["task_origin"]
+        assert (origins == TASK_ORIGIN_CODES["backbone"]).sum() == 5
+        assert (origins == TASK_ORIGIN_CODES["surplus"]).sum() == 2
+
+
+def test_constructive_sampler_shuffles_backbone_and_surplus_together() -> None:
+    family = make_family(num_modules=5)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=3)
+    surplus_positions = []
+    for i in range(20):
+        seq = build_sequence(family, cfg, sequence_rng(2, i))
+        surplus_positions.extend(
+            np.flatnonzero(seq.info["task_origin"] == TASK_ORIGIN_CODES["surplus"]).tolist()
+        )
+    assert min(surplus_positions) < 4
+    assert max(surplus_positions) >= 4
+
+
+def test_demo_count_modes_and_prefix_metadata() -> None:
+    family = make_family(num_modules=5)
+    base = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+
+    per_sequence = build_sequence(
+        family,
+        replace(base, demos_per_task=DemoCountConfig(2, 5, "per_sequence")),
+        sequence_rng(3, 0),
+    )
+    assert len(set(per_sequence.info["demo_counts"].tolist())) == 1
+
+    per_task = build_sequence(
+        family,
+        replace(base, demos_per_task=DemoCountConfig(2, 5, "per_task")),
+        sequence_rng(3, 0),
+    )
+    assert (per_task.info["demo_counts"] >= 2).all()
+    assert (per_task.info["demo_counts"] <= 5).all()
+    assert len(set(per_task.info["demo_counts"].tolist())) > 1
+
+    counts = per_task.info["demo_counts"]
+    expected_b = np.concatenate([[0], np.cumsum(counts[:-1])])
+    expected_l = np.concatenate([[0], np.cumsum(2 * counts[:-1] + 1)])
+    np.testing.assert_array_equal(per_task.info["history_prediction_tokens"], expected_b)
+    np.testing.assert_array_equal(per_task.info["history_serialized_tokens"], expected_l)
+    assert per_task.info["num_prediction_tokens"] == counts.sum()
+    assert per_task.info["serialized_length"] == 2 * counts.sum() + len(counts)
+
+
+def test_variable_world_validation_reports_conflicting_and_impossible_specs() -> None:
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        assert_feasible(make_seq_cfg(surplus_tasks=1), num_modules=8)
+    with pytest.raises(ValueError, match="exactly 2-hot"):
+        assert_feasible(make_seq_cfg(phases=(), surplus_tasks=1, hotness=3), num_modules=8)
+    with pytest.raises(ValueError, match="surplus_tasks must be >=1"):
+        assert_feasible(
+            make_seq_cfg(phases=(), surplus_tasks=0, require_full_rank=True),
+            num_modules=8,
+        )
+
+
+def test_paired_composition_controls_match_prefix_shape_and_final_block() -> None:
+    family = make_family(num_modules=6)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+    demos = (3,) * 6
+    constituent, matched, no_history = build_paired_composition_controls(
+        family,
+        cfg,
+        sequence_rng(17, 2),
+        target_demos=4,
+        constituent_task_exposures=1,
+        fixed_demo_counts=demos,
+    )
+
+    np.testing.assert_array_equal(constituent.info["constituent_task_exposures"], [1, 1])
+    np.testing.assert_array_equal(constituent.info["constituent_demo_exposures"], [3, 3])
+    np.testing.assert_array_equal(matched.info["constituent_task_exposures"], [0, 0])
+    assert constituent.info["prior_target_support_count"] == 0
+    assert matched.info["prior_target_support_count"] == 0
+    for key in ("demo_counts", "boundaries", "task_spans", "history_prediction_tokens"):
+        np.testing.assert_array_equal(constituent.info[key], matched.info[key])
+
+    curriculum = constituent.info["num_curriculum_tasks"]
+    for task in range(curriculum):
+        start, _ = constituent.info["task_spans"][task]
+        count = constituent.info["demo_counts"][task]
+        x_positions = start + 2 * np.arange(count)
+        np.testing.assert_array_equal(constituent.tokens[x_positions], matched.tokens[x_positions])
+
+    final_boundary = constituent.info["boundaries"][-1]
+    np.testing.assert_array_equal(
+        constituent.tokens[final_boundary:], matched.tokens[final_boundary:]
+    )
+    np.testing.assert_array_equal(
+        constituent.targets[final_boundary:], matched.targets[final_boundary:]
+    )
+    np.testing.assert_array_equal(constituent.tokens[final_boundary:], no_history.tokens)
+    np.testing.assert_array_equal(constituent.targets[final_boundary:], no_history.targets)
+    assert no_history.info["num_curriculum_tasks"] == 0
+    assert constituent.info["demo_counts"][:6].sum() == sum(demos)
