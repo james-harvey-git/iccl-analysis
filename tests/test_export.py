@@ -12,6 +12,7 @@ from iccl.data.export import (
     VALIDATION_SUITE,
     balanced_repeat_positions,
     export_eval_sets,
+    export_retention_position_sets,
     load_suite,
     load_suite_metadata,
     suite_paths,
@@ -59,6 +60,7 @@ def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig
                     },
                     "retention": {
                         "controls": ["novel", "shared"],
+                        "position_diagnostic": {"num_worlds": 2},
                     },
                 },
             },
@@ -233,3 +235,45 @@ def test_binary_evaluation_omits_the_degenerate_shared_control(tmp_path: Path) -
     cfg.data.weighting = "binary"
     assert export_eval_sets(cfg) == 23  # validation + 11 cells x repeat/novel
     assert not list(tmp_path.glob("retention__shared__*.npz"))
+
+
+def test_position_diagnostic_exports_separate_paired_families(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, ["retention"])
+    cfg.data.eval_sets.canonical = {"module_count": 8, "task_count": 8}
+    assert export_retention_position_sets(cfg) == 6
+    root = tmp_path / "retention_position"
+
+    paired = load_suite(root / "retention_position__paired_permutation__repeat__m08__t08__d002")
+    rehearsal = load_suite(
+        root / "retention_position__controlled_rehearsal__repeat__m08__t08__d002"
+    )
+    assert paired["tokens"].shape[0] == 2 * 8
+    assert rehearsal["tokens"].shape[0] == 2 * 2 * 3
+    assert set(paired["original_task_position"]) == set(range(8))
+    assert set(rehearsal["rehearsal_mode"]) == {"none", "one", "both"}
+    assert set(rehearsal["support_status"]) == {"connected_id", "disconnected_ood"}
+    for key in (
+        "position_group_id",
+        "target_modules_seen_before",
+        "target_module_pre_exposures",
+        "target_module_post_exposures",
+        "prior_target_latent_count",
+        "prior_target_support_count",
+    ):
+        assert key in paired and key in rehearsal
+
+    novel = load_suite(root / "retention_position__paired_permutation__novel__m08__t08__d002")
+    shared = load_suite(root / "retention_position__paired_permutation__shared__m08__t08__d002")
+    np.testing.assert_array_equal(paired["pair_id"], novel["pair_id"])
+    np.testing.assert_array_equal(paired["pair_id"], shared["pair_id"])
+    for group_id in range(2):
+        selected = paired["position_group_id"] == group_id
+        assert np.unique(novel["latents"][selected, -1], axis=0).shape[0] == 1
+        assert np.unique(shared["latents"][selected, -1], axis=0).shape[0] == 1
+
+    metadata = load_suite_metadata(
+        root / "retention_position__paired_permutation__repeat__m08__t08__d002.meta.json"
+    )
+    assert metadata["diagnostic_family"] == "paired_permutation"
+    assert metadata["num_worlds"] == 2
+    assert metadata["family_memberships"] == ["position_diagnostic"]

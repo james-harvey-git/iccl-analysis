@@ -31,18 +31,24 @@ from iccl.data.curriculum import (
 from iccl.data.dataset import (
     collate_sequences,
     make_family,
+    module_count_config_from,
     sequence_config_from,
     sequence_dataset_from_config,
     sequence_rng,
     to_tensors,
 )
 from iccl.data.eval_cells import EvalCell, resolve_eval_cells
+from iccl.data.retention_position import (
+    build_paired_position_group,
+    build_rehearsal_position_group,
+)
 from iccl.data.sequences import SequenceSample, build_sequence
 
 EVAL_SEED_OFFSET = 1_000_000
 VALIDATION_SEED_OFFSET = 2_000_000
 RETENTION_POSITION_SEED_OFFSET = 3_000_000
 VALIDATION_SUITE = "validation"
+RETENTION_POSITION_DIR = "retention_position"
 
 EXPORTED_INFO = (
     "num_modules",
@@ -68,6 +74,17 @@ EXPORTED_INFO = (
     "constituent_task_exposures",
     "constituent_demo_exposures",
     "prior_target_support_count",
+    "prior_target_latent_count",
+    "target_modules_seen_before",
+    "target_module_pre_exposures",
+    "target_module_post_exposures",
+    "position_group_id",
+    "world_index",
+    "sequence_index",
+    "rehearsal_mode",
+    "support_status",
+    "designated_constituent",
+    "logical_task_id",
     "pair_id",
 )
 
@@ -405,6 +422,119 @@ def export_eval_sets(cfg: DictConfig) -> int:
             write(samples, "retention", mode, cell, "paired_counterfactual", pair_group)
 
     print(f"exported {suites_written} suites x {count} sequences to {out_dir}/")
+    return suites_written
+
+
+def export_retention_position_sets(cfg: DictConfig) -> int:
+    """Export the canonical paired-position and constituent-rehearsal diagnostic."""
+    data_cfg, eval_cfg = cfg.data, cfg.data.eval_sets
+    position_cfg = eval_cfg.retention.position_diagnostic
+    worlds = int(position_cfg.num_worlds)
+    modules = int(eval_cfg.canonical.module_count)
+    tasks = int(eval_cfg.canonical.task_count)
+    demos = int(eval_cfg.demos_per_task)
+    if worlds < 1:
+        raise ValueError(f"position_diagnostic.num_worlds must be positive, got {worlds}")
+    if modules < 4 or tasks < modules or demos < 1:
+        raise ValueError(
+            "retention position diagnostic requires M>=4, T>=M, and D>=1; "
+            f"got M={modules}, T={tasks}, D={demos}"
+        )
+
+    controls = tuple(str(value) for value in eval_cfg.retention.controls)
+    invalid = set(controls) - {"novel", "shared"}
+    if invalid or "novel" not in controls:
+        raise ValueError("position diagnostic controls require novel and optionally shared")
+    if data_cfg.weighting == "binary":
+        controls = tuple(mode for mode in controls if mode != "shared")
+
+    base_sequence = sequence_config_from(data_cfg)
+    if base_sequence.hotness != 2:
+        raise ValueError("retention position diagnostic requires 2-hot canonical tasks")
+    sequence_cfg = replace(
+        base_sequence,
+        phases=(),
+        demos_per_task=demos,
+        task_graph="random",
+        graph_ordered=False,
+        curriculum_sampler="constructive",
+        hotness=2,
+        surplus_tasks=tasks - (modules - 1),
+    )
+    family = make_family(data_cfg, extra_hotness=2, num_modules=modules)
+    training_modules = module_count_config_from(data_cfg)
+    status = (
+        "seen"
+        if modules in training_modules.allowed
+        else "heldout"
+        if modules in training_modules.held_out
+        else "ood"
+    )
+    cell = EvalCell(("position_diagnostic",), status, modules, tasks, demos)
+    out_dir = Path(eval_cfg.out_dir) / RETENTION_POSITION_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _clear_archives(out_dir)
+
+    families = {
+        "paired_permutation": {condition: [] for condition in ("repeat", *controls)},
+        "controlled_rehearsal": {condition: [] for condition in ("repeat", *controls)},
+    }
+    base_seed = int(cfg.seed) + EVAL_SEED_OFFSET + RETENTION_POSITION_SEED_OFFSET
+    for group_id in range(worlds):
+        paired = build_paired_position_group(
+            family,
+            sequence_cfg,
+            sequence_rng(base_seed, group_id),
+            tasks=tasks,
+            demos=demos,
+            group_id=group_id,
+            control_modes=controls,
+        )
+        rehearsal = build_rehearsal_position_group(
+            family,
+            sequence_cfg,
+            sequence_rng(base_seed + 1, group_id),
+            tasks=tasks,
+            demos=demos,
+            group_id=group_id,
+            control_modes=controls,
+        )
+        for condition in families["paired_permutation"]:
+            families["paired_permutation"][condition].extend(paired[condition])
+            families["controlled_rehearsal"][condition].extend(rehearsal[condition])
+
+    base_meta = {
+        "config": OmegaConf.to_container(data_cfg, resolve=True),
+        "seed": int(cfg.seed),
+        "num_worlds": worlds,
+        "enum_mappings": {
+            "task_origin": TASK_ORIGIN_CODES,
+            "task_category": TASK_CATEGORY_CODES,
+            "curriculum_sampler": CURRICULUM_SAMPLER_CODES,
+        },
+        "retention_contract": {
+            "repeat": "target latent and support occur exactly once in history",
+            "novel": "one fixed support absent from every paired history",
+            "shared": "one fixed new latent on the target support",
+        },
+    }
+    suites_written = 0
+    for diagnostic_family, conditions in families.items():
+        pair_group = f"retention_position__{diagnostic_family}__{cell.cell_id}"
+        for condition, samples in conditions.items():
+            name = f"retention_position__{diagnostic_family}__{condition}__{cell.cell_id}"
+            metadata = _metadata(
+                base_meta,
+                "retention_position",
+                condition,
+                cell,
+                sampling_kind="paired_intervention",
+                pair_group=pair_group,
+            )
+            metadata.update(suite=name, diagnostic_family=diagnostic_family)
+            export_suite(samples, out_dir / name, metadata)
+            suites_written += 1
+    print(f"exported {suites_written} retention-position suites to {out_dir}/")
     return suites_written
 
 
