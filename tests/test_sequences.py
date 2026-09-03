@@ -187,6 +187,74 @@ def test_paired_retention_control_shares_everything_but_the_final_task() -> None
     )
 
 
+def test_fixed_task_inputs_preserve_complete_logical_task_blocks() -> None:
+    family = make_family(num_modules=4)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+    rng = sequence_rng(3, 7)
+    original = build_sequence(
+        family,
+        cfg,
+        rng,
+        revisit_demos=3,
+        revisit_task_index=1,
+        include_world=True,
+        fixed_demo_counts=(3, 3, 3, 3),
+    )
+    inputs = tuple(
+        original.tokens[start + 2 * np.arange(count), : family.cfg.input_dim].copy()
+        for (start, _), count in zip(
+            original.info["task_spans"], original.info["demo_counts"], strict=True
+        )
+    )
+    order = np.array([2, 0, 1, 3])
+    rebuilt = build_sequence(
+        family,
+        cfg,
+        sequence_rng(9, 9),
+        revisit_demos=3,
+        revisit_task_index=2,
+        include_world=True,
+        world=original.info["world"],
+        fixed_curriculum_latents=original.info["latents"][:4][order],
+        fixed_demo_counts=(3, 3, 3, 3),
+        fixed_task_inputs=tuple(inputs[index] for index in order) + (inputs[-1],),
+    )
+
+    for task, logical_task in enumerate(order):
+        start = int(rebuilt.info["task_spans"][task, 0])
+        positions = start + 2 * np.arange(3)
+        np.testing.assert_array_equal(rebuilt.tokens[positions, :4], inputs[logical_task])
+    final_start = int(rebuilt.info["task_spans"][-1, 0])
+    np.testing.assert_array_equal(rebuilt.tokens[final_start + 2 * np.arange(3), :4], inputs[-1])
+
+
+def test_fixed_retention_control_latent_is_reused_and_validated() -> None:
+    family = make_family()
+    cfg = make_seq_cfg()
+    rng = sequence_rng(5, 1)
+    repeat = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
+    sampled = build_paired_retention_control(family, repeat, rng, mode="novel")
+    latent = sampled.info["latents"][-1]
+    fixed = build_paired_retention_control(
+        family,
+        repeat,
+        sequence_rng(99, 99),
+        mode="novel",
+        fixed_latent=latent,
+    )
+    np.testing.assert_array_equal(fixed.info["latents"][-1], latent)
+    np.testing.assert_array_equal(fixed.tokens, sampled.tokens)
+
+    with pytest.raises(ValueError, match="novel-control support"):
+        build_paired_retention_control(
+            family,
+            repeat,
+            rng,
+            mode="novel",
+            fixed_latent=repeat.info["latents"][0],
+        )
+
+
 def test_retention_control_modes_pick_their_supports() -> None:
     family = make_family()
     cfg = make_seq_cfg()

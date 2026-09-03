@@ -26,7 +26,7 @@ def exact_latent_occurrences(history: np.ndarray, latent: np.ndarray) -> int:
     return sum(np.array_equal(previous, latent) for previous in history)
 
 
-def _retention_control_latent(
+def sample_retention_control_latent(
     family: HyperTeacher,
     history: np.ndarray,
     revisited: np.ndarray,
@@ -61,6 +61,7 @@ def build_paired_retention_control(
     *,
     mode: str,
     max_attempts: int = 1000,
+    fixed_latent: np.ndarray | None = None,
 ) -> SequenceSample:
     """Replace only the final task and targets in a retention sequence."""
     if "world" not in sequence.info:
@@ -69,11 +70,30 @@ def build_paired_retention_control(
     curriculum = int(sequence.info["num_curriculum_tasks"])
     if curriculum == 0 or len(latents) <= curriculum:
         raise ValueError("paired retention control requires a revisit block")
+    if mode not in {"novel", "shared"}:
+        raise ValueError(f"unknown retention-control mode: {mode}")
     start = int(sequence.info["task_spans"][-1, 0])
     demos = int(sequence.info["demo_counts"][-1])
-    replacement = _retention_control_latent(
-        family, latents[:curriculum], latents[-1], rng, mode, max_attempts
+    history = latents[:curriculum]
+    replacement = (
+        sample_retention_control_latent(family, history, latents[-1], rng, mode, max_attempts)
+        if fixed_latent is None
+        else fixed_latent.astype(np.float32, copy=False)
     )
+    if replacement.shape != (family.cfg.num_modules,):
+        raise ValueError(
+            f"fixed retention-control latent must have shape {(family.cfg.num_modules,)}"
+        )
+    replacement_support = tuple(np.flatnonzero(replacement))
+    revisited_support = tuple(np.flatnonzero(latents[-1]))
+    history_supports = {tuple(np.flatnonzero(latent)) for latent in history}
+    if mode == "novel" and replacement_support in history_supports:
+        raise ValueError("fixed novel-control support occurs in the history")
+    if mode == "shared" and (
+        replacement_support != revisited_support
+        or exact_latent_occurrences(history, replacement) > 0
+    ):
+        raise ValueError("fixed shared-control latent must reuse only the target support")
     positions = start + 2 * np.arange(demos)
     x = sequence.tokens[positions, : family.cfg.input_dim]
     y = teacher_forward(sequence.info["world"], replacement, x)
