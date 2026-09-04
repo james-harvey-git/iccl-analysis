@@ -4,6 +4,10 @@ In-context continual learning (ICCL) in linear-attention models: synthetic datas
 
 DPhil rotation project. The synthetic dataset is adapted from [Redhardt, Akram & Schug (2025), "Scaling can lead to compositional generalization"](https://arxiv.org/abs/2507.07207).
 
+Exploratory work in `notebooks/` is gitignored. Reusable analyses belong in
+`src/iccl/analysis/`; a notebook chosen to demonstrate established results can
+be included deliberately with `git add -f notebooks/<name>.ipynb`.
+
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/).
