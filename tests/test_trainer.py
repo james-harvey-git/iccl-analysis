@@ -6,9 +6,7 @@ import pytest
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.dataset import make_family, sequence_config_from, sequence_rng
-from iccl.data.export import export_suite
-from iccl.data.sequences import build_sequence
+from iccl.data.eval_bundle import prepare_eval_bundle
 from iccl.models.model import model_from_config
 from iccl.training.trainer import (
     Trainer,
@@ -291,19 +289,15 @@ def test_validation_requires_frozen_suites(tmp_path: Path) -> None:
 
 def test_trainer_runs_validation_and_tracks_best(tmp_path: Path) -> None:
     cfg = make_cfg(tmp_path, num_steps=2, validation_every=2)
-    family = make_family(cfg.data)
-    seq_cfg = sequence_config_from(cfg.data)
-    samples = [build_sequence(family, seq_cfg, sequence_rng(1, i)) for i in range(2)]
     out_dir = Path(cfg.data.eval_sets.out_dir)
-    export_suite(
-        samples,
-        out_dir / "validation",
-        {
-            "suite": "validation",
-            "capability": "validation",
-            "condition": "training_distribution",
-        },
-    )
+    cfg.data.eval_sets = OmegaConf.load("configs/data/hyperteacher.yaml").eval_sets
+    cfg.data.eval_sets.out_dir = str(out_dir)
+    cfg.data.eval_sets.module_counts = [8]
+    cfg.data.eval_sets.num_sequences = 8
+    cfg.data.eval_sets.demos_per_task = 2
+    cfg.data.eval_sets.task_variation.surplus_tasks = {"min": 1, "max": 1}
+    cfg.data.eval_sets.retention.position_diagnostic.num_worlds = 2
+    prepare_eval_bundle(cfg)
 
     torch.manual_seed(0)
     trainer = Trainer(cfg, out_dir=tmp_path / "run")

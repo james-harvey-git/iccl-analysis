@@ -24,6 +24,7 @@ from iccl.data.dataset import (
     collate_sequences,
     sequence_dataset_from_config,
 )
+from iccl.data.eval_bundle import validate_eval_bundle
 from iccl.data.sequences import TOKEN_PAD
 from iccl.evaluation.metrics import EvaluationReport, evaluate_suites, load_eval_suites
 from iccl.models.model import model_from_config
@@ -190,6 +191,8 @@ class Trainer:
         train_cfg = self.cfg.training
         validation_enabled = train_cfg.validation_every is not None
         monitor_enabled = train_cfg.monitor_every is not None
+        if validation_enabled or monitor_enabled:
+            validate_eval_bundle(self.cfg)
         eval_dir = Path(self.cfg.data.eval_sets.out_dir)
         validation_suites = (
             load_eval_suites(eval_dir, select=lambda meta: meta.get("capability") == "validation")

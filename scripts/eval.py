@@ -23,6 +23,7 @@ from iccl.checkpoints import (
     resolve_checkpoint_path,
     source_from_checkpoint,
 )
+from iccl.data.eval_bundle import select_evaluation_suite, validate_eval_bundle
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
 from iccl.evaluation.results import write_evaluation_results
 from iccl.models.model import model_from_config
@@ -34,6 +35,7 @@ from iccl.utils import resolve_device, seed_everything
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    bundle = validate_eval_bundle(cfg)
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
     references = evaluation_checkpoint_references(cfg)
@@ -43,7 +45,10 @@ def main(cfg: DictConfig) -> None:
     model.eval()
 
     out_dir = Path(HydraConfig.get().runtime.output_dir)
-    suites = load_eval_suites(Path(cfg.data.eval_sets.out_dir))
+    suites = load_eval_suites(
+        Path(cfg.data.eval_sets.out_dir),
+        select=lambda meta: select_evaluation_suite(meta, str(cfg.evaluation.suites)),
+    )
     results_dir = out_dir / "evaluation-results"
     first_source = source_from_checkpoint(first_checkpoint)
     job_type = "eval" if len(references) == 1 else "eval-trajectory"
@@ -96,6 +101,7 @@ def main(cfg: DictConfig) -> None:
                 "model_config": resolved["model"],
                 "reporting_config": resolved["wandb"],
                 "training_config": checkpoint.get("config"),
+                "eval_bundle": bundle,
                 "suites": {name: suite["__meta__"] for name, suite in suites.items()},
             },
         )

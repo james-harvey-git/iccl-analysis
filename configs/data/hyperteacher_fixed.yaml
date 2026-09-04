@@ -26,7 +26,7 @@ sequence:
 eval_sets:
   num_sequences: 256       # per physical cell/condition and training validation
   demos_per_task: 32       # positive D shared by every capability task block
-  out_dir: data/eval_sets  # frozen archives written by scripts/make_eval_sets.py
+  out_dir: data/eval_sets  # authoritative bundle; prepare with scripts/make_eval_sets.py
   bootstrap_seed: 0        # independent seed for confidence intervals
   bootstrap_replicates: 1000  # <2 disables bootstrap resampling
   best_metric: validation/token_mse  # raw token MSE on the training distribution

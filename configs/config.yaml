@@ -20,6 +20,7 @@ wandb:
   upload_weights: false
 
 evaluation:
+  suites: all  # all | capabilities (ICL/composition/retention) | retention_position
   # One or more local or wandb:// checkpoint references. Multiple entries form
   # one trajectory and must be ordered by increasing training step.
   checkpoints: []  # required by scripts/eval.py; unrelated to training.resume

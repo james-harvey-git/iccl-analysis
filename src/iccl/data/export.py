@@ -48,7 +48,6 @@ EVAL_SEED_OFFSET = 1_000_000
 VALIDATION_SEED_OFFSET = 2_000_000
 RETENTION_POSITION_SEED_OFFSET = 3_000_000
 VALIDATION_SUITE = "validation"
-RETENTION_POSITION_DIR = "retention_position"
 
 EXPORTED_INFO = (
     "num_modules",
@@ -248,7 +247,7 @@ def _clear_archives(out_dir: Path) -> None:
             path.unlink()
 
 
-def export_eval_sets(cfg: DictConfig) -> int:
+def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
     """Export validation plus every configured capability for each physical cell."""
     data_cfg, eval_cfg = cfg.data, cfg.data.eval_sets
     cells = resolve_eval_cells(data_cfg)
@@ -273,7 +272,7 @@ def export_eval_sets(cfg: DictConfig) -> int:
     if "retention" in capabilities and "novel" not in retention_controls:
         raise ValueError("retention requires its novel control")
 
-    out_dir = Path(eval_cfg.out_dir)
+    out_dir = Path(eval_cfg.out_dir) if out_dir is None else out_dir
     count = int(eval_cfg.num_sequences)
     if count < 1:
         raise ValueError(f"eval_sets.num_sequences must be positive, got {count}")
@@ -425,7 +424,7 @@ def export_eval_sets(cfg: DictConfig) -> int:
     return suites_written
 
 
-def export_retention_position_sets(cfg: DictConfig) -> int:
+def export_retention_position_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
     """Export the canonical paired-position and constituent-rehearsal diagnostic."""
     data_cfg, eval_cfg = cfg.data, cfg.data.eval_sets
     position_cfg = eval_cfg.retention.position_diagnostic
@@ -473,9 +472,8 @@ def export_retention_position_sets(cfg: DictConfig) -> int:
         else "ood"
     )
     cell = EvalCell(("position_diagnostic",), status, modules, tasks, demos)
-    out_dir = Path(eval_cfg.out_dir) / RETENTION_POSITION_DIR
+    out_dir = Path(eval_cfg.out_dir) if out_dir is None else out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    _clear_archives(out_dir)
 
     builders = (
         ("paired_permutation", build_paired_position_group, 0),

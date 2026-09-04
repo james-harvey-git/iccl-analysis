@@ -242,7 +242,7 @@ def test_position_diagnostic_exports_separate_paired_families(tmp_path: Path) ->
     cfg = make_cfg(tmp_path, ["retention"])
     cfg.data.eval_sets.canonical = {"module_count": 8, "task_count": 8}
     assert export_retention_position_sets(cfg) == 6
-    root = tmp_path / "retention_position"
+    root = tmp_path
 
     paired = load_suite(root / "retention_position__paired_permutation__repeat__m08__t08__d002")
     rehearsal = load_suite(
