@@ -376,7 +376,7 @@ class Trainer:
         torch.save(state, ckpt_dir / name)
 
     def _load_checkpoint(self, path: Path) -> None:
-        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler.load_state_dict(ckpt["scheduler"])
