@@ -134,11 +134,17 @@ def test_bundle_integrity_is_checked(bundle: DictConfig, damage: str) -> None:
         validate_eval_bundle(bundle)
 
 
-def test_successful_replacement_preserves_the_entire_old_directory(bundle: DictConfig) -> None:
+def test_successful_replacement_preserves_the_entire_old_directory(
+    bundle: DictConfig, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = Path(bundle.data.eval_sets.out_dir)
     (root / "old-version").mkdir()
     (root / "old-version" / "notes.txt").write_text("preserve me")
     prepare_eval_bundle(bundle)
+    assert (
+        "Running scripts/make_eval_sets.py with submitted data/seed overrides."
+        in capsys.readouterr().out
+    )
     validate_eval_bundle(bundle)
     assert not (root / "old-version").exists()
     backups = list(Path("outputs/eval-set-backups").iterdir())

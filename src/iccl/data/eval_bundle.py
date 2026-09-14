@@ -30,11 +30,14 @@ def generation_config(cfg: DictConfig) -> dict[str, Any]:
     return {"seed": int(cfg.seed), "data": data}
 
 
-def validate_eval_bundle(cfg: DictConfig) -> dict[str, Any]:
+def validate_eval_bundle(
+    cfg: DictConfig,
+    *,
+    remedy: str = "Run scripts/make_eval_sets.py with the desired data/seed overrides.",
+) -> dict[str, Any]:
     """Reject incomplete, stale or differently configured frozen data."""
     root = Path(cfg.data.eval_sets.out_dir)
     path = root / "manifest.json"
-    remedy = "Run scripts/make_eval_sets.py with the same data/seed overrides."
     if not path.is_file():
         raise FileNotFoundError(f"No authoritative eval manifest in {root}. {remedy}")
     manifest = json.loads(path.read_text())
@@ -77,7 +80,12 @@ def prepare_eval_bundle(cfg: DictConfig) -> Path:
         ) from None
     try:
         try:
-            manifest = validate_eval_bundle(cfg)
+            manifest = validate_eval_bundle(
+                cfg,
+                remedy=(
+                    "Running scripts/make_eval_sets.py with submitted data/seed overrides."
+                ),
+            )
         except (FileNotFoundError, ValueError) as error:
             print(error)
         else:
