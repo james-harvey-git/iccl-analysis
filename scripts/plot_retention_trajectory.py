@@ -2,7 +2,9 @@
 
 Only the exact-repeat and novel-pair conditions of the paired-permutation
 diagnostic are scored. The existing evaluator defines total savings and performs
-the whole-world bootstrap. Plotting uses those saved numbers without smoothing.
+the whole-world bootstrap. Plots show total savings, novel-task error and
+repeat-task error against the number of intervening tasks, without smoothing.
+The two error plots use the same y-axis limits and all plots share a colour scale.
 
 Run from the repository root, using the same code and frozen evaluation bundle
 as the report. No W&B connection or checkpoint upload is needed.
@@ -33,8 +35,9 @@ from omegaconf import DictConfig, OmegaConf
 import iccl.evaluation.metrics as evaluation_metrics
 from iccl.checkpoints import source_from_checkpoint
 from iccl.data.eval_bundle import validate_eval_bundle
-from iccl.evaluation.metrics import METRIC_VERSION, evaluate_suites, load_eval_suites
+from iccl.evaluation.metrics import METRIC_VERSION, _aggregate, evaluate_suites, load_eval_suites
 from iccl.evaluation.results import read_rows, write_evaluation_results
+from iccl.evaluation.retention_position import _matrix
 from iccl.models.model import model_from_config
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
@@ -221,6 +224,56 @@ def cached_curve(
     return identity, rows
 
 
+def condition_curves(
+    path: Path, identity: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Recover final-task errors, averaging demos within each paired world.
+
+    Columns follow ascending original task position. Both conditions use the same
+    whole-world bootstrap draws, preserving their pairing across all positions.
+    Only cached arrays and metadata are needed, without snapshots or frozen tokens.
+    """
+    manifest = json.loads((path / "manifest.json").read_text())
+    names = {meta["logical_name"]: name for name, meta in manifest["raw_arrays"].items()}
+    prefix = "retention_position/paired_permutation"
+    curves = {}
+    with np.load(path / "raw_errors.npz", allow_pickle=False) as raw:
+        groups = raw[names[f"{prefix}/position_group_id"]]
+        positions = raw[names[f"{prefix}/original_task_position"]]
+        for condition in ("novel", "repeat"):
+            suites = [
+                name
+                for name, meta in manifest["suites"].items()
+                if meta.get("capability") == "retention_position"
+                and meta.get("diagnostic_family") == "paired_permutation"
+                and meta.get("condition") == condition
+            ]
+            if len(suites) != 1:
+                raise ValueError(f"Expected one paired-permutation {condition} suite in {path}")
+            errors = raw[names[f"{suites[0]}/nmse"]]
+            expected_shape = (len(groups), rows[0]["T"] + 1, rows[0]["D"])
+            if errors.shape != expected_shape or not np.isfinite(errors[:, -1]).all():
+                raise ValueError(f"Invalid cached {condition} errors in {path}")
+            matrix, coordinates = _matrix(errors[:, -1].mean(axis=1), groups, positions)
+            if matrix.shape[0] != rows[0]["n_sequences"] or not np.array_equal(
+                coordinates, [row["x_value"] for row in rows]
+            ):
+                raise ValueError(f"Cached {condition} worlds/positions disagree with {path}")
+            curves[condition] = _aggregate(
+                matrix,
+                seed=int(identity["bootstrap_seed"]),
+                replicates=int(identity["bootstrap_replicates"]),
+            )
+    if not np.allclose(
+        curves["novel"][0] - curves["repeat"][0],
+        [row["nmse"] for row in rows],
+        rtol=1e-7,
+        atol=1e-10,
+    ):
+        raise ValueError(f"Novel minus repeat errors disagree with saved total savings in {path}")
+    return curves
+
+
 def plot_retention_trajectory(
     root: Path, steps: list[int], source_run: str, *, cmap: str = "viridis_r", show_ci: bool = False
 ) -> list[Path]:
@@ -233,8 +286,10 @@ def plot_retention_trajectory(
         raise ValueError("At least one checkpoint is required for plotting")
     series = []
     common = None
+    delays = None
     for step in steps:
-        cached = cached_curve(root / "evaluation-results" / f"step_{step:07d}")
+        step_dir = root / "evaluation-results" / f"step_{step:07d}"
+        cached = cached_curve(step_dir)
         if cached is None:
             raise FileNotFoundError(f"No completed evaluation for step {step}")
         identity, rows = cached
@@ -246,7 +301,37 @@ def plot_retention_trajectory(
                 "Cannot combine curves from different suites, models or evaluation settings"
             )
         common = comparison
-        series.append(rows)
+        coordinates = np.array([row["intervening_tasks"] for row in rows])
+        if not np.array_equal(coordinates, rows[0]["T"] - 1 - np.arange(len(rows))):
+            raise ValueError(
+                f"Intervening-task counts disagree with original positions in {step_dir}"
+            )
+        if delays is not None and not np.array_equal(coordinates, delays):
+            raise ValueError("Cannot combine curves with different intervening-task counts")
+        delays = coordinates
+        series.append(
+            {
+                "total": tuple(
+                    np.array([row[key] for row in rows]) for key in ("nmse", "ci_low", "ci_high")
+                ),
+                **condition_curves(step_dir, identity, rows),
+            }
+        )
+
+    assert delays is not None
+    order = np.argsort(delays)
+    x = delays[order]
+    error_max = max(
+        float(curves[condition][2 if show_ci else 0].max())
+        for curves in series
+        for condition in ("novel", "repeat")
+    )
+    plots = (
+        ("total", "retention-position-trajectory", "Total savings (nMSE)"),
+        ("novel", "retention-position-novel-trajectory", r"$E^{\mathrm{novel}}$ (nMSE)"),
+        ("repeat", "retention-position-repeat-trajectory", r"$E^{\mathrm{repeat}}$ (nMSE)"),
+    )
+    paths = []
 
     with plt.rc_context(
         {
@@ -258,40 +343,37 @@ def plot_retention_trajectory(
             "ps.fonttype": 42,
         }
     ):
-        fig, ax = plt.subplots(figsize=(6.3, 3.7), layout="constrained")
         norm = Normalize(
             min(steps) / 1000, max(steps) / 1000 if len(steps) > 1 else steps[0] / 1000 + 1
         )
         colours = plt.get_cmap(cmap)
-        positions = [r["x_value"] + 1 for r in series[0]]
-        for step, rows in zip(steps, series, strict=True):
-            x = np.array([r["x_value"] + 1 for r in rows])
-            y = np.array([r["nmse"] for r in rows])
-            colour = colours(norm(step / 1000))
-            ax.plot(x, y, color=colour, lw=1.5, marker="o", markersize=2.3)
-            if show_ci:
-                ax.fill_between(
-                    x,
-                    [r["ci_low"] for r in rows],
-                    [r["ci_high"] for r in rows],
-                    color=colour,
-                    alpha=0.07,
-                    linewidth=0,
-                )
-        ax.axhline(0, color="0.55", lw=0.6, ls="--", zorder=0)
-        ax.set(xlabel="Original task position", ylabel="Total savings (nMSE)", xticks=positions)
-        ax.grid(axis="y", color="0.91", linewidth=0.5)
-        ax.set_axisbelow(True)
-        bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=colours), ax=ax, pad=0.035)
-        bar.set_label("Training steps (thousands)")
-        ticks = sorted(
-            {steps[0] / 1000, *[s / 1000 for s in steps if s % 500000 == 0], steps[-1] / 1000}
-        )
-        bar.set_ticks(ticks)
-        paths = [root / f"retention-position-trajectory.{suffix}" for suffix in ("pdf", "png")]
-        for path in paths:
-            fig.savefig(path, dpi=250, bbox_inches="tight")
-        plt.close(fig)
+        for condition, stem, ylabel in plots:
+            fig, ax = plt.subplots(figsize=(6.3, 3.7), layout="constrained")
+            for step, curves in zip(steps, series, strict=True):
+                mean, low, high = curves[condition]
+                colour = colours(norm(step / 1000))
+                ax.plot(x, mean[order], color=colour, lw=1.5, marker="o", markersize=2.3)
+                if show_ci:
+                    ax.fill_between(
+                        x, low[order], high[order], color=colour, alpha=0.07, linewidth=0
+                    )
+            ax.axhline(0, color="0.55", lw=0.6, ls="--", zorder=0)
+            ax.set(xlabel="Number of intervening tasks", ylabel=ylabel, xticks=x)
+            if condition != "total":
+                ax.set_ylim(0, max(error_max * 1.05, 1e-6))
+            ax.grid(axis="y", color="0.91", linewidth=0.5)
+            ax.set_axisbelow(True)
+            bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=colours), ax=ax, pad=0.035)
+            bar.set_label("Training steps (thousands)")
+            ticks = sorted(
+                {steps[0] / 1000, *[s / 1000 for s in steps if s % 500000 == 0], steps[-1] / 1000}
+            )
+            bar.set_ticks(ticks)
+            for suffix in ("pdf", "png"):
+                path = root / f"{stem}.{suffix}"
+                fig.savefig(path, dpi=250, bbox_inches="tight")
+                paths.append(path)
+            plt.close(fig)
     return paths
 
 
