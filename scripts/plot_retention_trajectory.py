@@ -12,11 +12,16 @@ as the report. No W&B connection or checkpoint upload is needed.
     uv run python scripts/plot_retention_trajectory.py --mode discover
     uv run python scripts/plot_retention_trajectory.py
     uv run python scripts/plot_retention_trajectory.py --mode plot --cmap magma_r
+    uv run python scripts/plot_retention_trajectory.py --mode plot --paper
 
 Discovery runs on CPU. Run evaluation in a cluster GPU allocation. Completed
 checkpoints are cached, so rerunning the same command resumes after interruption.
 Plot mode needs only the saved results and can run without a GPU or snapshots.
 The defaults select 100k through 2100k at 100k intervals from run 0bdfkn9e.
+The paper view selects 100k, 200k, 500k, 1.4M and 2.1M to show successive
+changes in curve shape. It writes separate panels, a shared legend and a LaTeX
+subfigure snippet under paper/, preserving the full trajectory figures.
+Use --plot-steps to choose another set of displayed checkpoints.
 """
 
 import argparse
@@ -41,6 +46,8 @@ from iccl.evaluation.retention_position import _matrix
 from iccl.models.model import model_from_config
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
+
+PAPER_STEPS = [100000, 200000, 500000, 1400000, 2100000]
 
 
 @dataclass(frozen=True)
@@ -275,15 +282,23 @@ def condition_curves(
 
 
 def plot_retention_trajectory(
-    root: Path, steps: list[int], source_run: str, *, cmap: str = "viridis_r", show_ci: bool = False
+    root: Path,
+    steps: list[int],
+    source_run: str,
+    *,
+    cmap: str = "viridis_r",
+    show_ci: bool = False,
+    paper: bool = False,
 ) -> list[Path]:
-    """Draw bright-to-dark curves with training step mapped to a continuous colourbar."""
+    """Draw trajectories or aligned paper panels from the same cached estimates."""
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import Normalize
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import MaxNLocator
 
-    if not steps:
-        raise ValueError("At least one checkpoint is required for plotting")
+    if not steps or steps != sorted(set(steps)) or steps[0] <= 0:
+        raise ValueError("Plot steps must be unique positive integers in increasing order")
     series = []
     common = None
     delays = None
@@ -326,19 +341,28 @@ def plot_retention_trajectory(
         for curves in series
         for condition in ("novel", "repeat")
     )
+    error_min = min(
+        float(curves[condition][1 if show_ci else 0].min())
+        for curves in series
+        for condition in ("novel", "repeat")
+    )
     plots = (
         ("total", "retention-position-trajectory", "Total savings (nMSE)"),
         ("novel", "retention-position-novel-trajectory", r"$E^{\mathrm{novel}}$ (nMSE)"),
         ("repeat", "retention-position-repeat-trajectory", r"$E^{\mathrm{repeat}}$ (nMSE)"),
     )
     paths = []
+    destination = root / "paper" if paper else root
+    destination.mkdir(parents=True, exist_ok=True)
 
     with plt.rc_context(
         {
             "font.family": "serif",
-            "font.size": 10,
+            "font.size": 8.5 if paper else 10,
+            "mathtext.fontset": "dejavuserif" if paper else "dejavusans",
             "axes.spines.top": False,
             "axes.spines.right": False,
+            "axes.linewidth": 0.65 if paper else 0.8,
             "pdf.fonttype": 42,
             "ps.fonttype": 42,
         }
@@ -347,34 +371,139 @@ def plot_retention_trajectory(
             min(steps) / 1000, max(steps) / 1000 if len(steps) > 1 else steps[0] / 1000 + 1
         )
         colours = plt.get_cmap(cmap)
+        colour_values = (
+            np.linspace(0.10, 0.95, len(steps)) if paper else norm(np.array(steps) / 1000)
+        )
+        step_colours = [colours(value) for value in colour_values]
         for condition, stem, ylabel in plots:
-            fig, ax = plt.subplots(figsize=(6.3, 3.7), layout="constrained")
-            for step, curves in zip(steps, series, strict=True):
+            if paper:
+                fig, ax = plt.subplots(figsize=(2.2, 2.05))
+                fig.subplots_adjust(left=0.255, right=0.975, bottom=0.23, top=0.965)
+                ax.tick_params(length=3, width=0.65, labelsize=8)
+                ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+            else:
+                fig, ax = plt.subplots(figsize=(6.3, 3.7), layout="constrained")
+            for colour, curves in zip(step_colours, series, strict=True):
                 mean, low, high = curves[condition]
-                colour = colours(norm(step / 1000))
-                ax.plot(x, mean[order], color=colour, lw=1.5, marker="o", markersize=2.3)
+                ax.plot(
+                    x,
+                    mean[order],
+                    color=colour,
+                    lw=1.2 if paper else 1.5,
+                    marker="o",
+                    markersize=2.3,
+                )
                 if show_ci:
                     ax.fill_between(
                         x, low[order], high[order], color=colour, alpha=0.07, linewidth=0
                     )
-            ax.axhline(0, color="0.55", lw=0.6, ls="--", zorder=0)
-            ax.set(xlabel="Number of intervening tasks", ylabel=ylabel, xticks=x)
+            if condition == "total" or not paper:
+                ax.axhline(0, color="0.55", lw=0.6, ls="--", zorder=0)
+            ax.set(
+                xlabel="Intervening tasks" if paper else "Number of intervening tasks",
+                ylabel=ylabel,
+                xticks=x,
+            )
             if condition != "total":
-                ax.set_ylim(0, max(error_max * 1.05, 1e-6))
+                padding = max(0.06 * (error_max - error_min), 1e-6)
+                if paper:
+                    ax.set_ylim(max(0, error_min - padding), error_max + padding)
+                else:
+                    ax.set_ylim(0, max(error_max * 1.05, 1e-6))
             ax.grid(axis="y", color="0.91", linewidth=0.5)
             ax.set_axisbelow(True)
-            bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=colours), ax=ax, pad=0.035)
-            bar.set_label("Training steps (thousands)")
-            ticks = sorted(
-                {steps[0] / 1000, *[s / 1000 for s in steps if s % 500000 == 0], steps[-1] / 1000}
-            )
-            bar.set_ticks(ticks)
+            if not paper:
+                bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=colours), ax=ax, pad=0.035)
+                bar.set_label("Training steps (thousands)")
+                ticks = sorted(
+                    {
+                        steps[0] / 1000,
+                        *[s / 1000 for s in steps if s % 500000 == 0],
+                        steps[-1] / 1000,
+                    }
+                )
+                bar.set_ticks(ticks)
+            else:
+                stem = f"retention-{'savings' if condition == 'total' else condition}"
             for suffix in ("pdf", "png"):
-                path = root / f"{stem}.{suffix}"
-                fig.savefig(path, dpi=250, bbox_inches="tight")
+                path = destination / f"{stem}.{suffix}"
+                fig.savefig(path, dpi=250, bbox_inches=None if paper else "tight")
                 paths.append(path)
             plt.close(fig)
+        if paper:
+            fig = plt.figure(figsize=(6.875, 0.45))
+            handles = [
+                Line2D([], [], color=colour, lw=1.2, marker="o", markersize=2.3)
+                for colour in step_colours
+            ]
+            labels = [f"{step / 1e6:g}M" if step >= 1e6 else f"{step / 1e3:g}k" for step in steps]
+            fig.legend(
+                handles,
+                labels,
+                loc="center",
+                ncol=len(steps),
+                frameon=False,
+                title="Meta-training steps",
+                title_fontsize=8.5,
+                handlelength=1.8,
+            )
+            for suffix in ("pdf", "png"):
+                path = destination / f"retention-legend.{suffix}"
+                fig.savefig(path, dpi=250)
+                paths.append(path)
+            plt.close(fig)
+            paths.append(write_paper_latex(destination, labels, show_ci=show_ci))
     return paths
+
+
+def write_paper_latex(root: Path, labels: list[str], *, show_ci: bool) -> Path:
+    """Assemble separately referenceable panels with labels owned by LaTeX."""
+    lines = [
+        r"% Preamble: \usepackage{graphicx,subcaption} and \usepackage{cleveref}.",
+        "% Place the four panel/legend PDFs alongside the main .tex file, or adjust paths.",
+        r"\begin{figure}[t]",
+        r"    \centering",
+    ]
+    for index, (name, caption) in enumerate(
+        (
+            ("novel", "Novel-task error."),
+            ("repeat", "Repeated-task error."),
+            ("savings", "Total savings."),
+        )
+    ):
+        lines += [
+            r"    \begin{subfigure}[t]{0.32\textwidth}",
+            r"        \centering",
+            rf"        \includegraphics[width=\linewidth]{{retention-{name}.pdf}}",
+            rf"        \caption{{{caption}}}",
+            rf"        \label{{fig:retention-training-{name}}}",
+            r"    \end{subfigure}" + (r"\hfill" if index < 2 else ""),
+        ]
+    lines += [
+        r"    \par\smallskip",
+        r"    \includegraphics[width=\textwidth]{retention-legend.pdf}",
+        r"    \caption{Retention across meta-training. Curves show checkpoints at "
+        + ", ".join(labels)
+        + " steps, selected to illustrate changes in curve shape.",
+        "        All checkpoints use the same frozen evaluation episodes.",
+        "        Errors are averaged over demonstrations in the final task",
+        "        and across paired worlds.",
+        r"        Total savings are $E^{\mathrm{novel}}-E^{\mathrm{repeat}}$.",
+        "        Zero intervening tasks denotes an immediate repetition in the repeat condition.",
+    ]
+    if show_ci:
+        lines.append(
+            r"        Shading shows 95\% bootstrap confidence intervals over paired worlds."
+        )
+    lines += [
+        r"    }",
+        r"    \label{fig:retention-training}",
+        r"\end{figure}",
+        "% Examples: " + r"\Cref{fig:retention-training-repeat} and \Cref{fig:retention-training}.",
+    ]
+    path = root / "retention-figure.tex"
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
 
 def _frozen_position_suites(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -528,8 +657,14 @@ def run_retention_trajectory(cfg: argparse.Namespace) -> None:
             )
             return
         evaluate_retention_trajectory(cfg, snapshots, root)
+    plot_steps = cfg.plot_steps or (PAPER_STEPS if cfg.paper else steps)
     paths = plot_retention_trajectory(
-        root, steps, str(cfg.source_run), cmap=str(cfg.cmap), show_ci=bool(cfg.show_ci)
+        root,
+        plot_steps,
+        str(cfg.source_run),
+        cmap=str(cfg.cmap),
+        show_ci=bool(cfg.show_ci),
+        paper=bool(cfg.paper),
     )
     print("Saved " + ", ".join(str(path) for path in paths))
 
@@ -560,6 +695,12 @@ def main() -> None:
     parser.add_argument("--bootstrap-seed", type=int, default=0)
     parser.add_argument("--bootstrap-replicates", type=int, default=1000)
     parser.add_argument("--cmap", default="viridis_r", help="Bright early and dark late curves")
+    parser.add_argument(
+        "--paper", action="store_true", help="Five selected checkpoints in separate LaTeX panels"
+    )
+    parser.add_argument(
+        "--plot-steps", nargs="+", type=int, help="Explicit plotted steps in increasing order"
+    )
     parser.add_argument(
         "--show-ci", action="store_true", help="Draw saved 95%% bootstrap intervals"
     )
