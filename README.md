@@ -61,12 +61,13 @@ with `uv run python scripts/plotting/plot_evaluation.py <evaluation-results-dir>
 --out-dir outputs/evaluation-plots`.
 
 Paper plotting scripts also live in `scripts/plotting/`. Render the reference
-learning and retention panels from an evaluation step directory, or redraw the
-cached retention trajectory as separate paper panels:
+learning, retention and composition panels from an evaluation step directory,
+or redraw the cached retention trajectory as separate paper panels:
 
 ```bash
 uv run python scripts/plotting/plot_learning_curves.py --results PATH/TO/step_2100000
 uv run python scripts/plotting/plot_retention_learning.py --results PATH/TO/step_2100000
+uv run python scripts/plotting/plot_composition_learning.py --results PATH/TO/step_2100000
 uv run python scripts/plotting/plot_retention_trajectory.py --mode plot --paper
 ```
 
@@ -75,3 +76,5 @@ script overlays original, repeat, shared and novel curves and exports a separate
 mean-savings panel using the saved paired bootstrap intervals. It also verifies
 the decomposition across all supplied configurations and writes an audit CSV.
 The learning and trajectory scripts additionally provide LaTeX subfigure snippets.
+The composition script exports exposed, unexposed and no-history learning curves
+alongside the paired unexposed-minus-exposed benefit, preserving its saved intervals.
