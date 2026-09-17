@@ -57,5 +57,16 @@ uv run python scripts/eval.py \
 
 Complete numerical results and metadata are saved locally under the evaluation
 run's `evaluation-results/` and uploaded when W&B is enabled. Reconstruct figures
-with `uv run python scripts/plot_evaluation.py <evaluation-results-dir>
+with `uv run python scripts/plotting/plot_evaluation.py <evaluation-results-dir>
 --out-dir outputs/evaluation-plots`.
+
+Paper plotting scripts also live in `scripts/plotting/`. Render the reference
+learning panels from an evaluation step directory, or redraw the cached
+retention trajectory as separate paper panels:
+
+```bash
+uv run python scripts/plotting/plot_learning_curves.py --results PATH/TO/step_2100000
+uv run python scripts/plotting/plot_retention_trajectory.py --mode plot --paper
+```
+
+Both commands write PDF/PNG figures and LaTeX subfigure snippets under `outputs/`.

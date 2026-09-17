@@ -9,10 +9,10 @@ The two error plots use the same y-axis limits and all plots share a colour scal
 Run from the repository root, using the same code and frozen evaluation bundle
 as the report. No W&B connection or checkpoint upload is needed.
 
-    uv run python scripts/plot_retention_trajectory.py --mode discover
-    uv run python scripts/plot_retention_trajectory.py
-    uv run python scripts/plot_retention_trajectory.py --mode plot --cmap magma_r
-    uv run python scripts/plot_retention_trajectory.py --mode plot --paper
+    uv run python scripts/plotting/plot_retention_trajectory.py --mode discover
+    uv run python scripts/plotting/plot_retention_trajectory.py
+    uv run python scripts/plotting/plot_retention_trajectory.py --mode plot --cmap magma_r
+    uv run python scripts/plotting/plot_retention_trajectory.py --mode plot --paper
 
 Discovery runs on CPU. Run evaluation in a cluster GPU allocation. Completed
 checkpoints are cached, so rerunning the same command resumes after interruption.

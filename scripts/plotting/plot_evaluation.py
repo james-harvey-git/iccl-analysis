@@ -1,8 +1,8 @@
 """Render detailed Plotly HTML curves from a local or W&B evaluation artifact.
 
 Examples:
-    uv run python scripts/plot_evaluation.py outputs/<eval-run>/evaluation-results
-    uv run python scripts/plot_evaluation.py \
+    uv run python scripts/plotting/plot_evaluation.py outputs/<eval-run>/evaluation-results
+    uv run python scripts/plotting/plot_evaluation.py \
         wandb://entity/project/evaluation-<run-name>:latest --step 100000
 """
 
