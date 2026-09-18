@@ -20,7 +20,7 @@ sequence:
   # rejection samples all T tasks i.i.d. and conditions on the constraints.
   curriculum_sampler: constructive  # constructive | rejection
   hotness: 2                # active modules per task; relative form requires 2
-  surplus_tasks: [0, 3]     # non-negative int or inclusive [min, max]
+  surplus_tasks: [0, 4]     # non-negative int or inclusive [min, max]
   # D may also be a positive int or inclusive [min, max]. This mapping makes
   # the sampling scope explicit; min == max is a fixed value and consumes no RNG.
   demos_per_task:
@@ -51,7 +51,7 @@ eval_sets:
   task_variation:
     surplus_tasks:
       min: 0                # inclusive S range; T=M-1+S
-      max: 3
+      max: 4
   composition:
     constituent_task_exposures: 1  # prior tasks containing each target module
     controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
