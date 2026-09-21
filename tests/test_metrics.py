@@ -79,19 +79,22 @@ def capability_fixture() -> tuple[
     mses = {"icl": np.arange(count * tasks * demos).reshape(count, tasks, demos) / 10}
     nmses = {"icl": mses["icl"].copy()}
 
-    for condition in ("constituent", "matched_prefix", "no_history"):
+    for condition in ("exposed", "unexposed", "no_history"):
         name = f"composition_{condition}"
         suites[name] = {"__meta__": metadata("composition", condition, "composition-pair")}
-        value = {"constituent": 2.0, "matched_prefix": 5.0, "no_history": 7.0}[condition]
+        value = {"exposed": 2.0, "unexposed": 5.0, "no_history": 7.0}[condition]
         mses[name] = np.full((count, tasks + 1, demos), value)
         nmses[name] = mses[name].copy()
 
     positions = np.array([0, 0, 1, 2, 3])
     delays = tasks - 1 - positions
-    for condition in ("repeat", "shared", "novel"):
+    for condition in ("repeat", "shared", "unexposed"):
         name = f"retention_{condition}"
         suites[name] = {
-            "__meta__": metadata("retention", condition, "retention-pair"),
+            "__meta__": dict(
+                metadata("retention", condition, "retention-pair"), sample_scope="monitor"
+            ),
+            "position_group_id": np.arange(count),
             "original_task_position": positions,
             "intervening_tasks": delays,
         }
@@ -101,7 +104,7 @@ def capability_fixture() -> tuple[
         values[:, -1] = 1.0
         if condition == "shared":
             values[:, -1] += delays[:, None]
-        elif condition == "novel":
+        elif condition == "unexposed":
             values[:, -1] += 3 * delays[:, None]
         mses[name] = values
         nmses[name] = values.copy()

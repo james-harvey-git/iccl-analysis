@@ -23,6 +23,10 @@ STRUCTURAL_COLUMNS = [
     "T",
     "S",
     "D",
+    "protocol",
+    "sample_scope",
+    "exposure_scope",
+    "n_episodes",
 ]
 RETENTION_COLUMNS = ["retention_component", "original_task_position", "intervening_tasks"]
 DIAGNOSTIC_COLUMNS = ["diagnostic_family", "rehearsal_mode", "support_status"]
@@ -140,6 +144,7 @@ def read_rows(path: Path) -> list[dict[str, Any]]:
         "D",
         "x_value",
         "n_sequences",
+        "n_episodes",
         "original_task_position",
         "intervening_tasks",
     }

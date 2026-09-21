@@ -1,26 +1,25 @@
+from collections.abc import Callable
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
-from iccl.data.curriculum import SequenceConfig, check_connected
+from iccl.data.controls import sample_retention_control_latent
+from iccl.data.curriculum import SequenceConfig, check_compositional, check_connected
 from iccl.data.dataset import sequence_rng
-from iccl.data.retention_position import (
-    REHEARSAL_MODES,
-    build_paired_position_group,
-    build_rehearsal_position_group,
-)
+from iccl.data.retention_position import build_paired_position_group, build_rehearsal_position_group
 from iccl.data.sequences import SequenceSample
 from iccl.data.teacher import HyperTeacher, TeacherConfig
 
 
-def make_family(weighting: str = "discrete") -> HyperTeacher:
+def make_family(weighting: str = "discrete", modules: int = 8) -> HyperTeacher:
     return HyperTeacher(
         TeacherConfig(
             input_dim=4,
             output_dim=4,
             hidden_dims=(4,),
             use_bias=True,
-            num_modules=8,
+            num_modules=modules,
             scale=3.0,
             weighting=weighting,
         ),
@@ -37,15 +36,7 @@ def make_cfg() -> SequenceConfig:
         curriculum_sampler="constructive",
         hotness=2,
         surplus_tasks=1,
-        max_attempts=1000,
     )
-
-
-def inputs(sample: SequenceSample, task: int) -> np.ndarray:
-    info = sample.info
-    start = int(info["task_spans"][task, 0])
-    count = int(info["demo_counts"][task])
-    return sample.tokens[start + 2 * np.arange(count), :4]
 
 
 def block(sample: SequenceSample, task: int) -> tuple[np.ndarray, np.ndarray]:
@@ -53,162 +44,167 @@ def block(sample: SequenceSample, task: int) -> tuple[np.ndarray, np.ndarray]:
     return sample.tokens[start:end], sample.targets[start:end]
 
 
-def test_paired_position_group_moves_identical_complete_task_blocks() -> None:
-    group = build_paired_position_group(make_family(), make_cfg(), sequence_rng(4, 2), group_id=7)
-    assert set(group) == {"repeat", "novel", "shared"}
-    assert all(len(samples) == 8 for samples in group.values())
-    repeats = group["repeat"]
-    reference = repeats[0]
-    reference_world = reference.info["world"]
-    final_inputs = inputs(reference, -1)
-
-    novel_latent = group["novel"][0].info["latents"][-1]
-    shared_latent = group["shared"][0].info["latents"][-1]
-    for position, repeat in enumerate(repeats):
-        assert repeat.info["world"] is reference_world
-        assert repeat.info["position_group_id"] == 7
-        assert repeat.info["pair_id"] == 56 + position
-        assert repeat.info["original_task_position"] == position
-        assert repeat.info["intervening_tasks"] == 7 - position
-        assert repeat.info["prior_target_latent_count"] == 1
-        assert repeat.info["prior_target_support_count"] == 1
-        assert repeat.info["rehearsal_mode"] == "natural"
-        np.testing.assert_array_equal(inputs(repeat, -1), final_inputs)
-        np.testing.assert_array_equal(group["novel"][position].info["latents"][-1], novel_latent)
-        np.testing.assert_array_equal(group["shared"][position].info["latents"][-1], shared_latent)
-
-    for logical_task in range(8):
-        blocks = []
-        for repeat in repeats:
-            position = int(np.flatnonzero(repeat.info["logical_task_id"][:-1] == logical_task)[0])
-            blocks.append(block(repeat, position))
-        for task_tokens, task_targets in blocks[1:]:
-            np.testing.assert_array_equal(blocks[0][0], task_tokens)
-            np.testing.assert_array_equal(blocks[0][1], task_targets)
-
-    reference_order = [value for value in repeats[0].info["logical_task_id"] if value >= 0]
-    target_id = int(repeats[0].info["logical_task_id"][0])
-    expected_others = [value for value in reference_order if value != target_id]
-    for repeat in repeats:
-        order = [value for value in repeat.info["logical_task_id"] if value >= 0]
-        assert [value for value in order if value != target_id] == expected_others
-
-
-def test_paired_position_controls_are_aligned_and_support_valid() -> None:
-    group = build_paired_position_group(make_family(), make_cfg(), sequence_rng(1, 9), group_id=0)
-    for position in range(8):
-        repeat, novel, shared = (group[name][position] for name in ("repeat", "novel", "shared"))
-        history = repeat.info["latents"][:8]
-        supports = {tuple(np.flatnonzero(latent)) for latent in history}
+def assert_conditions(group: dict[str, list[SequenceSample]]) -> None:
+    reference = group["repeat"][0]
+    for row, repeat in enumerate(group["repeat"]):
+        p = repeat.info["original_task_position"]
+        a = repeat.info["target_support"]
         target = repeat.info["latents"][-1]
-        assert tuple(np.flatnonzero(novel.info["latents"][-1])) not in supports
-        np.testing.assert_array_equal(
-            np.flatnonzero(shared.info["latents"][-1]), np.flatnonzero(target)
-        )
-        for control in (novel, shared):
-            assert control.info["pair_id"] == repeat.info["pair_id"]
-            np.testing.assert_array_equal(inputs(control, -1), inputs(repeat, -1))
-            np.testing.assert_array_equal(control.tokens[: -2 * 3], repeat.tokens[: -2 * 3])
+        for condition, samples in group.items():
+            sample = samples[row]
+            np.testing.assert_array_equal(block(sample, -1), block(reference, -1))
+            np.testing.assert_array_equal(
+                sample.info["base_mse"][-1], reference.info["base_mse"][-1]
+            )
+            assert not sample.info["target_module_pre_exposures"].any()
+            assert sample.info["prior_target_latent_count"] == int(condition == "repeat")
+            assert sample.info["prior_target_support_count"] == int(condition != "unexposed")
+            assert sample.info["world"] is reference.info["world"]
+            for task in range(len(sample.info["latents"])):
+                if task != p:
+                    np.testing.assert_array_equal(block(sample, task), block(repeat, task))
+            original = sample.info["latents"][p]
+            if condition == "unexposed":
+                assert not original[a].any()
+                np.testing.assert_array_equal(np.sort(original[original != 0]), np.sort(target[a]))
+            elif condition == "shared":
+                np.testing.assert_array_equal(original != 0, target != 0)
+                assert not np.array_equal(original, target)
+            core = (
+                sample.info["latents"][sample.info["background_task_indices"]][:, target == 0] != 0
+            )
+            assert check_compositional(core, len(target) - 2) and check_connected(core)
 
 
-def test_controlled_rehearsal_grid_has_exact_exposures_and_connectivity_labels() -> None:
+@pytest.mark.parametrize("modules,surplus", [(4, 0), (4, 3), (8, 0), (8, 1), (8, 4)])
+@pytest.mark.parametrize("sampler", ["constructive", "rejection"])
+@pytest.mark.parametrize("seed", [1, 7])
+def test_connected_background_and_paired_frozen_blocks(
+    modules: int, surplus: int, sampler: str, seed: int
+) -> None:
+    cfg = replace(make_cfg(), surplus_tasks=surplus, curriculum_sampler=sampler)
+    group = build_paired_position_group(
+        make_family(modules=modules), cfg, sequence_rng(seed, 2), group_id=7
+    )
+    tasks = modules - 1 + surplus
+    assert all(len(samples) == tasks for samples in group.values())
+    assert_conditions(group)
+    for condition, samples in group.items():
+        assert not any(s.info["target_module_post_exposures"].any() for s in samples)
+        for logical_task in range(tasks):
+            reference = None
+            for p, sample in enumerate(samples):
+                task = int(np.flatnonzero(sample.info["logical_task_id"] == logical_task)[0])
+                current = block(sample, task)
+                if reference is not None:
+                    np.testing.assert_array_equal(current, reference)
+                reference = current
+                assert sample.info["pair_id"] == 7 * tasks + p
+                assert sample.info["intervening_tasks"] == tasks - 1 - p
+        if condition == "unexposed":
+            assert all(
+                s.info["history_connected"] and not s.info["history_covered"] for s in samples
+            )
+        else:
+            assert all(
+                not s.info["history_connected"] and s.info["history_covered"] for s in samples
+            )
+
+
+def test_rehearsal_has_common_later_exposure_and_no_pre_exposure() -> None:
     group = build_rehearsal_position_group(
         make_family(), make_cfg(), sequence_rng(8, 3), group_id=2
     )
     assert all(len(samples) == 6 for samples in group.values())
-    seen_cells = set()
-    for repeat in group["repeat"]:
-        position = int(repeat.info["original_task_position"])
-        mode = str(repeat.info["rehearsal_mode"])
-        seen_cells.add((position, mode))
-        exposures = sorted(repeat.info["target_module_post_exposures"].tolist())
-        assert exposures == {"none": [0, 0], "one": [0, 1], "both": [1, 1]}[mode]
-        assert repeat.info["prior_target_latent_count"] == 1
-        assert repeat.info["prior_target_support_count"] == 1
-        status = repeat.info["support_status"]
-        assert status == ("disconnected_ood" if (position, mode) == (0, "none") else "connected_id")
-        assert check_connected(repeat.info["latents"][:8] != 0) == (status == "connected_id")
-    assert seen_cells == {(position, mode) for position in (0, 3) for mode in REHEARSAL_MODES}
+    assert_conditions(group)
+    for condition, samples in group.items():
+        for sample in samples:
+            mode = sample.info["rehearsal_mode"]
+            post = sample.info["target_module_post_exposures"]
+            assert sorted(post) == {"none": [0, 0], "one": [0, 1], "both": [1, 1]}[mode]
+            np.testing.assert_array_equal(
+                sample.info["constituent_task_exposures"], post + int(condition != "unexposed")
+            )
+        for start in (0, 3):
+            none, one, both = samples[start : start + 3]
+            changed = np.any(none.info["latents"] != both.info["latents"], axis=1)
+            np.testing.assert_array_equal(
+                np.flatnonzero(changed), np.sort(none.info["rehearsal_positions"])
+            )
+            slots = none.info["rehearsal_positions"]
+            np.testing.assert_array_equal(block(one, int(slots[0])), block(both, int(slots[0])))
+            np.testing.assert_array_equal(block(one, int(slots[1])), block(none, int(slots[1])))
+            for task in range(9):
+                np.testing.assert_array_equal(block(none, task)[0][::2], block(both, task)[0][::2])
 
 
-def test_controlled_rehearsal_reuses_world_inputs_and_control_latents() -> None:
-    group = build_rehearsal_position_group(
-        make_family(), make_cfg(), sequence_rng(2, 4), group_id=5
-    )
-    repeats = group["repeat"]
-    world = repeats[0].info["world"]
-    final_inputs = inputs(repeats[0], -1)
-    for offset, repeat in enumerate(repeats):
-        assert repeat.info["world"] is world
-        np.testing.assert_array_equal(inputs(repeat, -1), final_inputs)
-        np.testing.assert_array_equal(
-            group["novel"][offset].info["latents"][-1],
-            group["novel"][0].info["latents"][-1],
+def test_rehearsal_requires_connected_core_and_two_later_slots() -> None:
+    with pytest.raises(ValueError, match="T>=M"):
+        build_rehearsal_position_group(
+            make_family(), replace(make_cfg(), surplus_tasks=0), sequence_rng(0, 0), group_id=0
         )
-        np.testing.assert_array_equal(
-            group["shared"][offset].info["latents"][-1],
-            group["shared"][0].info["latents"][-1],
+    with pytest.raises(ValueError, match="post-middle"):
+        build_rehearsal_position_group(
+            make_family(modules=4),
+            replace(make_cfg(), surplus_tasks=0),
+            sequence_rng(0, 0),
+            group_id=0,
         )
 
-    for position_offset in (0, 3):
-        position_rows = [
-            row for row in repeats if row.info["original_task_position"] == position_offset
-        ]
-        for task in range(8):
-            blocks = [inputs(row, task) for row in position_rows]
-            for block in blocks[1:]:
-                np.testing.assert_array_equal(blocks[0], block)
 
-        histories = {row.info["rehearsal_mode"]: row.info["latents"][:8] for row in position_rows}
-        none, one, both = (histories[mode] for mode in REHEARSAL_MODES)
-        assert np.any(none != one, axis=1).sum() == 1
-        assert np.any(none != both, axis=1).sum() == 2
-
-    novel = group["novel"][0].info["latents"][-1]
-    novel_support = tuple(np.flatnonzero(novel))
-    for repeat in repeats:
-        supports = {tuple(np.flatnonzero(latent)) for latent in repeat.info["latents"][:8]}
-        assert novel_support not in supports
-
-
-def test_rehearsed_constituent_is_balanced_across_worlds() -> None:
-    family, cfg = make_family(), make_cfg()
+def test_rehearsed_constituent_balances_worlds() -> None:
     selected = []
-    for group_id in range(8):
+    for world in range(4):
         group = build_rehearsal_position_group(
-            family, cfg, sequence_rng(12, group_id), group_id=group_id
+            make_family(), make_cfg(), sequence_rng(12, world), group_id=world
         )
-        one = next(
-            sample
-            for sample in group["repeat"]
-            if sample.info["original_task_position"] == 0 and sample.info["rehearsal_mode"] == "one"
+        sample = group["repeat"][1]
+        selected.append(
+            sample.info["target_support"].tolist().index(sample.info["designated_constituent"])
         )
-        support = one.info["target_support"].tolist()
-        selected.append(support.index(one.info["designated_constituent"]))
-    assert selected.count(0) == selected.count(1) == 4
+    assert selected == [0, 1, 0, 1]
 
 
-def test_controlled_rehearsal_supports_the_connectivity_floor() -> None:
-    cfg = replace(make_cfg(), surplus_tasks=0, demos_per_task=2)
-    group = build_rehearsal_position_group(make_family(), cfg, sequence_rng(5, 1), group_id=0)
-    assert all(len(samples) == 6 for samples in group.values())
-    assert {sample.info["original_task_position"] for sample in group["repeat"]} == {0, 3}
-
-
-def test_binary_groups_omit_shared_control() -> None:
-    modes = ("novel",)
-    paired = build_paired_position_group(
+@pytest.mark.parametrize("builder", [build_paired_position_group, build_rehearsal_position_group])
+def test_generation_is_deterministic_and_binary_omits_shared(builder: Callable) -> None:
+    first = builder(
         make_family("binary"),
         make_cfg(),
-        sequence_rng(3, 1),
-        group_id=0,
-        control_modes=modes,
+        sequence_rng(1, 3),
+        group_id=3,
+        control_modes=("unexposed",),
     )
-    rehearsal = build_rehearsal_position_group(
+    second = builder(
         make_family("binary"),
         make_cfg(),
-        sequence_rng(3, 2),
-        group_id=0,
-        control_modes=modes,
+        sequence_rng(1, 3),
+        group_id=3,
+        control_modes=("unexposed",),
     )
-    assert set(paired) == set(rehearsal) == {"repeat", "novel"}
+    assert set(first) == {"repeat", "unexposed"}
+    for condition in first:
+        for left, right in zip(first[condition], second[condition], strict=True):
+            np.testing.assert_array_equal(left.tokens, right.tokens)
+
+
+def test_shared_control_resamples_equal_serialized_weights(monkeypatch: pytest.MonkeyPatch) -> None:
+    family = make_family()
+    target = np.array([0.25, 0.75, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    different = target.copy()
+    different[:2] = [0.75, 0.25]
+    candidates = iter([target.copy(), different])
+    monkeypatch.setattr(family, "apply_weighting", lambda *_: next(candidates))
+    np.testing.assert_array_equal(
+        sample_retention_control_latent(family, target, sequence_rng(1, 0), "shared", 2), different
+    )
+    monkeypatch.setattr(family, "apply_weighting", lambda *_: target.copy())
+    with pytest.raises(RuntimeError, match="distinct"):
+        sample_retention_control_latent(family, target, sequence_rng(1, 0), "shared", 2)
+    with pytest.raises(ValueError, match="binary"):
+        sample_retention_control_latent(
+            make_family("binary"), target, sequence_rng(1, 0), "shared", 2
+        )
+    with pytest.raises(ValueError, match="full_rank"):
+        build_paired_position_group(
+            family, replace(make_cfg(), require_full_rank=True), sequence_rng(1, 0), group_id=0
+        )

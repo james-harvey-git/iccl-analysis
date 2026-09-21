@@ -203,6 +203,7 @@ class Trainer:
             load_eval_suites(
                 eval_dir,
                 select=is_monitor_suite,
+                monitor=True,
             )
             if monitor_enabled
             else {}
