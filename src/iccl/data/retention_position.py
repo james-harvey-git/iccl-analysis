@@ -1,4 +1,17 @@
-"""Frozen worlds paired across encounter interventions, delays and rehearsal."""
+"""Build matched retention episodes by varying an earlier encounter with a task.
+
+Each world fixes the teacher and final probe, including its fresh input examples.
+The designated history block contains either the exact final task, its module
+pair with different weights, or a replacement using neither target module.
+Other history blocks cover and connect the non-target modules.
+
+The standard builder moves the designated encounter through every history
+position, preserving complete task blocks and background order to pair delays
+within a world. Target modules occur nowhere else in the history. The separate
+rehearsal builder uses first/middle encounter positions and adds controlled later
+exposure to neither, one, or both target modules, shared across encounter
+conditions. Neither builder exposes target modules before the encounter.
+"""
 
 from dataclasses import replace
 

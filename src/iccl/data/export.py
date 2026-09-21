@@ -284,10 +284,6 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
     count = int(eval_cfg.num_sequences)
     if count < 1:
         raise ValueError(f"eval_sets.num_sequences must be positive, got {count}")
-    if "position_diagnostic" in eval_cfg.retention:
-        raise ValueError(
-            "obsolete position_diagnostic config; use retention.num_worlds and regenerate"
-        )
     worlds = int(eval_cfg.retention.num_worlds)
     monitor_count = int(eval_cfg.retention.monitor_num_sequences)
     if worlds < 1:

@@ -100,18 +100,23 @@ def test_evaluation_preserves_the_configured_trajectory_order() -> None:
 
 
 @pytest.mark.parametrize(
-    ("key", "value"),
+    ("key", "value", "compatible"),
     [
-        ("model.n_heads", 4),
-        ("model.norm_eps", 0.01),
-        ("data.input_dim", 8),
-        ("data.hidden_dims", [32]),
-        ("data.use_bias", False),
-        ("data.scale", 2.0),
-        ("data.sequence.signal_boundaries", False),
+        ("model.n_heads", 4, False),
+        ("model.norm_eps", 0.01, False),
+        ("data.input_dim", 8, False),
+        ("data.output_dim", 8, False),
+        ("model.backend", "reference", True),
+        ("data.hidden_dims", [32], True),
+        ("data.use_bias", False, True),
+        ("data.scale", 2.0, True),
+        ("data.num_modules", 10, True),
+        ("data.sequence.signal_boundaries", False, True),
+        ("data.eval_sets.retention.controls", ["unexposed"], True),
+        ("data.eval_sets.retention.num_worlds", 512, True),
     ],
 )
-def test_evaluation_rejects_incompatible_checkpoint_config(key: str, value: Any) -> None:
+def test_evaluation_checks_model_compatibility_only(key: str, value: Any, compatible: bool) -> None:
     cfg = OmegaConf.create(
         {
             "model": {"n_heads": 2, "norm_eps": 1e-5, "backend": "auto"},
@@ -123,15 +128,16 @@ def test_evaluation_rejects_incompatible_checkpoint_config(key: str, value: Any)
                 "scale": 1.0,
                 "num_modules": 8,
                 "sequence": {"signal_boundaries": True},
-                "eval_sets": {"retention": {"controls": ["novel", "shared"]}},
+                "eval_sets": {
+                    "retention": {"controls": ["unexposed", "shared"], "num_worlds": 256}
+                },
             },
         }
     )
     checkpoint = {"config": OmegaConf.to_container(cfg, resolve=True)}
-    cfg.data.eval_sets.retention.controls = ["unexposed", "shared"]
-    cfg.data.num_modules = 10
-    cfg.model.backend = "reference"
-    validate_evaluation_config(checkpoint, cfg)
     OmegaConf.update(cfg, key, value)
-    with pytest.raises(ValueError, match="differs from the checkpoint"):
+    if compatible:
         validate_evaluation_config(checkpoint, cfg)
+    else:
+        with pytest.raises(ValueError, match="differs from the checkpoint"):
+            validate_evaluation_config(checkpoint, cfg)

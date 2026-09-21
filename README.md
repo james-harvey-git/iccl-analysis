@@ -133,10 +133,11 @@ requires T≥M and at least two intervening tasks; unsupported cells fail explic
 Regenerate frozen bundles and numerical evaluations for this protocol; historical
 novel-final-task results cannot be relabelled as unexposed-history results. Old
 checkpoint weights remain usable with the current explicit evaluation configuration.
+Evaluation requires the checkpoint's model architecture and input/output dimensions;
+teacher parameters, task distributions and evaluation-suite settings may differ.
 `eval_sets.retention.num_worlds` owns full retention sampling;
 `eval_sets.retention.monitor_num_sequences` controls only the live subset.
 `eval_sets.num_sequences` still controls ICL/composition and training validation.
-The obsolete `retention.position_diagnostic.num_worlds` setting is rejected.
 Training data generation and its golden-stream checksums are unchanged. W&B jobs
 record the metric protocol and start fresh reporting runs; they do not resume
 historical metric series with different definitions.
