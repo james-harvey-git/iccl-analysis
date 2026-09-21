@@ -26,8 +26,8 @@ from iccl.evaluation.results import read_rows
 
 Row = dict[str, Any]
 CONDITIONS = {
-    "constituent": ("Exposed", "#6A3D9A", "-"),
-    "matched_prefix": ("Unexposed", "#0072B2", "--"),
+    "exposed": ("Exposed", "#6A3D9A", "-"),
+    "unexposed": ("Unexposed", "#0072B2", "--"),
     "no_history": ("No history", "#666666", "-."),
 }
 
@@ -59,6 +59,8 @@ def select_composition(
             [r for r in rows if r["condition"] == condition and r["curve_type"] == kind],
             key=lambda r: r["x_value"],
         )
+        if condition == "no_history" and not selected:
+            continue
         if [r["x_value"] for r in selected] != list(range(demos)):
             raise ValueError(f"Expected one complete {condition} curve for {cell}")
         if any(r["x_name"] != "demo_index" for r in selected):
@@ -96,14 +98,14 @@ def select_composition(
     }
     if len(common) != 1 or next(iter(common))[-1] <= 0:
         raise ValueError("Curves must share a checkpoint, cell and episode count")
-    base = curves["constituent"][0]
+    base = curves["exposed"][0]
     if (
         base["step"] != manifest["step"]
         or base["checkpoint_reference"] != manifest["checkpoint_reference"]
     ):
         raise ValueError("Curve checkpoint provenance disagrees with its manifest")
     pair_groups = set()
-    for condition in CONDITIONS:
+    for condition in (c for c in CONDITIONS if c in curves):
         row = curves[condition][0]
         meta = manifest["suites"][row["suite"]]
         if (
@@ -120,7 +122,7 @@ def select_composition(
         raise ValueError("Paired benefit must refer to the exposed suite")
     means = {key: np.array([r["nmse"] for r in group]) for key, group in curves.items()}
     if not np.allclose(
-        means["benefit"], means["matched_prefix"] - means["constituent"], rtol=1e-8, atol=1e-10
+        means["benefit"], means["unexposed"] - means["exposed"], rtol=1e-8, atol=1e-10
     ):
         raise ValueError("Saved benefit disagrees with unexposed minus exposed errors")
     if not np.isclose(means["benefit"].mean(), summary["value"], rtol=1e-8, atol=1e-10):
@@ -159,6 +161,8 @@ def render_panels(curves: dict[str, list[Row]], root: Path, *, show_ci: bool) ->
             fig.subplots_adjust(left=0.17, right=0.98, bottom=0.22, top=0.97)
             ymin, ymax = 0.0, 0.0
             for condition in conditions:
+                if condition not in curves:
+                    continue
                 rows = curves[condition]
                 x = np.array([r["x_value"] + 1 for r in rows])
                 mean, low, high = (

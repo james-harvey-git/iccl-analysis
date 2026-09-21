@@ -61,7 +61,13 @@ def _row(suite: dict[str, Any], index: int, condition: str, rehearsal: bool) -> 
             expected_post[support == designated] = 1
         if mode == "both":
             expected_post[:] = 1
-        _require(not np.any(active[slots][:, support].sum(axis=1) > 1), "target-pair rehearsal")
+        _equal(
+            active[slots][:, support].sum(axis=1),
+            [int(mode != "none"), int(mode == "both")],
+            "incorrect rehearsal slot exposures",
+        )
+        if mode != "none":
+            _require(bool(active[slots[0], designated]), "incorrect first rehearsed constituent")
     else:
         _require(mode == "natural" and len(slots) == 0, "rehearsal leaked into standard retention")
     _equal(post, expected_post, "incorrect target post-exposure")
@@ -92,6 +98,9 @@ def _row(suite: dict[str, Any], index: int, condition: str, rehearsal: bool) -> 
         "history_covered": check_compositional(active, modules),
         "history_connected": check_connected(active),
         "presentation_category": task_categories(latents),
+        "generation_category": task_categories(latents),
+        "support_status": ("connected" if check_connected(active) else "disconnected")
+        + ("_covered" if check_compositional(active, modules) else "_partial"),
         "condition": condition,
         "exposure_scope": "original_encounter" if rehearsal else "history",
     }
@@ -101,6 +110,12 @@ def _row(suite: dict[str, Any], index: int, condition: str, rehearsal: bool) -> 
         "target latent count",
     )
     _equal(np.all(active == (target != 0), axis=1).sum(), exposed, "target pair count")
+    expected["num_unique_supports_seen"] = np.array(
+        [len({tuple(np.flatnonzero(v)) for v in latents[:i]}) for i in range(len(latents))]
+    )
+    expected["num_modules_covered"] = np.array(
+        [np.any(latents[:i] != 0, axis=0).sum() for i in range(len(latents))]
+    )
     for key, value in expected.items():
         _equal(suite[key][index], value, f"stale {key} metadata")
 
@@ -121,6 +136,13 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
     _require(len(np.unique(repeat["pair_id"])) == count, "duplicate pair identifiers")
     for condition, suite in conditions.items():
         _equal(suite["__meta__"].get("protocol"), protocol, "mixed protocols")
+        _equal(suite["protocol"], np.full(count, protocol), "stale row protocol")
+        if "monitor_indices" in meta:
+            _equal(
+                suite["__meta__"].get("monitor_indices"),
+                meta["monitor_indices"],
+                "conditions select different monitor rows",
+            )
         for key in (
             "pair_id",
             "position_group_id",
@@ -180,6 +202,26 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
         for suite in conditions.values():
             reference = int(rows[0])
             for index in rows:
+                for key in (k for k in suite if k.startswith("world_")):
+                    _equal(
+                        suite[key][index],
+                        suite[key][reference],
+                        "world changes across positions/modes",
+                    )
+                if not rehearsal:
+                    for task, logical in enumerate(suite["logical_task_id"][index, :-1]):
+                        reference_task = np.flatnonzero(
+                            suite["logical_task_id"][reference] == logical
+                        )
+                        _require(len(reference_task) == 1, "invalid logical task identity")
+                        begin, end = suite["task_spans"][index, task]
+                        ref_begin, ref_end = suite["task_spans"][reference, int(reference_task[0])]
+                        for key in ("tokens", "targets"):
+                            _equal(
+                                suite[key][index, begin:end],
+                                suite[key][reference, ref_begin:ref_end],
+                                "logical block changed across delays",
+                            )
                 final_start = int(suite["task_spans"][index, -1, 0])
                 for key in ("tokens", "targets"):
                     _equal(
@@ -206,6 +248,15 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
                     aligned = rows[positions == position]
                     base = int(aligned[np.flatnonzero(modes[positions == position] == "none")[0]])
                     slots = suite["rehearsal_positions"][base]
+                    one = int(aligned[np.flatnonzero(modes[positions == position] == "one")[0]])
+                    both = int(aligned[np.flatnonzero(modes[positions == position] == "both")[0]])
+                    first_start, first_end = suite["task_spans"][base, int(slots[0])]
+                    for key in ("tokens", "targets"):
+                        _equal(
+                            suite[key][one, first_start:first_end],
+                            suite[key][both, first_start:first_end],
+                            "rehearsal block differs between one and both",
+                        )
                     for index in aligned:
                         _equal(suite["rehearsal_positions"][index], slots, "rehearsal slot drift")
                         mask = np.ones(suite["tokens"].shape[1], dtype=bool)

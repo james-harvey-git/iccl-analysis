@@ -288,7 +288,7 @@ def test_full_evaluation_logs_one_summary_table_and_explicit_figures(
     assert payload["evaluation/icl_within_task"] is figure
 
 
-def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
+def test_monitor_logs_only_scalars_and_seven_step_versioned_figures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run = FakeRun()
@@ -307,19 +307,23 @@ def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
     curve_specs = (
         ("icl", "ordinary", "within_task_learning"),
         ("icl", "ordinary", "episode_learning"),
-        ("composition", "constituent", "composition_learning"),
-        ("composition", "matched_prefix", "composition_learning"),
+        ("composition", "exposed", "composition_learning"),
+        ("composition", "unexposed", "composition_learning"),
         ("composition", "no_history", "composition_learning"),
         ("retention", "original", "retention_learning"),
         ("retention", "repeat", "retention_learning"),
-        ("retention", "novel", "retention_learning"),
+        ("retention", "unexposed", "retention_learning"),
         ("retention", "shared", "retention_learning"),
+        ("retention", "unexposed", "retention_error_delay"),
+        ("retention", "repeat", "retention_error_delay"),
+        ("retention", "savings", "retention_delay"),
     )
     curves = [
         {
             "capability": capability,
             "condition": condition,
             "curve_type": curve_type,
+            "retention_component": "total" if curve_type == "retention_delay" else None,
             "x_value": 0,
             "nmse": 0.4,
             "ci_low": 0.3,
@@ -340,6 +344,9 @@ def test_monitor_logs_only_scalars_and_four_step_versioned_figures(
         "monitor-curves/icl_across_episode",
         "monitor-curves/composition_final_task",
         "monitor-curves/retention_final_task",
+        "monitor-curves/retention_unexposed_vs_delay",
+        "monitor-curves/retention_repeat_vs_delay",
+        "monitor-curves/retention_total_savings_vs_delay",
     }
     assert len(set(payload) - {key for key in payload if key.startswith("monitor-curves/")}) == 5
     assert path == tmp_path / "monitor" / "step_0005000.npz"

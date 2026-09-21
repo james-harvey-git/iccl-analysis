@@ -7,8 +7,10 @@ Examples:
 """
 
 import argparse
+import json
 from pathlib import Path
 
+from iccl.evaluation.metrics import METRIC_VERSION
 from iccl.evaluation.results import read_rows
 from iccl.reporting.figures import evaluation_figures, write_html_figures
 
@@ -43,6 +45,9 @@ def main() -> None:
 
     total = 0
     for step_dir in step_dirs:
+        manifest = json.loads((step_dir / "manifest.json").read_text())
+        if manifest.get("metric_version") != METRIC_VERSION:
+            raise ValueError("Obsolete evaluation protocol; regenerate results before plotting")
         figures = evaluation_figures(
             read_rows(step_dir / "summary.csv"),
             read_rows(step_dir / "curves.csv"),

@@ -29,7 +29,7 @@ from iccl.evaluation.results import read_rows
 Row = dict[str, Any]
 LEARNING = {
     "original": ("Original", "#666666", "--"),
-    "novel": ("Novel", "#0072B2", "-"),
+    "unexposed": ("Unexposed", "#0072B2", "-"),
     "shared": ("Shared", "#D55E00", "--"),
     "repeat": ("Repeat", "#6A3D9A", "-"),
 }
@@ -66,6 +66,11 @@ def select_retention(
         if r["capability"] == "retention" and (r["M"], r["T"], r["D"]) == cell
     ]
 
+    if any(r.get("sample_scope") != "full" for r in (*curves, *summaries)):
+        raise ValueError(
+            "Retention paper plots require full paired-world results, not monitoring subsets"
+        )
+
     def curve(kind: str, condition: str, component: str = "") -> list[Row]:
         selected = sorted(
             [r for r in curves if r["curve_type"] == kind and r["condition"] == condition],
@@ -81,10 +86,17 @@ def select_retention(
         _check_values(selected, "nmse", nonnegative=kind == "retention_learning")
         return selected
 
-    learning = {condition: curve("retention_learning", condition) for condition in LEARNING}
+    conditions = [
+        condition
+        for condition in LEARNING
+        if condition != "shared" or any(r["condition"] == "shared" for r in curves)
+    ]
+    learning = {condition: curve("retention_learning", condition) for condition in conditions}
     savings = {}
     summary = {}
     for component, (condition, _, _) in COMPONENTS.items():
+        if component != "total" and "shared" not in learning:
+            continue
         savings[component] = curve("retention_savings", condition, component)
         selected = [
             r
@@ -108,10 +120,12 @@ def select_retention(
         raise ValueError("Retention rows must describe one checkpoint, suite and episode count")
     means = {key: np.array([r["nmse"] for r in rows]) for key, rows in learning.items()}
     for component, (lhs, rhs) in {
-        "total": ("novel", "repeat"),
-        "module": ("novel", "shared"),
+        "total": ("unexposed", "repeat"),
+        "module": ("unexposed", "shared"),
         "episodic": ("shared", "repeat"),
     }.items():
+        if component not in savings:
+            continue
         values = np.array([r["nmse"] for r in savings[component]])
         if not np.allclose(values, means[lhs] - means[rhs], rtol=1e-8, atol=1e-10):
             raise ValueError(f"Saved {component} curve disagrees with learning-curve differences")
@@ -137,8 +151,14 @@ def audit_configurations(curves: list[Row], summaries: list[Row]) -> list[Row]:
             for key in ("value", "ci_low", "ci_high"):
                 row[f"{component}_{key}"] = estimate[key]
         total = summary["total"]["value"]
-        row["module_fraction_of_total"] = summary["module"]["value"] / total if total > 0 else None
-        row["module_exceeds_episodic"] = summary["module"]["value"] > summary["episodic"]["value"]
+        row["module_fraction_of_total"] = (
+            summary["module"]["value"] / total if total > 0 and "module" in summary else None
+        )
+        row["module_exceeds_episodic"] = (
+            summary["module"]["value"] > summary["episodic"]["value"]
+            if "module" in summary
+            else None
+        )
         for condition, rows in learning.items():
             row[f"{condition}_mean_nmse"] = float(np.mean([r["nmse"] for r in rows]))
         for index, estimate in enumerate(savings["total"][:2], start=1):
@@ -177,6 +197,8 @@ def render_panels(
         fig.subplots_adjust(left=0.17, right=0.98, bottom=0.22, top=0.97)
         ymax = 0.0
         for condition, (label, colour, style) in LEARNING.items():
+            if condition not in learning:
+                continue
             rows = learning[condition]
             x = np.array([r["x_value"] + 1 for r in rows])
             mean, low, high = (
@@ -207,7 +229,9 @@ def render_panels(
         fig, ax = plt.subplots(figsize=(3.3, 2.5))
         fig.subplots_adjust(left=0.27, right=0.97, bottom=0.22, top=0.97)
         xmin, xmax = 0.0, 0.0
-        for y, (component, (_, _label, colour)) in zip((2, 1, 0), COMPONENTS.items(), strict=True):
+        for y, (component, (_, _label, colour)) in enumerate(
+            reversed([(c, COMPONENTS[c]) for c in summary])
+        ):
             row = summary[component]
             mean, low, high = (row[k] for k in ("value", "ci_low", "ci_high"))
             xmin, xmax = min(xmin, low if show_ci else mean), max(xmax, high if show_ci else mean)
@@ -230,8 +254,8 @@ def render_panels(
             xlabel="Mean savings (nMSE)",
             xlim=(xmin - 0.05 * span, xmax + 0.15 * span),
             ylim=(-0.6, 2.65),
-            yticks=[2, 1, 0],
-            yticklabels=[item[1] for item in COMPONENTS.values()],
+            yticks=list(reversed(range(len(summary)))),
+            yticklabels=[COMPONENTS[c][1] for c in summary],
         )
         ax.xaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
         ax.axvline(0, color="0.7", linewidth=0.7, linestyle="--", zorder=0)
@@ -294,7 +318,7 @@ def main() -> None:
         "checkpoint_reference": manifest["checkpoint_reference"],
         "metric_version": manifest["metric_version"],
         "bootstrap_replicates": replicates,
-        "aggregation": "equal-delay mean, bootstrap episodes within delay groups",
+        "aggregation": "equal-delay mean, bootstrap whole worlds retaining all delays",
         "confidence_intervals": (
             "saved marginal intervals for curves, saved paired intervals for savings"
         ),

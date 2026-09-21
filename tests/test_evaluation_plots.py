@@ -96,14 +96,14 @@ def test_installed_wandb_adapter_preserves_plotly_dropdowns() -> None:
     assert serialized["layout"]["updatemenus"][0]["buttons"][0]["label"] == "cell"
 
 
-def test_position_diagnostic_adds_only_two_compact_figures() -> None:
+def test_retention_delay_and_rehearsal_figures_remain_separate() -> None:
     rows = []
     for component in ("total", "module", "episodic"):
         for position in range(4):
             rows.append(
-                curve_row("m04__t04__d032", 4, "retention_position", position)
+                curve_row("m04__t04__d032", 4, "retention_delay", position)
                 | {
-                    "capability": "retention_position",
+                    "capability": "retention",
                     "condition": "savings",
                     "diagnostic_family": "paired_permutation",
                     "retention_component": component,
@@ -116,7 +116,7 @@ def test_position_diagnostic_adds_only_two_compact_figures() -> None:
                 rows.append(
                     curve_row("m04__t04__d032", 4, "retention_rehearsal", position)
                     | {
-                        "capability": "retention_position",
+                        "capability": "rehearsal",
                         "condition": mode,
                         "diagnostic_family": "controlled_rehearsal",
                         "retention_component": component,
@@ -124,19 +124,19 @@ def test_position_diagnostic_adds_only_two_compact_figures() -> None:
                         "original_task_position": position,
                         "intervening_tasks": 3 - position,
                         "support_status": (
-                            "disconnected_ood"
+                            "disconnected_covered"
                             if mode == "none" and position == 0
-                            else "connected_id"
+                            else "connected_covered"
                         ),
                     }
                 )
 
     figures = evaluation_figures([], rows)
     assert set(figures) == {
-        "evaluation/retention_position",
+        "evaluation/retention_vs_intervening_tasks",
         "evaluation/retention_rehearsal",
     }
-    assert len(cast(Any, figures["evaluation/retention_position"].data)) == 3
+    assert len(cast(Any, figures["evaluation/retention_vs_intervening_tasks"].data)) == 3
     rehearsal = figures["evaluation/retention_rehearsal"]
     assert len(cast(Any, rehearsal.data)) == 9
     assert len(cast(Any, rehearsal.layout).updatemenus[0].buttons) == 3

@@ -4,6 +4,7 @@ from typing import Any
 
 import plotly.graph_objects as go
 
+from iccl.reporting.figures import _trace_label
 from iccl.visualization import grouped_figure
 
 
@@ -34,7 +35,7 @@ def canonical_monitor_scalars(summary_rows: list[dict[str, Any]]) -> dict[str, f
 
 
 def canonical_monitor_figures(curve_rows: list[dict[str, Any]], step: int) -> dict[str, go.Figure]:
-    """Four nMSE panels for the canonical cell at one training step."""
+    """Canonical nMSE panels for the canonical cell at one training step."""
     specifications = (
         (
             "monitor-curves/icl_within_task",
@@ -77,5 +78,52 @@ def canonical_monitor_figures(curve_rows: list[dict[str, Any]], step: int) -> di
                 x_title=x_title,
                 y_title="normalized MSE",
                 group_fields=groups,
+                trace_names={row["condition"]: _trace_label(row, "condition") for row in rows},
+                hover_fields=("M", "T", "D", "n_sequences", "sample_scope"),
             )
+    for condition, title in (
+        ("unexposed", "Unexposed final-task error"),
+        ("repeat", "Exact-repeat final-task error"),
+        ("savings", "Total retention savings"),
+    ):
+        rows = [
+            row
+            for row in curve_rows
+            if (row["curve_type"] == "retention_error_delay" and row["condition"] == condition)
+            or (
+                condition == "savings"
+                and row["curve_type"] == "retention_delay"
+                and row.get("retention_component") == "total"
+            )
+        ]
+        if not rows:
+            continue
+        label = "total_savings" if condition == "savings" else condition
+        key = f"monitor-curves/retention_{label}_vs_delay"
+        figures[key] = grouped_figure(
+            rows,
+            title=f"{title} — training step {step:,}",
+            x_field="x_value",
+            y_field="nmse",
+            x_title="intervening tasks",
+            y_title="normalized MSE",
+            group_fields=(),
+            hover_fields=("M", "T", "D", "n_sequences", "original_task_position", "sample_scope"),
+        )
+        if condition == "savings":
+            figures[key].add_hline(y=0, line_dash="dot", line_color="gray")
+            figures[key].update_yaxes(rangemode="tozero")
+    error_keys = [
+        f"monitor-curves/retention_{condition}_vs_delay" for condition in ("unexposed", "repeat")
+    ]
+    if all(key in figures for key in error_keys):
+        rows = [
+            row
+            for row in curve_rows
+            if row["curve_type"] == "retention_error_delay"
+            and row["condition"] in {"unexposed", "repeat"}
+        ]
+        upper = max(float(row["ci_high"]) for row in rows)
+        for key in error_keys:
+            figures[key].update_yaxes(range=[0, max(upper * 1.05, 1e-6)])
     return figures

@@ -1,9 +1,12 @@
 """Checkpoint resolution and source-run provenance."""
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
 from omegaconf import DictConfig
 
 WANDB_SCHEME = "wandb://"
@@ -68,3 +71,26 @@ def resolve_checkpoint_path(reference: str) -> tuple[Path, bool]:
             "series has many, so download it and pass the path of the one to score"
         )
     return checkpoints[0], True
+
+
+def checkpoint_model_config(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Architecture and token dimensions, independent of execution backend."""
+    cfg = checkpoint["config"]
+    model = dict(cfg["model"])
+    model.pop("backend", None)
+    return {
+        "model": model,
+        "data": {key: cfg["data"][key] for key in ("input_dim", "output_dim")},
+    }
+
+
+def checkpoint_model_digest(checkpoint: dict[str, Any]) -> str:
+    """Hash architecture and tensors rather than serialization or optimizer state."""
+    digest = hashlib.sha256(
+        json.dumps(checkpoint_model_config(checkpoint), sort_keys=True).encode()
+    )
+    for name, tensor in sorted(checkpoint["model"].items()):
+        value = tensor.detach().cpu().contiguous()
+        digest.update(json.dumps([name, str(value.dtype), list(value.shape)]).encode())
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()

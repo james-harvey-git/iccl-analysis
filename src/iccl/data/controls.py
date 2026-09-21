@@ -71,7 +71,10 @@ def build_paired_retention_control(
         raise ValueError(f"unknown retention-control mode: {mode}")
     history = sequence.info["latents"][:-1].copy()
     history[int(sequence.info["original_task_position"])] = latent
-    return _replace_history(family, sequence, history)
+    control = _replace_history(family, sequence, history)
+    control.info["task_origin"] = control.info["task_origin"].copy()
+    control.info["task_origin"][-1] = TASK_ORIGIN_CODES["final"]
+    return control
 
 
 def _composition_latents(

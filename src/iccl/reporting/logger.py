@@ -9,6 +9,7 @@ uploaded as W&B artifacts, which survive the run directory and let W&B record
 which weights produced which numbers.
 """
 
+import json
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -18,7 +19,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
 from iccl.checkpoints import SourceRun
-from iccl.evaluation.metrics import EvaluationReport
+from iccl.evaluation.metrics import METRIC_VERSION, EvaluationReport
 from iccl.evaluation.results import SUMMARY_COLUMNS
 from iccl.reporting.monitor import canonical_monitor_figures, canonical_monitor_scalars
 
@@ -94,6 +95,7 @@ class RunLogger:
             "checkpoints": repo_relative(self.out_dir / "checkpoints"),
             "snapshots": repo_relative(self.out_dir / "snapshots"),
         }
+        config["evaluation_protocol"] = METRIC_VERSION
         tags = [self.job_type]
         notes = None
         if self.source is not None:
@@ -116,6 +118,7 @@ class RunLogger:
             # None is W&B's "generate one", so an unset name needs no branch.
             name=self.cfg.wandb.get("name"),
             job_type=self.job_type,
+            resume="never",
             tags=tags,
             notes=notes,
             config=config,
@@ -169,6 +172,17 @@ class RunLogger:
         """Report one version of the compact canonical capability monitor."""
         metrics = canonical_monitor_scalars(report.summary_rows)
         path = self._log_curves(report.curves, step, directory="monitor")
+        path.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "step": step,
+                    "metric_version": METRIC_VERSION,
+                    "summary_rows": report.summary_rows,
+                    "curve_rows": report.curve_rows,
+                },
+                indent=2,
+            )
+        )
         if self.run is not None:
             import wandb
 

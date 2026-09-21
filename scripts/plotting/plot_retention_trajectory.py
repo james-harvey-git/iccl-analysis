@@ -1,8 +1,8 @@
 """Matched retention-position trajectories from local training snapshots.
 
-Only the exact-repeat and novel-pair conditions of the paired-permutation
+Only the exact-repeat and unexposed-pair conditions of the fully paired canonical retention
 diagnostic are scored. The existing evaluator defines total savings and performs
-the whole-world bootstrap. Plots show total savings, novel-task error and
+the whole-world bootstrap. Plots show total savings, unexposed-task error and
 repeat-task error against the number of intervening tasks, without smoothing.
 The two error plots use the same y-axis limits and all plots share a colour scale.
 
@@ -25,7 +25,6 @@ Use --plot-steps to choose another set of displayed checkpoints.
 """
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,12 +36,19 @@ import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-import iccl.evaluation.metrics as evaluation_metrics
-from iccl.checkpoints import source_from_checkpoint
+from iccl.checkpoints import (
+    checkpoint_model_config,
+    checkpoint_model_digest,
+    source_from_checkpoint,
+)
 from iccl.data.eval_bundle import validate_eval_bundle
-from iccl.evaluation.metrics import METRIC_VERSION, _aggregate, evaluate_suites, load_eval_suites
-from iccl.evaluation.results import read_rows, write_evaluation_results
-from iccl.evaluation.retention_position import _matrix
+from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
+from iccl.evaluation.results import (
+    evaluation_identity,
+    read_rows,
+    validate_cached_results,
+    write_evaluation_results,
+)
 from iccl.models.model import model_from_config
 from iccl.training.trainer import resolve_autocast_dtype
 from iccl.utils import resolve_device, seed_everything
@@ -57,29 +63,6 @@ class Snapshot:
     step: int
     path: Path
     model_sha256: str
-
-
-def checkpoint_model_config(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    """Architecture and token dimensions, independent of execution backend."""
-    cfg = checkpoint["config"]
-    model = dict(cfg["model"])
-    model.pop("backend", None)
-    return {
-        "model": model,
-        "data": {key: cfg["data"][key] for key in ("input_dim", "output_dim")},
-    }
-
-
-def checkpoint_model_digest(checkpoint: dict[str, Any]) -> str:
-    """Hash architecture and tensors rather than serialization or optimizer state."""
-    digest = hashlib.sha256(
-        json.dumps(checkpoint_model_config(checkpoint), sort_keys=True).encode()
-    )
-    for name, tensor in sorted(checkpoint["model"].items()):
-        value = tensor.detach().cpu().contiguous()
-        digest.update(json.dumps([name, str(value.dtype), list(value.shape)]).encode())
-        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
-    return digest.hexdigest()
 
 
 def discover_snapshot_series(
@@ -167,38 +150,22 @@ def requested_steps(cfg: argparse.Namespace) -> list[int]:
     return list(range(start, stop + 1, every))
 
 
-def _digest(path: Path) -> str:
-    with path.open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
-def _implementation_digest() -> str:
-    root = Path(evaluation_metrics.__file__).resolve().parents[1]
-    files = sorted(
-        path for folder in ("models", "evaluation") for path in (root / folder).glob("*.py")
-    )
-    digest = hashlib.sha256()
-    for path in files:
-        digest.update(str(path.relative_to(root)).encode())
-        digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def position_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract one complete paired-permutation total-savings curve."""
+def delay_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract one complete fully paired canonical retention total-savings curve."""
     selected = sorted(
         (
             row
             for row in rows
-            if row["capability"] == "retention_position"
-            and row["diagnostic_family"] == "paired_permutation"
-            and row["curve_type"] == "retention_position"
+            if row["capability"] == "retention"
+            and "canonical" in str(row["family_memberships"]).split("|")
+            and row.get("sample_scope") == "full"
+            and row["curve_type"] == "retention_delay"
             and row["retention_component"] == "total"
         ),
         key=lambda row: row["x_value"],
     )
     if not selected:
-        raise ValueError("No paired-permutation total-savings position curve found")
+        raise ValueError("No fully paired canonical retention total-savings position curve found")
     cells = {(row["M"], row["T"], row["D"], row["n_sequences"]) for row in selected}
     if len(cells) != 1 or [r["x_value"] for r in selected] != list(range(selected[0]["T"])):
         raise ValueError("Expected exactly one complete curve over all history-task positions")
@@ -211,73 +178,67 @@ def cached_curve(
     path: Path, expected: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     """Reuse completed results only when their identity and file checksums agree."""
-    manifest_path = path / "manifest.json"
-    if not manifest_path.exists():
+    manifest = validate_cached_results(path, expected)
+    if manifest is None:
         return None
-    manifest = json.loads(manifest_path.read_text())
-    identity = manifest.get("trajectory_identity")
-    if identity is None or (expected is not None and identity != expected):
-        raise ValueError(f"Incompatible cached evaluation in {path}. Use a different --out-dir")
-    checksums = manifest.get("trajectory_files", {})
-    if set(checksums) != {"curves.csv", "summary.csv", "raw_errors.npz", "scalars.json"}:
-        raise ValueError(f"Incomplete cached evaluation in {path}")
-    for name, checksum in checksums.items():
-        file = path / name
-        if not file.is_file() or _digest(file) != checksum:
-            raise ValueError(f"Cached result checksum mismatch: {file}")
-    rows = position_rows(read_rows(path / "curves.csv"))
+    identity = manifest["evaluation_identity"]
+    rows = delay_rows(read_rows(path / "curves.csv"))
     if {row["step"] for row in rows} != {identity["step"]}:
         raise ValueError(f"Cached curve step disagrees with its manifest: {path}")
+    names = {
+        name
+        for name, meta in manifest["suites"].items()
+        if meta.get("capability") == "retention"
+        and "canonical" in meta.get("family_memberships", ())
+        and meta.get("condition") in {"repeat", "unexposed"}
+    }
+    identity = dict(
+        identity,
+        suite_files={
+            key: value
+            for key, value in identity["suite_files"].items()
+            if any(key == name + ext for name in names for ext in (".npz", ".meta.json"))
+        },
+        selections={name: identity.get("selections", {}).get(name) for name in names},
+    )
     return identity, rows
 
 
 def condition_curves(
-    path: Path, identity: dict[str, Any], rows: list[dict[str, Any]]
+    path: Path, rows: list[dict[str, Any]]
 ) -> dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Recover final-task errors, averaging demos within each paired world.
-
-    Columns follow ascending original task position. Both conditions use the same
-    whole-world bootstrap draws, preserving their pairing across all positions.
-    Only cached arrays and metadata are needed, without snapshots or frozen tokens.
-    """
-    manifest = json.loads((path / "manifest.json").read_text())
-    names = {meta["logical_name"]: name for name, meta in manifest["raw_arrays"].items()}
-    prefix = "retention_position/paired_permutation"
+    """Read authoritative error-delay estimates, including saved paired-world CIs."""
     curves = {}
-    with np.load(path / "raw_errors.npz", allow_pickle=False) as raw:
-        groups = raw[names[f"{prefix}/position_group_id"]]
-        positions = raw[names[f"{prefix}/original_task_position"]]
-        for condition in ("novel", "repeat"):
-            suites = [
-                name
-                for name, meta in manifest["suites"].items()
-                if meta.get("capability") == "retention_position"
-                and meta.get("diagnostic_family") == "paired_permutation"
-                and meta.get("condition") == condition
-            ]
-            if len(suites) != 1:
-                raise ValueError(f"Expected one paired-permutation {condition} suite in {path}")
-            errors = raw[names[f"{suites[0]}/nmse"]]
-            expected_shape = (len(groups), rows[0]["T"] + 1, rows[0]["D"])
-            if errors.shape != expected_shape or not np.isfinite(errors[:, -1]).all():
-                raise ValueError(f"Invalid cached {condition} errors in {path}")
-            matrix, coordinates = _matrix(errors[:, -1].mean(axis=1), groups, positions)
-            if matrix.shape[0] != rows[0]["n_sequences"] or not np.array_equal(
-                coordinates, [row["x_value"] for row in rows]
-            ):
-                raise ValueError(f"Cached {condition} worlds/positions disagree with {path}")
-            curves[condition] = _aggregate(
-                matrix,
-                seed=int(identity["bootstrap_seed"]),
-                replicates=int(identity["bootstrap_replicates"]),
-            )
+    saved = read_rows(path / "curves.csv")
+    for condition in ("unexposed", "repeat"):
+        selected = sorted(
+            (
+                row
+                for row in saved
+                if row["capability"] == "retention"
+                and row["cell_id"] == rows[0]["cell_id"]
+                and row.get("sample_scope") == "full"
+                and row["curve_type"] == "retention_error_delay"
+                and row["condition"] == condition
+            ),
+            key=lambda row: row["x_value"],
+        )
+        if [row["x_value"] for row in selected] != [row["x_value"] for row in rows] or any(
+            row["n_sequences"] != rows[0]["n_sequences"] for row in selected
+        ):
+            raise ValueError(f"Incomplete cached {condition} error-delay curve in {path}")
+        curves[condition] = tuple(
+            np.array([row[key] for row in selected]) for key in ("nmse", "ci_low", "ci_high")
+        )
     if not np.allclose(
-        curves["novel"][0] - curves["repeat"][0],
+        curves["unexposed"][0] - curves["repeat"][0],
         [row["nmse"] for row in rows],
         rtol=1e-7,
         atol=1e-10,
     ):
-        raise ValueError(f"Novel minus repeat errors disagree with saved total savings in {path}")
+        raise ValueError(
+            f"Unexposed minus repeat errors disagree with saved total savings in {path}"
+        )
     return curves
 
 
@@ -317,7 +278,7 @@ def plot_retention_trajectory(
             )
         common = comparison
         coordinates = np.array([row["intervening_tasks"] for row in rows])
-        if not np.array_equal(coordinates, rows[0]["T"] - 1 - np.arange(len(rows))):
+        if not np.array_equal(coordinates, np.arange(len(rows))):
             raise ValueError(
                 f"Intervening-task counts disagree with original positions in {step_dir}"
             )
@@ -329,7 +290,7 @@ def plot_retention_trajectory(
                 "total": tuple(
                     np.array([row[key] for row in rows]) for key in ("nmse", "ci_low", "ci_high")
                 ),
-                **condition_curves(step_dir, identity, rows),
+                **condition_curves(step_dir, rows),
             }
         )
 
@@ -339,16 +300,20 @@ def plot_retention_trajectory(
     error_max = max(
         float(curves[condition][2 if show_ci else 0].max())
         for curves in series
-        for condition in ("novel", "repeat")
+        for condition in ("unexposed", "repeat")
     )
     error_min = min(
         float(curves[condition][1 if show_ci else 0].min())
         for curves in series
-        for condition in ("novel", "repeat")
+        for condition in ("unexposed", "repeat")
     )
     plots = (
         ("total", "retention-position-trajectory", "Total savings (nMSE)"),
-        ("novel", "retention-position-novel-trajectory", r"$E^{\mathrm{novel}}$ (nMSE)"),
+        (
+            "unexposed",
+            "retention-position-unexposed-trajectory",
+            r"$E^{\mathrm{unexposed}}$ (nMSE)",
+        ),
         ("repeat", "retention-position-repeat-trajectory", r"$E^{\mathrm{repeat}}$ (nMSE)"),
     )
     paths = []
@@ -466,7 +431,7 @@ def write_paper_latex(root: Path, labels: list[str], *, show_ci: bool) -> Path:
     ]
     for index, (name, caption) in enumerate(
         (
-            ("novel", "Novel-task error."),
+            ("unexposed", "Unexposed-task error."),
             ("repeat", "Repeated-task error."),
             ("savings", "Total savings."),
         )
@@ -488,7 +453,7 @@ def write_paper_latex(root: Path, labels: list[str], *, show_ci: bool) -> Path:
         "        All checkpoints use the same frozen evaluation episodes.",
         "        Errors are averaged over demonstrations in the final task",
         "        and across paired worlds.",
-        r"        Total savings are $E^{\mathrm{novel}}-E^{\mathrm{repeat}}$.",
+        r"        Total savings are $E^{\mathrm{unexposed}}-E^{\mathrm{repeat}}$.",
         "        Zero intervening tasks denotes an immediate repetition in the repeat condition.",
     ]
     if show_ci:
@@ -516,13 +481,15 @@ def _frozen_position_suites(root: Path) -> tuple[dict[str, Any], dict[str, Any]]
     suites = load_eval_suites(
         root,
         select=lambda meta: (
-            meta.get("capability") == "retention_position"
-            and meta.get("diagnostic_family") == "paired_permutation"
-            and meta.get("condition") in {"repeat", "novel"}
+            meta.get("capability") == "retention"
+            and "canonical" in meta.get("family_memberships", ())
+            and meta.get("condition") in {"repeat", "unexposed"}
         ),
     )
     if len(suites) != 2:
-        raise ValueError("Expected one paired-permutation repeat/novel suite pair")
+        raise ValueError(
+            "Expected one fully paired canonical retention repeat/unexposed suite pair"
+        )
     return bundle, suites
 
 
@@ -543,29 +510,22 @@ def evaluate_retention_trajectory(
             or suite["targets"].shape[-1] != architecture["data"]["output_dim"]
         ):
             raise ValueError("Checkpoint token dimensions do not match the frozen evaluation data")
+    first_identity = {key: value for key, value in first.items() if key != "optimizer"}
     del first
     seed_everything(0)
     model = None
-    common = {
-        "schema": 1,
-        "source_run": str(cfg.source_run),
-        "metric_version": METRIC_VERSION,
-        "implementation_sha256": _implementation_digest(),
-        "architecture": architecture,
-        "suite_files": {
-            f"{name}{ext}": bundle["files"][f"{name}{ext}"]
-            for name in suites
-            for ext in (".npz", ".meta.json")
-        },
-        "bootstrap_seed": int(cfg.bootstrap_seed),
-        "bootstrap_replicates": int(cfg.bootstrap_replicates),
-        "batch_size": int(cfg.batch_size),
-        "backend": str(cfg.backend),
-        "device_type": device.type,
-        "precision": str(dtype),
-        "torch": str(torch.__version__),
-        "numpy": np.__version__,
-    }
+    common = evaluation_identity(
+        first_identity,
+        suites,
+        bundle,
+        batch_size=int(cfg.batch_size),
+        bootstrap_seed=int(cfg.bootstrap_seed),
+        bootstrap_replicates=int(cfg.bootstrap_replicates),
+        backend=str(cfg.backend),
+        device=device,
+        dtype=dtype,
+    )
+    del first_identity
     results = root / "evaluation-results"
     results.mkdir(parents=True, exist_ok=True)
     for index, snapshot in enumerate(snapshots, start=1):
@@ -598,7 +558,7 @@ def evaluate_retention_trajectory(
             bootstrap_seed=int(cfg.bootstrap_seed),
             bootstrap_replicates=int(cfg.bootstrap_replicates),
         )
-        position_rows(report.curve_rows)
+        delay_rows(report.curve_rows)
         with TemporaryDirectory(prefix=f".step_{snapshot.step:07d}-", dir=results) as temporary:
             staged = write_evaluation_results(
                 report,
@@ -607,18 +567,11 @@ def evaluate_retention_trajectory(
                 {
                     "checkpoint_reference": str(snapshot.path),
                     "source_run": None if source is None else asdict(source),
-                    "trajectory_identity": identity,
+                    "evaluation_identity": identity,
                     "eval_bundle": bundle,
                     "suites": {name: suite["__meta__"] for name, suite in suites.items()},
                 },
             )
-            manifest_path = staged / "manifest.json"
-            manifest = json.loads(manifest_path.read_text())
-            manifest["trajectory_files"] = {
-                name: _digest(staged / name)
-                for name in ("curves.csv", "summary.csv", "raw_errors.npz", "scalars.json")
-            }
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
             staged.rename(step_dir)
         del checkpoint, report
 
