@@ -57,5 +57,24 @@ uv run python scripts/eval.py \
 
 Complete numerical results and metadata are saved locally under the evaluation
 run's `evaluation-results/` and uploaded when W&B is enabled. Reconstruct figures
-with `uv run python scripts/plot_evaluation.py <evaluation-results-dir>
+with `uv run python scripts/plotting/plot_evaluation.py <evaluation-results-dir>
 --out-dir outputs/evaluation-plots`.
+
+Paper plotting scripts also live in `scripts/plotting/`. Render the reference
+learning, retention and composition panels from an evaluation step directory,
+or redraw the cached retention trajectory as separate paper panels:
+
+```bash
+uv run python scripts/plotting/plot_learning_curves.py --results PATH/TO/step_2100000
+uv run python scripts/plotting/plot_retention_learning.py --results PATH/TO/step_2100000
+uv run python scripts/plotting/plot_composition_learning.py --results PATH/TO/step_2100000
+uv run python scripts/plotting/plot_retention_trajectory.py --mode plot --paper
+```
+
+These commands write PDF/PNG figures under `outputs/`. The retention-learning
+script overlays original, repeat, shared and novel curves and exports a separate
+mean-savings panel using the saved paired bootstrap intervals. It also verifies
+the decomposition across all supplied configurations and writes an audit CSV.
+The learning and trajectory scripts additionally provide LaTeX subfigure snippets.
+The composition script exports exposed, unexposed and no-history learning curves
+alongside the paired unexposed-minus-exposed benefit, preserving its saved intervals.

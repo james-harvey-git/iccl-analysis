@@ -50,7 +50,7 @@ eval_sets:
   retention:
     controls: [novel, shared]  # novel required; shared omitted for binary weighting
     position_diagnostic:
-      num_worlds: 64          # independent paired worlds; use 256 for reported results
+      num_worlds: 256         # independent paired worlds, giving this many episodes per position
 
 distribution_diagnostic:
   num_sequences: 10000       # sequences sampled by analyze_sequence_distribution.py
