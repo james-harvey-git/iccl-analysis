@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 WANDB_SCHEME = "wandb://"
 
@@ -94,3 +94,18 @@ def checkpoint_model_digest(checkpoint: dict[str, Any]) -> str:
         digest.update(json.dumps([name, str(value.dtype), list(value.shape)]).encode())
         digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
+
+
+def validate_evaluation_config(checkpoint: dict[str, Any], cfg: DictConfig) -> None:
+    """Require compatible architecture and teacher parameters, allowing new eval suites."""
+    model = dict(cfg.model)
+    model.pop("backend", None)
+    if model != checkpoint_model_config(checkpoint)["model"]:
+        raise ValueError("Evaluation model architecture differs from the checkpoint")
+    trained = OmegaConf.create(checkpoint["config"]["data"])
+    assert isinstance(trained, DictConfig)
+    for key in ("input_dim", "output_dim", "hidden_dims", "use_bias", "scale"):
+        if cfg.data[key] != trained[key]:
+            raise ValueError(f"Evaluation teacher data.{key} differs from the checkpoint")
+    if cfg.data.sequence.signal_boundaries != trained.sequence.signal_boundaries:
+        raise ValueError("Evaluation signal_boundaries differs from the checkpoint")

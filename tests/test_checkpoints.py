@@ -6,7 +6,11 @@ from typing import Any
 import pytest
 from omegaconf import OmegaConf
 
-from iccl.checkpoints import evaluation_checkpoint_references, resolve_checkpoint_path
+from iccl.checkpoints import (
+    evaluation_checkpoint_references,
+    resolve_checkpoint_path,
+    validate_evaluation_config,
+)
 
 
 class FakeArtifact:
@@ -93,3 +97,41 @@ def test_evaluation_preserves_the_configured_trajectory_order() -> None:
     cfg = OmegaConf.create({"evaluation": {"checkpoints": ["step_2.pt", "step_10.pt"]}})
 
     assert evaluation_checkpoint_references(cfg) == ["step_2.pt", "step_10.pt"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("model.n_heads", 4),
+        ("model.norm_eps", 0.01),
+        ("data.input_dim", 8),
+        ("data.hidden_dims", [32]),
+        ("data.use_bias", False),
+        ("data.scale", 2.0),
+        ("data.sequence.signal_boundaries", False),
+    ],
+)
+def test_evaluation_rejects_incompatible_checkpoint_config(key: str, value: Any) -> None:
+    cfg = OmegaConf.create(
+        {
+            "model": {"n_heads": 2, "norm_eps": 1e-5, "backend": "auto"},
+            "data": {
+                "input_dim": 4,
+                "output_dim": 4,
+                "hidden_dims": [4],
+                "use_bias": True,
+                "scale": 1.0,
+                "num_modules": 8,
+                "sequence": {"signal_boundaries": True},
+                "eval_sets": {"retention": {"controls": ["novel", "shared"]}},
+            },
+        }
+    )
+    checkpoint = {"config": OmegaConf.to_container(cfg, resolve=True)}
+    cfg.data.eval_sets.retention.controls = ["unexposed", "shared"]
+    cfg.data.num_modules = 10
+    cfg.model.backend = "reference"
+    validate_evaluation_config(checkpoint, cfg)
+    OmegaConf.update(cfg, key, value)
+    with pytest.raises(ValueError, match="differs from the checkpoint"):
+        validate_evaluation_config(checkpoint, cfg)

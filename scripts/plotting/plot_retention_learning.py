@@ -31,7 +31,7 @@ LEARNING = {
     "original": ("Original", "#666666", "--"),
     "unexposed": ("Unexposed", "#0072B2", "-"),
     "shared": ("Shared", "#D55E00", "--"),
-    "repeat": ("Repeat", "#6A3D9A", "-"),
+    "repeat": ("Exact repeat", "#6A3D9A", "-"),
 }
 COMPONENTS = {
     "total": ("savings", "Total", "#333333"),

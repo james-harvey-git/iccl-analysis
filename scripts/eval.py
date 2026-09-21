@@ -22,6 +22,7 @@ from iccl.checkpoints import (
     evaluation_checkpoint_references,
     resolve_checkpoint_path,
     source_from_checkpoint,
+    validate_evaluation_config,
 )
 from iccl.data.eval_bundle import select_evaluation_suite, validate_eval_bundle
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
@@ -45,6 +46,7 @@ def main(cfg: DictConfig) -> None:
     references = evaluation_checkpoint_references(cfg)
     first_path, first_is_artifact = resolve_checkpoint_path(references[0])
     first_checkpoint = torch.load(first_path, map_location=device, weights_only=False)
+    validate_evaluation_config(first_checkpoint, cfg)
     model = model_from_config(cfg).to(device)
     model.eval()
 
@@ -70,6 +72,7 @@ def main(cfg: DictConfig) -> None:
         else:
             path, is_artifact = resolve_checkpoint_path(reference)
             checkpoint = torch.load(path, map_location=device, weights_only=False)
+            validate_evaluation_config(checkpoint, cfg)
         step = int(checkpoint["step"])
         if step <= previous_step:
             raise ValueError(

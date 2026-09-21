@@ -40,6 +40,7 @@ from iccl.checkpoints import (
     checkpoint_model_config,
     checkpoint_model_digest,
     source_from_checkpoint,
+    validate_evaluation_config,
 )
 from iccl.data.eval_bundle import validate_eval_bundle
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
@@ -502,8 +503,11 @@ def evaluate_retention_trajectory(
     dtype = resolve_autocast_dtype(str(cfg.precision), device)
     first = torch.load(snapshots[0].path, map_location="cpu", weights_only=False)
     architecture = checkpoint_model_config(first)
-    model_cfg = OmegaConf.create(architecture)
+    model_cfg = OmegaConf.create(bundle["generation_config"])
+    assert isinstance(model_cfg, DictConfig)
+    model_cfg.model = architecture["model"]
     model_cfg.model.backend = str(cfg.backend)
+    validate_evaluation_config(first, model_cfg)
     for suite in suites.values():
         if (
             suite["tokens"].shape[-1] != max(architecture["data"].values())
@@ -537,8 +541,7 @@ def evaluate_retention_trajectory(
         if step_dir.exists():
             raise ValueError(f"Incomplete results in {step_dir}. Use a different --out-dir")
         checkpoint = torch.load(snapshot.path, map_location="cpu", weights_only=False)
-        if checkpoint_model_config(checkpoint) != architecture:
-            raise ValueError(f"Architecture changes at {snapshot.path}")
+        validate_evaluation_config(checkpoint, model_cfg)
         if (
             int(checkpoint["step"]) != snapshot.step
             or checkpoint_model_digest(checkpoint) != snapshot.model_sha256
