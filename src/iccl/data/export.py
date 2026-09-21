@@ -11,7 +11,6 @@ import hashlib
 import json
 import subprocess
 from dataclasses import replace
-from math import comb
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +19,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from iccl.data.controls import (
     build_paired_composition_controls,
-    build_paired_retention_control,
-    exact_latent_occurrences,
 )
 from iccl.data.curriculum import (
     CURRICULUM_SAMPLER_CODES,
@@ -31,7 +28,6 @@ from iccl.data.curriculum import (
 from iccl.data.dataset import (
     collate_sequences,
     make_family,
-    module_count_config_from,
     sequence_config_from,
     sequence_dataset_from_config,
     sequence_rng,
@@ -39,6 +35,8 @@ from iccl.data.dataset import (
 )
 from iccl.data.eval_cells import EvalCell, resolve_eval_cells
 from iccl.data.retention_position import (
+    REHEARSAL_PROTOCOL,
+    RETENTION_PROTOCOL,
     build_paired_position_group,
     build_rehearsal_position_group,
 )
@@ -85,6 +83,16 @@ EXPORTED_INFO = (
     "designated_constituent",
     "logical_task_id",
     "pair_id",
+    "condition",
+    "protocol",
+    "exposure_scope",
+    "rehearsal_positions",
+    "background_task_indices",
+    "background_num_modules",
+    "background_connected",
+    "background_covered",
+    "history_connected",
+    "history_covered",
 )
 
 
@@ -257,27 +265,36 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
         raise ValueError(f"unknown evaluation capabilities: {sorted(unknown)}")
     if "composition" in capabilities:
         composition_controls = {str(value) for value in eval_cfg.composition.controls}
-        invalid_controls = composition_controls - {"matched_prefix", "no_history"}
+        invalid_controls = composition_controls - {"unexposed", "no_history"}
         if invalid_controls:
             raise ValueError(f"unknown composition controls: {sorted(invalid_controls)}")
-        if "matched_prefix" not in composition_controls:
-            raise ValueError("composition requires its matched_prefix control")
+        if "unexposed" not in composition_controls:
+            raise ValueError("composition requires its unexposed control")
         invalid = [cell.cell_id for cell in cells if cell.num_modules < 4]
         if invalid:
             raise ValueError(f"composition requires M>=4; invalid cells: {invalid}")
     retention_controls = {str(value) for value in eval_cfg.retention.controls}
-    invalid_controls = retention_controls - {"novel", "shared"}
+    invalid_controls = retention_controls - {"unexposed", "shared"}
     if invalid_controls:
         raise ValueError(f"unknown retention controls: {sorted(invalid_controls)}")
-    if "retention" in capabilities and "novel" not in retention_controls:
-        raise ValueError("retention requires its novel control")
+    if "retention" in capabilities and "unexposed" not in retention_controls:
+        raise ValueError("retention requires its unexposed control")
 
     out_dir = Path(eval_cfg.out_dir) if out_dir is None else out_dir
     count = int(eval_cfg.num_sequences)
     if count < 1:
         raise ValueError(f"eval_sets.num_sequences must be positive, got {count}")
-    if "retention" in capabilities and count < max(cell.num_tasks for cell in cells):
-        raise ValueError("retention requires num_sequences >= the largest evaluated task count")
+    worlds = int(eval_cfg.retention.num_worlds)
+    monitor_count = int(eval_cfg.retention.monitor_num_sequences)
+    if worlds < 1:
+        raise ValueError("retention.num_worlds must be positive")
+    if (
+        "retention" in capabilities
+        and not int(eval_cfg.canonical.task_count) <= monitor_count <= worlds
+    ):
+        raise ValueError(
+            "retention monitoring requires canonical T <= monitor_num_sequences <= num_worlds"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     _clear_archives(out_dir)
     export_training_validation(data_cfg, out_dir, count=count, seed=int(cfg.seed))
@@ -291,11 +308,6 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
             "task_origin": TASK_ORIGIN_CODES,
             "task_category": TASK_CATEGORY_CODES,
             "curriculum_sampler": CURRICULUM_SAMPLER_CODES,
-        },
-        "retention_contract": {
-            "repeat": "selected latent occurs exactly once in the history",
-            "novel": "support is absent from the history and uses covered modules",
-            "shared": "same support as the repeat latent but latent is absent from history",
         },
     }
     written: set[str] = set()
@@ -314,21 +326,26 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
         if name in written:
             raise ValueError(f"frozen suite name collision: {name}")
         written.add(name)
-        export_suite(
-            samples,
-            out_dir / name,
-            _metadata(
-                base_meta,
-                capability,
-                condition,
-                cell,
-                sampling_kind=sampling_kind,
-                pair_group=pair_group,
-            ),
+        metadata = _metadata(
+            base_meta,
+            capability,
+            condition,
+            cell,
+            sampling_kind=sampling_kind,
+            pair_group=pair_group,
         )
+        if capability == "retention":
+            metadata.update(protocol=RETENTION_PROTOCOL, num_worlds=worlds, sample_scope="full")
+            if "canonical" in cell.family_memberships:
+                positions = balanced_repeat_positions(monitor_count, cell.num_tasks, int(cfg.seed))
+                metadata["monitor_indices"] = (
+                    np.arange(monitor_count) * cell.num_tasks + positions
+                ).tolist()
+                metadata["monitor_selection"] = "balanced-world-position-v1"
+        export_suite(samples, out_dir / name, metadata)
         suites_written += 1
 
-    for cell_index, cell in enumerate(cells):
+    for cell in cells:
         family = make_family(data_cfg, extra_hotness=2, num_modules=cell.num_modules)
         sequence_cfg = _sequence_config(base_sequence, cell)
 
@@ -347,7 +364,7 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
             write(samples, "icl", "ordinary", cell, "natural")
 
         if "composition" in capabilities:
-            conditions = {name: [] for name in ("constituent", "matched_prefix", "no_history")}
+            conditions = {name: [] for name in ("exposed", "unexposed", "no_history")}
             pair_group = f"composition__{cell.cell_id}"
             for index in range(count):
                 pair_id = stream * count + index
@@ -368,7 +385,7 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
                     continue
                 kind = (
                     "constructively_constrained"
-                    if condition == "constituent"
+                    if condition == "exposed"
                     else "paired_counterfactual"
                 )
                 write(samples, "composition", condition, cell, kind, pair_group)
@@ -378,161 +395,84 @@ def export_eval_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
         modes = [str(value) for value in eval_cfg.retention.controls]
         if data_cfg.weighting == "binary":
             modes = [mode for mode in modes if mode != "shared"]
-        repeats: list[SequenceSample] = []
-        controls: dict[str, list[SequenceSample]] = {mode: [] for mode in modes}
-        pair_group = f"retention__{cell.cell_id}"
-        positions = balanced_repeat_positions(count, cell.num_tasks, int(cfg.seed) + cell_index)
-        for index, revisit_position in enumerate(positions):
-            pair_id = stream * count + index
-            rng = sequence_rng(base_seed, pair_id)
-            for _ in range(sequence_cfg.max_attempts):
-                repeat = build_sequence(
-                    family,
-                    sequence_cfg,
-                    rng,
-                    revisit_demos=cell.demos_per_task,
-                    revisit_task_index=int(revisit_position),
-                    include_world=True,
-                    fixed_demo_counts=cell.demo_counts,
-                )
-                history = repeat.info["latents"][: cell.num_tasks]
-                supports = {tuple(np.flatnonzero(latent)) for latent in history}
-                selected = history[int(revisit_position)]
-                if (
-                    len(supports) < comb(cell.num_modules, sequence_cfg.hotness)
-                    and exact_latent_occurrences(history, selected) == 1
-                ):
-                    break
-            else:
-                raise RuntimeError(
-                    f"retention cell {cell.cell_id} cannot reserve a novel support and "
-                    "single-exposure repeat target after "
-                    f"{sequence_cfg.max_attempts} histories"
-                )
-            repeat.info["pair_id"] = pair_id
-            repeats.append(repeat)
-            for mode in modes:
-                control = build_paired_retention_control(family, repeat, rng, mode=mode)
-                control.info["pair_id"] = pair_id
-                controls[mode].append(control)
-        stream += 1
-        write(repeats, "retention", "repeat", cell, "constructively_constrained", pair_group)
-        for mode, samples in controls.items():
-            write(samples, "retention", mode, cell, "paired_counterfactual", pair_group)
+        conditions = {condition: [] for condition in ("repeat", *modes)}
+        cell_seed = int.from_bytes(hashlib.sha256(cell.cell_id.encode()).digest()[:4], "little")
+        for world_index in range(worlds):
+            group = build_paired_position_group(
+                family,
+                sequence_cfg,
+                sequence_rng(base_seed + RETENTION_POSITION_SEED_OFFSET + cell_seed, world_index),
+                group_id=world_index,
+                control_modes=tuple(modes),
+            )
+            for condition, samples in group.items():
+                conditions[condition].extend(samples)
+        for condition, samples in conditions.items():
+            write(
+                samples,
+                "retention",
+                condition,
+                cell,
+                "paired_history_intervention",
+                f"retention__{cell.cell_id}",
+            )
 
-    print(f"exported {suites_written} suites x {count} sequences to {out_dir}/")
+    print(f"exported {suites_written} suites to {out_dir}/")
     return suites_written
 
 
-def export_retention_position_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
-    """Export the canonical paired-position and constituent-rehearsal diagnostic."""
+def export_rehearsal_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
+    """Export the explicitly enabled canonical rehearsal experiment."""
     data_cfg, eval_cfg = cfg.data, cfg.data.eval_sets
-    position_cfg = eval_cfg.retention.position_diagnostic
-    worlds = int(position_cfg.num_worlds)
-    modules = int(eval_cfg.canonical.module_count)
-    tasks = int(eval_cfg.canonical.task_count)
-    demos = int(eval_cfg.demos_per_task)
+    rehearsal_cfg = eval_cfg.rehearsal
+    if not rehearsal_cfg.enabled:
+        return 0
+    worlds = int(rehearsal_cfg.num_worlds)
     if worlds < 1:
-        raise ValueError(f"position_diagnostic.num_worlds must be positive, got {worlds}")
-    middle = (tasks - 1) // 2
-    if modules < 4 or tasks < modules - 1 or tasks - 1 - middle < 2 or demos < 1:
-        raise ValueError(
-            "retention position diagnostic requires M>=4, T>=M-1, at least two "
-            "post-middle tasks, and D>=1; "
-            f"got M={modules}, T={tasks}, D={demos}"
-        )
-
-    controls = tuple(str(value) for value in eval_cfg.retention.controls)
-    invalid = set(controls) - {"novel", "shared"}
-    if invalid or "novel" not in controls:
-        raise ValueError("position diagnostic controls require novel and optionally shared")
-    if data_cfg.weighting == "binary":
-        controls = tuple(mode for mode in controls if mode != "shared")
-
-    base_sequence = sequence_config_from(data_cfg)
-    if base_sequence.hotness != 2:
-        raise ValueError("retention position diagnostic requires 2-hot canonical tasks")
-    sequence_cfg = replace(
-        base_sequence,
-        phases=(),
-        demos_per_task=demos,
-        task_graph="random",
-        graph_ordered=False,
-        curriculum_sampler="constructive",
-        hotness=2,
-        surplus_tasks=tasks - (modules - 1),
+        raise ValueError("rehearsal.num_worlds must be positive")
+    cell = next(
+        cell for cell in resolve_eval_cells(data_cfg) if "canonical" in cell.family_memberships
     )
-    family = make_family(data_cfg, extra_hotness=2, num_modules=modules)
-    training_modules = module_count_config_from(data_cfg)
-    status = (
-        "seen"
-        if modules in training_modules.allowed
-        else "heldout"
-        if modules in training_modules.held_out
-        else "ood"
+    modes = tuple(
+        str(mode)
+        for mode in eval_cfg.retention.controls
+        if mode != "shared" or data_cfg.weighting != "binary"
     )
-    cell = EvalCell(("position_diagnostic",), status, modules, tasks, demos)
-    out_dir = Path(eval_cfg.out_dir) if out_dir is None else out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    builders = (
-        ("paired_permutation", build_paired_position_group, 0),
-        ("controlled_rehearsal", build_rehearsal_position_group, 1),
-    )
-    families = {
-        name: {condition: [] for condition in ("repeat", *controls)} for name, _, _ in builders
-    }
-    base_seed = int(cfg.seed) + EVAL_SEED_OFFSET + RETENTION_POSITION_SEED_OFFSET
+    family = make_family(data_cfg, extra_hotness=2, num_modules=cell.num_modules)
+    sequence_cfg = _sequence_config(sequence_config_from(data_cfg), cell)
+    conditions = {condition: [] for condition in ("repeat", *modes)}
     for group_id in range(worlds):
-        for name, builder, offset in builders:
-            generated = builder(
-                family,
-                sequence_cfg,
-                sequence_rng(base_seed + offset, group_id),
-                group_id=group_id,
-                control_modes=controls,
-            )
-            for condition, samples in generated.items():
-                families[name][condition].extend(samples)
-
-    base_meta = {
+        generated = build_rehearsal_position_group(
+            family,
+            sequence_cfg,
+            sequence_rng(
+                int(cfg.seed) + EVAL_SEED_OFFSET + RETENTION_POSITION_SEED_OFFSET + 1, group_id
+            ),
+            group_id=group_id,
+            control_modes=modes,
+        )
+        for condition, samples in generated.items():
+            conditions[condition].extend(samples)
+    base = {
         "config": OmegaConf.to_container(data_cfg, resolve=True),
         "seed": int(cfg.seed),
         "num_worlds": worlds,
-        "schema_version": "retention-position-v1",
-        "enum_mappings": {
-            "task_origin": TASK_ORIGIN_CODES,
-            "task_category": TASK_CATEGORY_CODES,
-            "curriculum_sampler": CURRICULUM_SAMPLER_CODES,
-        },
-        "retention_contract": {
-            "repeat": "target latent and support occur exactly once in history",
-            "novel": "one fixed support absent from every paired history",
-            "shared": "one fixed new latent on the target support",
-        },
+        "protocol": REHEARSAL_PROTOCOL,
+        "sample_scope": "full",
+        "exposure_scope": "original_encounter",
     }
-    suites_written = 0
-    for diagnostic_family, conditions in families.items():
-        pair_group = f"retention_position__{diagnostic_family}__{cell.cell_id}"
-        for condition, samples in conditions.items():
-            name = f"retention_position__{diagnostic_family}__{condition}__{cell.cell_id}"
-            metadata = _metadata(
-                base_meta,
-                "retention_position",
-                condition,
-                cell,
-                sampling_kind="paired_intervention",
-                pair_group=pair_group,
-            )
-            metadata.update(suite=name, diagnostic_family=diagnostic_family)
-            metadata["array_shapes"] = {
-                key: [len(samples), *getattr(samples[0], key).shape]
-                for key in ("tokens", "token_type", "targets", "loss_mask")
-            }
-            export_suite(samples, out_dir / name, metadata)
-            suites_written += 1
-    print(f"exported {suites_written} retention-position suites to {out_dir}/")
-    return suites_written
+    out_dir = Path(eval_cfg.out_dir) if out_dir is None else out_dir
+    for condition, samples in conditions.items():
+        metadata = _metadata(
+            base,
+            "rehearsal",
+            condition,
+            cell,
+            sampling_kind="paired_history_intervention",
+            pair_group=f"rehearsal__{cell.cell_id}",
+        )
+        export_suite(samples, out_dir / metadata["suite"], metadata)
+    return len(conditions)
 
 
 def load_suite(path: Path) -> dict[str, np.ndarray]:

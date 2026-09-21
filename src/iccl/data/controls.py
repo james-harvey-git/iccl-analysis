@@ -16,7 +16,6 @@ from iccl.data.sequences import (
     FinalTaskConfig,
     SequenceSample,
     build_sequence,
-    sample_final_latent,
 )
 from iccl.data.teacher import HyperTeacher, sample_module_pool, teacher_forward
 
@@ -28,86 +27,54 @@ def exact_latent_occurrences(history: np.ndarray, latent: np.ndarray) -> int:
 
 def sample_retention_control_latent(
     family: HyperTeacher,
-    history: np.ndarray,
-    revisited: np.ndarray,
+    target: np.ndarray,
     rng: np.random.Generator,
     mode: str,
     max_attempts: int,
 ) -> np.ndarray:
-    if mode == "novel":
-        return sample_final_latent(
-            family,
-            FinalTaskConfig("composite", int(np.count_nonzero(revisited)), 1),
-            history,
-            rng,
-            max_attempts,
-        )
+    """Sample an alternative original encounter for a fixed final target."""
+    if mode == "unexposed":
+        remaining = np.flatnonzero(target == 0)
+        pair = rng.choice(remaining, size=2, replace=False)
+        latent = np.zeros_like(target)
+        latent[pair] = target[target != 0]
+        return latent
     if mode != "shared":
         raise ValueError(f"unknown retention-control mode: {mode}")
     if family.cfg.weighting == "binary":
         raise ValueError("same-support/new-weights control is undefined for weighting=binary")
-    pattern = (revisited > 0).astype(np.int8)
     for _ in range(max_attempts):
-        latent = family.apply_weighting(rng, pattern)
-        if exact_latent_occurrences(history, latent) == 0:
+        latent = family.apply_weighting(rng, (target != 0).astype(np.int8)).astype(np.float32)
+        if not np.array_equal(target, latent):
             return latent
-    raise RuntimeError(f"no history-novel same-support task found in {max_attempts} attempts")
+    raise RuntimeError(f"no distinct same-support weights found in {max_attempts} attempts")
 
 
 def build_paired_retention_control(
     family: HyperTeacher,
     sequence: SequenceSample,
-    rng: np.random.Generator,
     *,
     mode: str,
-    max_attempts: int = 1000,
-    fixed_latent: np.ndarray | None = None,
+    latent: np.ndarray,
 ) -> SequenceSample:
-    """Replace only the final task and targets in a retention sequence."""
-    if "world" not in sequence.info:
-        raise ValueError("paired retention control requires the sampled world")
-    latents = sequence.info["latents"]
-    curriculum = int(sequence.info["num_curriculum_tasks"])
-    if curriculum == 0 or len(latents) <= curriculum:
-        raise ValueError("paired retention control requires a revisit block")
-    if mode not in {"novel", "shared"}:
+    """Replace the designated encounter while preserving the final task."""
+    target = sequence.info["latents"][-1]
+    if latent.shape != target.shape:
+        raise ValueError("retention-control latent shape must match the target")
+    if mode == "shared":
+        if not np.array_equal(latent != 0, target != 0) or np.array_equal(latent, target):
+            raise ValueError("shared control requires the same support and different weights")
+    elif mode == "unexposed":
+        if np.any(latent[target != 0]) or np.count_nonzero(latent) != 2:
+            raise ValueError("unexposed encounter must use two non-target modules")
+    else:
         raise ValueError(f"unknown retention-control mode: {mode}")
-    start = int(sequence.info["task_spans"][-1, 0])
-    demos = int(sequence.info["demo_counts"][-1])
-    history = latents[:curriculum]
-    replacement = (
-        sample_retention_control_latent(family, history, latents[-1], rng, mode, max_attempts)
-        if fixed_latent is None
-        else fixed_latent.astype(np.float32, copy=False)
-    )
-    if replacement.shape != (family.cfg.num_modules,):
-        raise ValueError(
-            f"fixed retention-control latent must have shape {(family.cfg.num_modules,)}"
-        )
-    replacement_support = tuple(np.flatnonzero(replacement))
-    revisited_support = tuple(np.flatnonzero(latents[-1]))
-    history_supports = {tuple(np.flatnonzero(latent)) for latent in history}
-    if mode == "novel" and replacement_support in history_supports:
-        raise ValueError("fixed novel-control support occurs in the history")
-    if mode == "shared" and (
-        replacement_support != revisited_support
-        or exact_latent_occurrences(history, replacement) > 0
-    ):
-        raise ValueError("fixed shared-control latent must reuse only the target support")
-    positions = start + 2 * np.arange(demos)
-    x = sequence.tokens[positions, : family.cfg.input_dim]
-    y = teacher_forward(sequence.info["world"], replacement, x)
-
-    tokens, targets = sequence.tokens.copy(), sequence.targets.copy()
-    tokens[positions + 1, : family.cfg.output_dim] = y
-    targets[positions] = y
-    info = dict(sequence.info)
-    info["latents"] = np.concatenate([latents[:-1], replacement[None].astype(np.float32)])
-    info["base_mse"] = sequence.info["base_mse"].copy()
-    info["base_mse"][-1] = ((y - y.mean(axis=0)) ** 2).mean(axis=0)
-    return SequenceSample(
-        tokens, sequence.token_type.copy(), targets, sequence.loss_mask.copy(), info
-    )
+    history = sequence.info["latents"][:-1].copy()
+    history[int(sequence.info["original_task_position"])] = latent
+    control = _replace_history(family, sequence, history)
+    control.info["task_origin"] = control.info["task_origin"].copy()
+    control.info["task_origin"][-1] = TASK_ORIGIN_CODES["final"]
+    return control
 
 
 def _composition_latents(
@@ -184,6 +151,8 @@ def _replace_history(
     latents, base_mse = sequence.info["latents"].copy(), sequence.info["base_mse"].copy()
     latents[:curriculum] = replacements
     for task, latent in enumerate(replacements):
+        if np.array_equal(latent, sequence.info["latents"][task]):
+            continue
         start = int(sequence.info["task_spans"][task, 0])
         demos = int(sequence.info["demo_counts"][task])
         positions = start + 2 * np.arange(demos)
@@ -251,7 +220,7 @@ def build_paired_composition_controls(
     constituent_task_exposures: int,
     fixed_demo_counts: tuple[int, ...],
 ) -> tuple[SequenceSample, SequenceSample, SequenceSample]:
-    """Build constituent-history, matched-prefix, and no-history conditions."""
+    """Build exposed, unexposed and no-history conditions."""
     history, final_latent, target, mask = _composition_latents(
         family,
         rng,

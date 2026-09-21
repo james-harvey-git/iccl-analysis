@@ -24,13 +24,12 @@ def _has_family(row: dict[str, Any], family: str) -> bool:
 def _trace_label(row: dict[str, Any], field: str) -> str:
     value = row.get(field)
     labels = {
-        "constituent": "constituent history",
-        "matched_prefix": "matched-prefix control",
+        "exposed": "Exposed",
+        "unexposed": "Unexposed",
         "no_history": "no-history control",
         "original": "original learning",
-        "repeat": "repeat/relearning",
-        "novel": "novel-task control",
-        "shared": "same-support/new-weights control",
+        "repeat": "Exact repeat",
+        "shared": "Shared",
         "total": "total savings",
         "episodic": "episodic savings",
         "module": "module savings",
@@ -38,6 +37,8 @@ def _trace_label(row: dict[str, Any], field: str) -> str:
         "one": "one constituent rehearsed",
         "both": "both constituents rehearsed",
     }
+    if value == "unexposed" and row.get("capability") == "rehearsal":
+        return "Unexposed at original encounter"
     return labels.get(str(value), str(value))
 
 
@@ -161,7 +162,8 @@ def _rehearsal_figure(rows: list[dict[str, Any]]) -> go.Figure:
         trace.name = _trace_label(selected[0], "rehearsal_mode")
         trace.visible = component == components[0]
         trace.marker.symbol = [
-            "x" if row["support_status"] == "disconnected_ood" else "circle" for row in selected
+            "x" if str(row.get("support_status", "")).startswith("disconnected") else "circle"
+            for row in selected
         ]
     buttons = [
         {
@@ -236,7 +238,11 @@ def evaluation_figures(
     summary_rows: list[dict[str, Any]], curve_rows: list[dict[str, Any]]
 ) -> dict[str, go.Figure]:
     """Build the configured compact evaluation and diagnostic figures."""
-    primary = [row for row in summary_rows if row["metric"] in PRIMARY_METRICS]
+    primary = [
+        row
+        for row in summary_rows
+        if row["metric"] in PRIMARY_METRICS and row["capability"] != "rehearsal"
+    ]
     task_rows = [row for row in primary if _has_family(row, "task_variation")]
     module_rows = [row for row in primary if _has_family(row, "module_variation")]
     figures: dict[str, go.Figure] = {}
@@ -255,29 +261,34 @@ def evaluation_figures(
             hover_fields=("T", "S", "D", "module_count_status"),
         )
 
-    position_rows = [row for row in curve_rows if row["curve_type"] == "retention_position"]
-    if position_rows:
-        figures["evaluation/retention_position"] = grouped_figure(
-            position_rows,
-            title="Paired retention by original task position",
-            x_field="x_value",
-            y_field="nmse",
-            x_title="original target-task position",
-            y_title="mean nMSE savings across revisit demos",
-            group_fields=("retention_component",),
-            trace_names={
-                "total": "total savings",
-                "module": "module savings",
-                "episodic": "episodic savings",
-            },
-            hover_fields=("intervening_tasks", "n_sequences"),
-        )
-        figures["evaluation/retention_position"].add_hline(y=0, line_dash="dot", line_color="gray")
     rehearsal_rows = [row for row in curve_rows if row["curve_type"] == "retention_rehearsal"]
     if rehearsal_rows:
         figures["evaluation/retention_rehearsal"] = _rehearsal_figure(rehearsal_rows)
 
+    rehearsal_errors = [row for row in curve_rows if row["curve_type"] == "rehearsal_error"]
+    if rehearsal_errors:
+        figures["evaluation/rehearsal_errors"] = grouped_figure(
+            rehearsal_errors,
+            title="Final-task error with common later rehearsal",
+            x_field="x_value",
+            y_field="nmse",
+            x_title="original task position",
+            y_title="normalized MSE",
+            group_fields=("condition", "rehearsal_mode"),
+            hover_fields=("intervening_tasks", "n_sequences", "exposure_scope"),
+        )
+        for trace in cast(Any, figures["evaluation/rehearsal_errors"].data):
+            trace.name = trace.name.replace(
+                "condition=unexposed", "Unexposed at original encounter"
+            )
     panels = (
+        (
+            "evaluation/retention_error_vs_delay",
+            "retention_error_delay",
+            "Final-task error versus delay",
+            "intervening tasks",
+            "condition",
+        ),
         (
             "evaluation/icl_within_task",
             "within_task_learning",

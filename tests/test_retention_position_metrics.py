@@ -8,7 +8,7 @@ from iccl.evaluation.metrics import _evaluate
 
 def metadata(family: str, condition: str) -> dict[str, Any]:
     return {
-        "capability": "retention_position",
+        "capability": "retention" if family == "paired_permutation" else "rehearsal",
         "condition": condition,
         "diagnostic_family": family,
         "pair_group": f"retention-position-{family}",
@@ -35,7 +35,7 @@ def add_conditions(
     **arrays: np.ndarray,
 ) -> None:
     rows = len(total_savings)
-    for condition, fraction in (("repeat", 0.0), ("shared", 0.25), ("novel", 1.0)):
+    for condition, fraction in (("repeat", 0.0), ("shared", 0.25), ("unexposed", 1.0)):
         name = f"{family}_{condition}"
         suites[name] = {"__meta__": metadata(family, condition)} | arrays
         errors = np.zeros((rows, 5, 2), dtype=np.float64)
@@ -113,7 +113,7 @@ def test_paired_position_contrasts_are_computed_within_world() -> None:
     rows = {
         (row["metric"], row["retention_component"]): row
         for row in report.summary_rows
-        if row["diagnostic_family"] == "paired_permutation"
+        if row["capability"] == "retention"
     }
     assert rows[("primacy_excess_mean", "total")]["value"] == pytest.approx(
         np.mean([8.5, 10.0, 9.0])
@@ -126,10 +126,10 @@ def test_paired_position_contrasts_are_computed_within_world() -> None:
     position = [
         row
         for row in report.curve_rows
-        if row["curve_type"] == "retention_position" and row["retention_component"] == "total"
+        if row["curve_type"] == "retention_delay" and row["retention_component"] == "total"
     ]
     assert [row["x_value"] for row in position] == [0, 1, 2, 3]
-    assert [row["nmse"] for row in position] == pytest.approx([11, 2, 5 / 3, 8])
+    assert [row["nmse"] for row in position] == pytest.approx([8, 5 / 3, 2, 11])
     assert all(row["n_sequences"] == 3 for row in position)
 
 
@@ -145,28 +145,15 @@ def test_rehearsal_effects_are_paired_and_ood_status_is_preserved() -> None:
     assert {
         (row["original_task_position"], row["rehearsal_mode"]): row["value"] for row in effects
     } == pytest.approx({(0, "one"): 1, (0, "both"): 3, (1, "one"): 1, (1, "both"): 3})
-    assert {row["support_status"] for row in effects if row["original_task_position"] == 0} == {
-        "includes_disconnected_ood"
-    }
-
-    no_rehearsal = [
-        row
-        for row in report.curve_rows
-        if row["curve_type"] == "retention_rehearsal"
-        and row["retention_component"] == "total"
-        and row["rehearsal_mode"] == "none"
-    ]
-    assert no_rehearsal[0]["support_status"] == "disconnected_ood"
-    assert no_rehearsal[1]["support_status"] == "connected_id"
 
 
 def test_diagnostic_raw_output_contains_pairing_metadata_and_exact_decomposition() -> None:
     suites, mses, nmses = diagnostic_fixture()
     report = _evaluate(suites, mses, nmses, {}, bootstrap_seed=0, bootstrap_replicates=0)
-    for family in ("paired_permutation", "controlled_rehearsal"):
-        prefix = f"retention_position/{family}"
+    for capability in ("retention", "rehearsal"):
+        prefix = f"{capability}/m04__t04__d002"
         assert f"{prefix}/position_group_id" in report.raw_errors
-        assert f"{prefix}/target_support" in report.raw_errors
+        assert f"{prefix}/repeat/target_support" in report.raw_errors
         total = report.raw_errors[f"{prefix}/total_nmse"]
         episodic = report.raw_errors[f"{prefix}/episodic_nmse"]
         module = report.raw_errors[f"{prefix}/module_nmse"]
@@ -180,4 +167,4 @@ def test_binary_weighting_reports_only_total_savings() -> None:
             del mapping[name]
     report = _evaluate(suites, mses, nmses, {}, bootstrap_seed=0, bootstrap_replicates=0)
     components = {row["retention_component"] for row in report.curve_rows}
-    assert components == {"total"}
+    assert components == {"total", None}

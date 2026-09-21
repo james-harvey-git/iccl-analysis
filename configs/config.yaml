@@ -20,7 +20,9 @@ wandb:
   upload_weights: false
 
 evaluation:
-  suites: all  # all | capabilities (ICL/composition/retention) | retention_position
+  batch_size: 32          # inference batch size for frozen-suite scoring
+  results_dir: null       # optional shared full/standalone result cache; null uses this run
+  suites: all  # all | capabilities (ICL/composition/retention) | retention_position | rehearsal
   # One or more local or wandb:// checkpoint references. Multiple entries form
   # one trajectory and must be ordered by increasing training step.
   checkpoints: []  # required by scripts/eval.py; unrelated to training.resume

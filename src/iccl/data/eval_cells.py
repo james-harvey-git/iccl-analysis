@@ -20,6 +20,7 @@ _EVAL_KEYS = {
     "task_variation",
     "composition",
     "retention",
+    "rehearsal",
 }
 
 

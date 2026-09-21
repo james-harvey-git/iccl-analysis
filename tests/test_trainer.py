@@ -296,7 +296,8 @@ def test_trainer_runs_validation_and_tracks_best(tmp_path: Path) -> None:
     cfg.data.eval_sets.num_sequences = 8
     cfg.data.eval_sets.demos_per_task = 2
     cfg.data.eval_sets.task_variation.surplus_tasks = {"min": 1, "max": 1}
-    cfg.data.eval_sets.retention.position_diagnostic.num_worlds = 2
+    cfg.data.eval_sets.retention.num_worlds = 8
+    cfg.data.eval_sets.retention.monitor_num_sequences = 8
     prepare_eval_bundle(cfg)
 
     torch.manual_seed(0)

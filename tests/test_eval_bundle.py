@@ -32,7 +32,8 @@ def frozen_bundle(tmp_path_factory: pytest.TempPathFactory) -> DictConfig:
                 "data.eval_sets.num_sequences=8",
                 "data.eval_sets.demos_per_task=2",
                 "data.eval_sets.task_variation.surplus_tasks.max=1",
-                "data.eval_sets.retention.position_diagnostic.num_worlds=2",
+                "data.eval_sets.retention.num_worlds=8",
+                "data.eval_sets.retention.monitor_num_sequences=8",
             ],
         )
     prepare_eval_bundle(cfg)
@@ -54,9 +55,9 @@ def bundle(
 def test_one_bundle_serves_every_consumer(bundle: DictConfig) -> None:
     manifest = validate_eval_bundle(bundle)
     root = Path(bundle.data.eval_sets.out_dir)
-    assert manifest["num_suites"] == 21  # validation + two cells x seven + six diagnostic
+    assert manifest["num_suites"] == 15  # validation + two cells x seven conditions
     assert not any(path.is_dir() for path in root.iterdir())
-    for selection, expected in [("all", 21), ("capabilities", 14), ("retention_position", 6)]:
+    for selection, expected in [("all", 15), ("capabilities", 14), ("retention_position", 3)]:
         suites = load_eval_suites(
             root, select=lambda meta, selection=selection: select_evaluation_suite(meta, selection)
         )
@@ -95,8 +96,7 @@ def test_capabilities_and_diagnostics_share_one_report(bundle: DictConfig) -> No
     assert {
         "evaluation/icl_within_task",
         "evaluation/retention_controls",
-        "evaluation/retention_position",
-        "evaluation/retention_rehearsal",
+        "evaluation/retention_vs_intervening_tasks",
     } <= figures.keys()
 
 
@@ -104,8 +104,8 @@ def test_capabilities_and_diagnostics_share_one_report(bundle: DictConfig) -> No
     "field,value",
     [
         ("seed", 12),
-        ("data.sequence.surplus_tasks", [0, 4]),
-        ("data.eval_sets.retention.position_diagnostic.num_worlds", 4),
+        ("data.sequence.surplus_tasks", [0, 3]),
+        ("data.eval_sets.retention.num_worlds", 4),
     ],
 )
 def test_different_generation_config_is_rejected(
@@ -164,7 +164,7 @@ def test_failed_generation_leaves_the_active_bundle_untouched(
     def fail(*args: object, **kwargs: object) -> int:
         raise RuntimeError("generation failed")
 
-    monkeypatch.setattr("iccl.data.eval_bundle.export_retention_position_sets", fail)
+    monkeypatch.setattr("iccl.data.eval_bundle.export_rehearsal_sets", fail)
     with pytest.raises(RuntimeError, match="generation failed"):
         prepare_eval_bundle(bundle)
     assert (root / "manifest.json").read_bytes() == old_manifest

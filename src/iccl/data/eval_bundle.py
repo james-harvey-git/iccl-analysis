@@ -15,10 +15,10 @@ from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.export import _sha256, export_eval_sets, export_retention_position_sets
+from iccl.data.export import _sha256, export_eval_sets, export_rehearsal_sets
 
 # Increment when frozen sampling or archive semantics change incompatibly.
-BUNDLE_VERSION = 1
+BUNDLE_VERSION = 2
 
 
 def generation_config(cfg: DictConfig) -> dict[str, Any]:
@@ -82,9 +82,7 @@ def prepare_eval_bundle(cfg: DictConfig) -> Path:
         try:
             manifest = validate_eval_bundle(
                 cfg,
-                remedy=(
-                    "Running scripts/make_eval_sets.py with submitted data/seed overrides."
-                ),
+                remedy=("Running scripts/make_eval_sets.py with submitted data/seed overrides."),
             )
         except (FileNotFoundError, ValueError) as error:
             print(error)
@@ -94,7 +92,7 @@ def prepare_eval_bundle(cfg: DictConfig) -> Path:
         with tempfile.TemporaryDirectory(prefix=f".{root.name}-", dir=root.parent) as temporary:
             staging = Path(temporary) / "bundle"
             count = export_eval_sets(cfg, out_dir=staging)
-            count += export_retention_position_sets(cfg, out_dir=staging)
+            count += export_rehearsal_sets(cfg, out_dir=staging)
             manifest = {
                 "bundle_version": BUNDLE_VERSION,
                 "generation_config": generation_config(cfg),
@@ -126,11 +124,15 @@ def prepare_eval_bundle(cfg: DictConfig) -> Path:
 
 def select_evaluation_suite(metadata: dict[str, Any], selection: str) -> bool:
     """Select scientific suites by purpose, without selecting different directories."""
-    if selection not in {"all", "capabilities", "retention_position"}:
-        raise ValueError("evaluation.suites must be all, capabilities or retention_position")
+    if selection not in {"all", "capabilities", "retention_position", "rehearsal"}:
+        raise ValueError(
+            "evaluation.suites must be all, capabilities, retention_position or rehearsal"
+        )
     capability = metadata.get("capability")
-    return selection == "all" or (
-        capability == "retention_position"
-        if selection == "retention_position"
-        else capability in {"icl", "composition", "retention"}
+    if selection == "rehearsal":
+        return capability == "rehearsal"
+    if selection == "retention_position":
+        return capability == "retention" and "canonical" in metadata.get("family_memberships", ())
+    return capability in {"icl", "composition", "retention"} or (
+        selection == "all" and capability == "validation"
     )
