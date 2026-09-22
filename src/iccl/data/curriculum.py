@@ -13,7 +13,7 @@ TASK_CATEGORY_CODES = {
     "seen_support_new_weights": 1,
     "exact_repeat": 2,
 }
-CURRICULUM_SAMPLER_CODES = {"rejection": 0, "constructive": 1, "structured": 2}
+CURRICULUM_SAMPLER_CODES = {"rejection": 0, "constructive": 1, "structured": 2, "independent": 3}
 
 
 @dataclass(frozen=True)

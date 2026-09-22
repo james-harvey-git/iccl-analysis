@@ -159,6 +159,59 @@ def evaluate_retention(
                     )
 
 
+def evaluate_factorial(
+    report: Any,
+    descriptor: dict[str, Any],
+    values: Values,
+    raw_errors: dict[str, np.ndarray],
+    *,
+    original_errors: Duo,
+) -> None:
+    """Score one cell; identical bootstrap draws preserve pairing across cells."""
+    suite = values["repeat"][0]
+    positions = suite["original_task_position"]
+    coordinates = {
+        "original_task_position": int(positions[0]),
+        "intervening_tasks": int(suite["intervening_tasks"][0]),
+    }
+    prefix = f"retention_factorial/{descriptor['cell_id']}"
+    _save_provenance(raw_errors, prefix, values)
+    indices = np.arange(len(positions))
+    original = (
+        original_errors[0][indices, positions, : descriptor["D"]],
+        original_errors[1][indices, positions, : descriptor["D"]],
+    )
+    quantities = {(c, None): (v[1], v[2]) for c, v in values.items()} | {
+        ("savings", c): e for c, e in _components(values).items()
+    }
+    quantities[("original", None)] = original
+    for (condition, component), (mse, nmse) in quantities.items():
+        name = component or condition
+        raw_errors[f"{prefix}/{name}_mse"] = mse
+        raw_errors[f"{prefix}/{name}_nmse"] = nmse
+        report.curve(
+            descriptor,
+            condition,
+            "factorial_learning",
+            mse,
+            nmse,
+            seed=0,
+            x_name="demo_index",
+            component=component,
+            row_extras={j: coordinates for j in range(descriptor["D"])},
+        )
+        if condition != "original":
+            report.summary(
+                descriptor,
+                condition,
+                f"factorial_{name}_mean",
+                nmse.mean(axis=1),
+                seed=0,
+                component=component,
+                extra=coordinates,
+            )
+
+
 def evaluate_rehearsal(
     report: Any,
     descriptor: dict[str, Any],

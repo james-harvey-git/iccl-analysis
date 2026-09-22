@@ -51,8 +51,8 @@ must match those used to prepare the bundle, including the validation distributi
 
 All evaluation calls use the same directory. Select which suites to score with
 `evaluation.suites=all` (default), `capabilities`, or `retention_position`. The last
-option selects the full canonical retention evaluation from the same bundle;
-it does not generate a second position-diagnostic population:
+option selects the full canonical retention evaluation and the independent
+position × delay experiment from the same bundle:
 
 ```bash
 uv run python scripts/eval.py \
@@ -112,6 +112,70 @@ unexposed error, exact-repeat error and total savings. Each panel logs the curre
 curve at the source training step; W&B's step slider shows progression. Local
 `monitor/step_*.json` files preserve curve estimates, intervals and protocol
 metadata even with W&B disabled; the compact mean arrays remain in `.npz` files.
+
+### Independent encoding position × delay
+
+`data.eval_sets.retention_factorial` controls a separate diagnostic, enabled by
+default. Its 64 independent worlds are paired across preceding-task counts
+`p=0..7`, intervening-task delays `d=0..7`, and the same three history conditions.
+It uses the reference module count (normally M=8) and evaluation D (normally 32),
+with **T=p+d+1 history blocks plus the final probe**, rather than fixed T=8.
+The default grid contains 12,288 episodes per checkpoint. Its `num_worlds` is
+independent of the standard retention and monitoring counts.
+
+Each world fixes the teacher, target, controls and fresh examples across the
+whole grid. Independent preceding and intervening banks exclude both target
+modules; each cell uses nested prefixes of those banks. Background tasks are
+sampled without coverage/connectivity conditioning, including in longer cells.
+The factorial builder overrides both training `require_identifiable` and
+`require_full_rank` flags to false.
+This is intentionally different from the standard retention curriculum. Frozen
+metadata records the independent sampler and null constructive surplus (`S`);
+the integer archive field uses -1 for that inapplicable surplus.
+
+Full evaluation, `capabilities` and `retention_position` score the same frozen
+factorial data. Training monitoring excludes it. All three savings components
+average all final-task demonstrations, then worlds, with pointwise 95%
+whole-world bootstrap intervals. Raw errors and per-demonstration curves are
+saved for later paired analysis. Set `retention_factorial.enabled=false` to omit
+the diagnostic, or override `num_worlds`, `preceding_tasks` and
+`intervening_tasks` consistently during bundle preparation and evaluation.
+
+For example, prepare the bundle and score one checkpoint or an ordered list
+from the same training run (replace the checkpoint paths with actual files):
+
+```bash
+uv run python scripts/make_eval_sets.py
+uv run python scripts/eval.py \
+  'evaluation.checkpoints=[PATH/TO/step_0100000.pt,PATH/TO/step_2100000.pt]' \
+  evaluation.suites=retention_position \
+  evaluation.results_dir=outputs/factorial/evaluation-results
+uv run python scripts/plotting/plot_retention_factorial.py \
+  --results outputs/factorial/evaluation-results \
+  --plot-steps 100000 2100000 --out-dir outputs/factorial/plots
+```
+
+Pass the checkpoint's model/dimension overrides and the same data/seed settings
+used for generation, as for other evaluations. Use `evaluation.suites=all` for
+full evaluation. A single checkpoint uses a one-entry checkpoint list. Already
+scored full-evaluation directories can be passed directly to the plotting script;
+it requires neither snapshots nor a GPU and never repeats inference.
+
+Reporting automatically writes four interactive HTML figures under each
+`step_*/plots/retention_factorial/` and logs them to W&B when enabled: annotated
+total-savings heatmaps, two key slices, all row/column slices, and component
+heatmaps. The plotting script exports those designs as PNG/PDF plus provenance,
+with checkpoints overlaid or arranged in columns. For a single checkpoint,
+pass its step directory to `--results`. Use `--fixed-preceding` and `--fixed-delay`
+to select key slices (defaults 0 and the largest configured delay). An absent
+requested coordinate is an error; reporting uses the smallest preceding count
+for grids that omit zero. Heatmaps show discrete cells; slice axes use actual
+task counts. Colour scales are shared across checkpoints within each component,
+and negative savings are retained.
+
+Changing p or d also changes episode length and final-probe position. These are
+controlled changes in experience, not pure elapsed time or a direct measurement
+of a particular memory mechanism. Some cells may be outside training lengths.
 
 ### Optional controlled rehearsal
 

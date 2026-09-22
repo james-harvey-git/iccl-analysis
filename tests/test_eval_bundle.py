@@ -24,6 +24,7 @@ def frozen_bundle(tmp_path_factory: pytest.TempPathFactory) -> DictConfig:
             config_name="config",
             overrides=[
                 f"data.eval_sets.out_dir={tmp_path_factory.mktemp('bundle') / 'active'}",
+                "data.eval_sets.retention_factorial.enabled=false",
                 "data.input_dim=4",
                 "data.output_dim=4",
                 "data.hidden_dims=[4]",

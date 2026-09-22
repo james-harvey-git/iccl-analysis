@@ -12,13 +12,17 @@ import torch
 from jaxtyping import Float
 
 from iccl.data.export import VALIDATION_SUITE, load_suite, load_suite_metadata
-from iccl.evaluation.retention_position import evaluate_rehearsal, evaluate_retention
-from iccl.evaluation.validation import validate_retention_group
+from iccl.evaluation.retention_position import (
+    evaluate_factorial,
+    evaluate_rehearsal,
+    evaluate_retention,
+)
+from iccl.evaluation.validation import validate_factorial_grid, validate_retention_group
 from iccl.models.model import GDNModel
 
 Suite = dict[str, Any]
 BASE_MSE_FLOOR = 1e-12
-METRIC_VERSION = "fixed-d-history-intervention-v4"
+METRIC_VERSION = "fixed-d-history-intervention-v5"
 METRIC_DEFINITIONS = {
     "nmse": "per-demo output MSE divided by that task's mean output variance",
     "validation/token_mse": "raw output MSE pooled over training-distribution prediction tokens",
@@ -37,6 +41,15 @@ METRIC_DEFINITIONS = {
     "edge_excess_mean": "within-world mean edge savings minus mean interior savings",
     "rehearsal_effect_mean": "within-world controlled-rehearsal savings minus no-rehearsal savings",
 }
+METRIC_DEFINITIONS.update(
+    {
+        f"factorial_{name}_mean": (
+            f"at fixed preceding/intervening counts, final-task {name} nMSE per demo, "
+            "averaged over all demonstrations and paired worlds"
+        )
+        for name in ("repeat", "shared", "unexposed", "total", "module", "episodic")
+    }
+)
 
 
 @dataclass
@@ -68,6 +81,8 @@ def load_eval_suites(
         metadata = load_suite_metadata(metadata_path)
         if select is not None and not select(metadata):
             continue
+        if monitor and metadata["capability"] == "retention_factorial":
+            continue
         suite: Suite = load_suite(path.with_suffix(""))
         suite["__meta__"] = metadata
         suites[path.stem] = suite
@@ -86,6 +101,7 @@ def load_eval_suites(
         "composition": {"exposed", "unexposed"},
         "retention": {"repeat", "unexposed"},
         "rehearsal": {"repeat", "unexposed"},
+        "retention_factorial": {"repeat", "unexposed"},
     }
     for (capability, pair_group), conditions in groups.items():
         missing = required[capability] - set(conditions)
@@ -97,8 +113,11 @@ def load_eval_suites(
         arrays = [cast(np.ndarray, ids) for ids in pair_ids]
         if any(not np.array_equal(arrays[0], ids) for ids in arrays[1:]):
             raise ValueError(f"{pair_group} conditions do not share pair identifiers")
-        if capability in {"retention", "rehearsal"}:
+        if capability in {"retention", "rehearsal", "retention_factorial"}:
             validate_retention_group(conditions)
+    validate_factorial_grid(
+        [s for s in suites.values() if s["__meta__"]["capability"] == "retention_factorial"]
+    )
     if monitor:
         for name, suite in list(suites.items()):
             meta = suite["__meta__"]
@@ -230,11 +249,13 @@ def _descriptor(name: str, suite: Suite) -> dict[str, Any]:
         "family_memberships": "|".join(metadata["family_memberships"]),
         "capability": metadata["capability"],
         "module_count_status": metadata["module_count_status"],
-        "sampler": metadata["config"]["sequence"].get("curriculum_sampler", "rejection"),
+        "sampler": metadata.get(
+            "sampler", metadata["config"]["sequence"].get("curriculum_sampler", "rejection")
+        ),
         "weighting": metadata["config"]["weighting"],
         "M": int(metadata["num_modules"]),
         "T": int(metadata["num_tasks"]),
-        "S": int(metadata["num_surplus_tasks"]),
+        "S": metadata["num_surplus_tasks"],
         "D": int(metadata["demos_per_task"]),
         "pair_group": metadata.get("pair_group"),
         "sample_scope": metadata.get("sample_scope", "full"),
@@ -460,6 +481,15 @@ def _evaluate(
         seed = int.from_bytes(
             hashlib.sha256(str(descriptor["pair_group"]).encode()).digest()[:4], "little"
         )
+        if capability == "retention_factorial":
+            evaluate_factorial(
+                report,
+                descriptor,
+                values,
+                raw_errors,
+                original_errors=(mses[conditions["repeat"]], nmses[conditions["repeat"]]),
+            )
+            continue
         if capability == "rehearsal":
             evaluate_rehearsal(report, descriptor, values, raw_errors, seed=seed)
             continue
