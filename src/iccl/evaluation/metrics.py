@@ -1,5 +1,6 @@
 """Fixed-demo ICL, composition and retention metrics over frozen suites."""
 
+import hashlib
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -11,24 +12,30 @@ import torch
 from jaxtyping import Float
 
 from iccl.data.export import VALIDATION_SUITE, load_suite, load_suite_metadata
+from iccl.evaluation.retention_position import evaluate_rehearsal, evaluate_retention
+from iccl.evaluation.validation import validate_retention_group
 from iccl.models.model import GDNModel
 
 Suite = dict[str, Any]
 BASE_MSE_FLOOR = 1e-12
-METRIC_VERSION = "fixed-d-capabilities-v2"
+METRIC_VERSION = "fixed-d-history-intervention-v4"
 METRIC_DEFINITIONS = {
     "nmse": "per-demo output MSE divided by that task's mean output variance",
     "validation/token_mse": "raw output MSE pooled over training-distribution prediction tokens",
     "within_task_nmse_mean": "mean nMSE over evaluation sequences, history tasks, and demos",
     "episode_learning": "mean nMSE over sequences and demos at each history task position",
-    "benefit_mean": (
-        "mean over final-task demos of matched-prefix nMSE minus constituent-history nMSE"
-    ),
-    "savings_mean": "equal-delay mean over demos of novel nMSE minus exact-repeat nMSE",
+    "benefit_mean": ("mean over final-task demos of unexposed nMSE minus exposed nMSE"),
+    "savings_mean": "equal-delay mean over demos of unexposed nMSE minus exact-repeat nMSE",
     "episodic_savings_mean": (
         "equal-delay mean over demos of shared-support nMSE minus exact-repeat nMSE"
     ),
-    "module_savings_mean": "equal-delay mean over demos of novel nMSE minus shared-support nMSE",
+    "module_savings_mean": (
+        "equal-delay mean over demos of unexposed nMSE minus shared-support nMSE"
+    ),
+    "primacy_excess_mean": "within-world first-position savings minus mean interior savings",
+    "recency_excess_mean": "within-world last-position savings minus mean interior savings",
+    "edge_excess_mean": "within-world mean edge savings minus mean interior savings",
+    "rehearsal_effect_mean": "within-world controlled-rehearsal savings minus no-rehearsal savings",
 }
 
 
@@ -45,6 +52,7 @@ def load_eval_suites(
     out_dir: Path,
     *,
     select: Callable[[dict[str, Any]], bool] | None = None,
+    monitor: bool = False,
 ) -> dict[str, Suite]:
     """Load selected frozen suites and validate paired-condition identifiers."""
     paths = sorted(out_dir.glob("*.npz"))
@@ -75,8 +83,9 @@ def load_eval_suites(
                 suite
             )
     required = {
-        "composition": {"constituent", "matched_prefix"},
-        "retention": {"repeat", "novel"},
+        "composition": {"exposed", "unexposed"},
+        "retention": {"repeat", "unexposed"},
+        "rehearsal": {"repeat", "unexposed"},
     }
     for (capability, pair_group), conditions in groups.items():
         missing = required[capability] - set(conditions)
@@ -88,6 +97,33 @@ def load_eval_suites(
         arrays = [cast(np.ndarray, ids) for ids in pair_ids]
         if any(not np.array_equal(arrays[0], ids) for ids in arrays[1:]):
             raise ValueError(f"{pair_group} conditions do not share pair identifiers")
+        if capability in {"retention", "rehearsal"}:
+            validate_retention_group(conditions)
+    if monitor:
+        for name, suite in list(suites.items()):
+            meta = suite["__meta__"]
+            if meta["capability"] != "retention":
+                continue
+            indices = np.asarray(meta.get("monitor_indices", []), dtype=np.int64)
+            count, tasks = len(suite["tokens"]), int(meta["num_tasks"])
+            if not tasks <= len(indices) <= int(meta["num_worlds"]) or np.any(
+                (indices < 0) | (indices >= count)
+            ):
+                raise ValueError("invalid canonical monitor row count or indices")
+            if len(np.unique(suite["position_group_id"][indices])) != len(indices):
+                raise ValueError("monitor must select distinct worlds")
+            counts = np.bincount(suite["original_task_position"][indices], minlength=tasks)
+            if counts.max() - counts.min() > 1:
+                raise ValueError("monitor positions must be balanced")
+            suites[name] = {
+                key: value[indices] for key, value in suite.items() if key != "__meta__"
+            }
+            suites[name]["__meta__"] = dict(
+                meta,
+                sample_scope="monitor",
+                selected_indices=indices.tolist(),
+                num_sequences=len(indices),
+            )
     return suites
 
 
@@ -201,6 +237,10 @@ def _descriptor(name: str, suite: Suite) -> dict[str, Any]:
         "S": int(metadata["num_surplus_tasks"]),
         "D": int(metadata["demos_per_task"]),
         "pair_group": metadata.get("pair_group"),
+        "sample_scope": metadata.get("sample_scope", "full"),
+        "protocol": metadata.get("protocol"),
+        "n_episodes": metadata.get("num_sequences"),
+        "exposure_scope": metadata.get("exposure_scope", "history"),
     }
 
 
@@ -227,27 +267,29 @@ class _ReportBuilder:
         seed: int,
         strata: np.ndarray | None = None,
         component: str | None = None,
+        extra: dict[str, Any] | None = None,
+        key_suffix: str = "",
     ) -> None:
         mean, low, high = _aggregate(
             values, seed=self.seed + seed, replicates=self.replicates, strata=strata
         )
         scalar = float(mean)
-        key = f"{descriptor['capability']}/{descriptor['cell_id']}/{metric}"
+        key = f"{descriptor['capability']}/{descriptor['cell_id']}/{metric}{key_suffix}"
         self.scalars[key] = scalar
-        self.summary_rows.append(
-            dict(
-                _base(descriptor),
-                condition=condition,
-                metric=metric,
-                retention_component=component,
-                original_task_position=None,
-                intervening_tasks=None,
-                value=scalar,
-                ci_low=float(low),
-                ci_high=float(high),
-                n_sequences=len(values),
-            )
+        row = dict(
+            _base(descriptor),
+            condition=condition,
+            metric=metric,
+            retention_component=component,
+            original_task_position=None,
+            intervening_tasks=None,
+            value=scalar,
+            ci_low=float(low),
+            ci_high=float(high),
+            n_sequences=len(values),
         )
+        row.update(extra or {})
+        self.summary_rows.append(row)
 
     def curve(
         self,
@@ -262,33 +304,37 @@ class _ReportBuilder:
         x_values: np.ndarray | None = None,
         strata: np.ndarray | None = None,
         component: str | None = None,
+        row_extras: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         mse_mean, _, _ = _aggregate(mse, seed=self.seed + seed, replicates=0, strata=strata)
         mean, low, high = _aggregate(
             nmse, seed=self.seed + seed + 1, replicates=self.replicates, strata=strata
         )
-        suffix = f"/{component}" if component else ""
+        suffix = (f"/{component}" if component else "") + (
+            f"/{descriptor['rehearsal_mode']}" if descriptor.get("rehearsal_mode") else ""
+        )
         key = f"{descriptor['capability']}/{descriptor['cell_id']}/{curve_type}/{condition}{suffix}"
         self.curves[key] = mean
         coordinates = np.arange(nmse.shape[1]) if x_values is None else x_values
         for index, coordinate in enumerate(coordinates):
-            self.curve_rows.append(
-                dict(
-                    _base(descriptor),
-                    condition=condition,
-                    curve_type=curve_type,
-                    retention_component=component,
-                    original_task_position=None,
-                    intervening_tasks=(int(coordinate) if x_name == "intervening_tasks" else None),
-                    x_name=x_name,
-                    x_value=int(coordinate),
-                    mse=float(mse_mean[index]),
-                    nmse=float(mean[index]),
-                    ci_low=float(low[index]),
-                    ci_high=float(high[index]),
-                    n_sequences=len(nmse),
-                )
+            value = int(coordinate)
+            row = dict(
+                _base(descriptor),
+                condition=condition,
+                curve_type=curve_type,
+                retention_component=component,
+                original_task_position=None,
+                intervening_tasks=(value if x_name == "intervening_tasks" else None),
+                x_name=x_name,
+                x_value=value,
+                mse=float(mse_mean[index]),
+                nmse=float(mean[index]),
+                ci_low=float(low[index]),
+                ci_high=float(high[index]),
+                n_sequences=len(nmse),
             )
+            row.update((row_extras or {}).get(value, {}))
+            self.curve_rows.append(row)
 
     def delay_curve(
         self,
@@ -299,18 +345,19 @@ class _ReportBuilder:
         strata: np.ndarray,
         *,
         seed: int,
-        component: str,
+        component: str | None = None,
+        curve_type: str = "retention_delay",
     ) -> None:
         values = np.unique(strata)
         mse_means, means, lows, highs, counts = [], [], [], [], []
-        for offset, value in enumerate(values):
+        for value in values:
             selected = strata == value
             mse_mean, _, _ = _aggregate(
-                mse[selected].mean(axis=1), seed=self.seed + seed + offset, replicates=0
+                mse[selected].mean(axis=1), seed=self.seed + seed, replicates=0
             )
             mean, low, high = _aggregate(
                 nmse[selected].mean(axis=1),
-                seed=self.seed + seed + 100 + offset,
+                seed=self.seed + seed + 1,
                 replicates=self.replicates,
             )
             mse_means.append(float(mse_mean))
@@ -318,16 +365,17 @@ class _ReportBuilder:
             lows.append(float(low))
             highs.append(float(high))
             counts.append(int(selected.sum()))
-        key = f"{descriptor['capability']}/{descriptor['cell_id']}/retention_delay/{component}"
+        prefix = f"{descriptor['capability']}/{descriptor['cell_id']}"
+        key = f"{prefix}/{curve_type}/{component or condition}"
         self.curves[key] = np.asarray(means)
         for index, value in enumerate(values):
             self.curve_rows.append(
                 dict(
                     _base(descriptor),
                     condition=condition,
-                    curve_type="retention_delay",
+                    curve_type=curve_type,
                     retention_component=component,
-                    original_task_position=None,
+                    original_task_position=int(descriptor["T"]) - 1 - int(value),
                     intervening_tasks=int(value),
                     x_name="intervening_tasks",
                     x_value=int(value),
@@ -397,8 +445,8 @@ def _evaluate(
             x_name="task_position",
         )
 
-    for index, ((capability, _), conditions) in enumerate(sorted(groups.items())):
-        primary = "constituent" if capability == "composition" else "repeat"
+    for (capability, _), conditions in sorted(groups.items()):
+        primary = "exposed" if capability == "composition" else "repeat"
         descriptor = descriptors[conditions[primary]]
         demos = descriptor["D"]
         values = {
@@ -409,9 +457,14 @@ def _evaluate(
             )
             for condition, name in conditions.items()
         }
-        seed = 100_000 + index * 1000
+        seed = int.from_bytes(
+            hashlib.sha256(str(descriptor["pair_group"]).encode()).digest()[:4], "little"
+        )
+        if capability == "rehearsal":
+            evaluate_rehearsal(report, descriptor, values, raw_errors, seed=seed)
+            continue
         if capability == "composition":
-            for offset, condition in enumerate(("constituent", "matched_prefix", "no_history")):
+            for offset, condition in enumerate(("exposed", "unexposed", "no_history")):
                 if condition not in values:
                     continue
                 suite, mse, nmse = values[condition]
@@ -424,7 +477,7 @@ def _evaluate(
                     seed=seed + offset * 10,
                     x_name="demo_index",
                 )
-            constituent, matched = values["constituent"], values["matched_prefix"]
+            constituent, matched = values["exposed"], values["unexposed"]
             benefit_mse = matched[1] - constituent[1]
             benefit_nmse = matched[2] - constituent[2]
             report.summary(
@@ -445,75 +498,14 @@ def _evaluate(
             )
             continue
 
-        repeat_suite, repeat_mse, repeat_nmse = values["repeat"]
-        positions = np.asarray(repeat_suite["original_task_position"], dtype=np.int64)
-        strata = np.asarray(repeat_suite["intervening_tasks"], dtype=np.int64)
-        rows = np.arange(len(positions))
-        original_mse = mses[conditions["repeat"]][rows, positions, :demos]
-        original_nmse = nmses[conditions["repeat"]][rows, positions, :demos]
-        retention_curves = {"original": (original_mse, original_nmse)} | {
-            condition: (pair[1], pair[2]) for condition, pair in values.items()
-        }
-        for offset, (condition, (mse, nmse)) in enumerate(retention_curves.items()):
-            report.curve(
-                descriptor,
-                condition,
-                "retention_learning",
-                mse,
-                nmse,
-                seed=seed + offset * 10,
-                x_name="demo_index",
-                strata=strata,
-            )
-
-        novel = values["novel"]
-        components = {
-            "total": (novel[1] - repeat_mse, novel[2] - repeat_nmse),
-        }
-        if "shared" in values:
-            shared = values["shared"]
-            components |= {
-                "episodic": (shared[1] - repeat_mse, shared[2] - repeat_nmse),
-                "module": (novel[1] - shared[1], novel[2] - shared[2]),
-            }
-        for offset, (component, (mse, nmse)) in enumerate(components.items()):
-            condition = "savings" if component == "total" else f"{component}_savings"
-            metric = f"{condition}_mean"
-            report.summary(
-                descriptor,
-                condition,
-                metric,
-                nmse.mean(axis=1),
-                seed=seed + 200 + offset * 10,
-                strata=strata,
-                component=component,
-            )
-            report.curve(
-                descriptor,
-                condition,
-                "retention_savings",
-                mse,
-                nmse,
-                seed=seed + 300 + offset * 10,
-                x_name="demo_index",
-                strata=strata,
-                component=component,
-            )
-            report.delay_curve(
-                descriptor,
-                condition,
-                mse,
-                nmse,
-                strata,
-                seed=seed + 400 + offset * 20,
-                component=component,
-            )
-            prefix = f"retention/{descriptor['cell_id']}/{component}"
-            raw_errors[f"{prefix}_mse"] = mse
-            raw_errors[f"{prefix}_nmse"] = nmse
-        prefix = f"retention/{descriptor['cell_id']}"
-        raw_errors[f"{prefix}/original_task_position"] = positions
-        raw_errors[f"{prefix}/intervening_tasks"] = strata
+        evaluate_retention(
+            report,
+            descriptor,
+            values,
+            raw_errors,
+            seed=seed,
+            original_errors=(mses[conditions["repeat"]], nmses[conditions["repeat"]]),
+        )
 
     return report.build(raw_errors)
 

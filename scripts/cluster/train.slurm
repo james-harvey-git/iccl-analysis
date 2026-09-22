@@ -82,28 +82,9 @@ nvidia-smi
 echo "============================================"
 
 # ── Frozen eval sets ──────────────────────────────────────────────────────────
-# Generated once in-job if absent, with the same overrides as the training run
-# so the suites match the data config; never regenerated once present (delete
-# the directory yourself if the data config changes). data/ is gitignored, so
-# on a fresh clone it does not exist yet — create it before taking the lock.
-# The mkdir lock serializes concurrent first jobs (e.g. a sweep); generation is
-# deterministic, so whichever job wins writes the same bytes. The trap frees the
-# lock if generation errors, so a failed job never wedges later ones.
-EVAL_DIR="data/eval_sets"
-LOCK_DIR="${EVAL_DIR}.lock"
-mkdir -p "${EVAL_DIR}"
-if [ -z "$(ls -A "${EVAL_DIR}")" ]; then
-    if mkdir "${LOCK_DIR}" 2>/dev/null; then
-        trap 'rmdir "${LOCK_DIR}" 2>/dev/null || true' EXIT
-        echo "Generating frozen eval sets into ${EVAL_DIR}/"
-        uv run python scripts/make_eval_sets.py "$@"
-        rmdir "${LOCK_DIR}"
-        trap - EXIT
-    else
-        echo "Another job is generating the eval sets; waiting..."
-        while [ -d "${LOCK_DIR}" ]; do sleep 10; done
-    fi
-fi
+# Prepare once with scripts/make_eval_sets.py and the same data/seed overrides.
+# Training verifies the configured bundle's manifest before its first step;
+# stale or missing data fails explicitly rather than triggering a rebuild.
 
 # ── Train ─────────────────────────────────────────────────────────────────────
 uv run python scripts/train.py "wandb.mode=${WANDB_MODE:-online}" "$@"

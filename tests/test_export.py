@@ -12,11 +12,13 @@ from iccl.data.export import (
     VALIDATION_SUITE,
     balanced_repeat_positions,
     export_eval_sets,
+    export_rehearsal_sets,
     load_suite,
     load_suite_metadata,
     suite_paths,
 )
 from iccl.data.sequences import TOKEN_PAD
+from iccl.evaluation.metrics import load_eval_suites
 
 
 def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig:
@@ -55,10 +57,13 @@ def make_cfg(out_dir: Path, capabilities: list[str] | None = None) -> DictConfig
                     "task_variation": {"surplus_tasks": {"min": 0, "max": 1}},
                     "composition": {
                         "constituent_task_exposures": 1,
-                        "controls": ["matched_prefix", "no_history"],
+                        "controls": ["unexposed", "no_history"],
                     },
+                    "rehearsal": {"enabled": False, "num_worlds": 2},
                     "retention": {
-                        "controls": ["novel", "shared"],
+                        "controls": ["unexposed", "shared"],
+                        "num_worlds": 8,
+                        "monitor_num_sequences": 8,
                     },
                 },
             },
@@ -166,9 +171,9 @@ def test_export_uses_fixed_capability_d_and_variable_training_validation(tmp_pat
         np.testing.assert_array_equal(validation[key], value.numpy())
     assert len({tuple(sample.info["demo_counts"]) for sample in validation_samples}) > 1
 
-    constituent_path = next(tmp_path.glob("composition__constituent__*.npz"))
-    matched_path = Path(str(constituent_path).replace("__constituent__", "__matched_prefix__"))
-    no_history_path = Path(str(constituent_path).replace("__constituent__", "__no_history__"))
+    constituent_path = next(tmp_path.glob("composition__exposed__*.npz"))
+    matched_path = Path(str(constituent_path).replace("__exposed__", "__unexposed__"))
+    no_history_path = Path(str(constituent_path).replace("__exposed__", "__no_history__"))
     constituent = load_suite(constituent_path.with_suffix(""))
     matched = load_suite(matched_path.with_suffix(""))
     no_history = load_suite(no_history_path.with_suffix(""))
@@ -190,21 +195,21 @@ def test_export_uses_fixed_capability_d_and_variable_training_validation(tmp_pat
     assert metadata["family_memberships"]
     assert len(metadata["archive_sha256"]) == 64
     assert metadata["enum_mappings"]["task_origin"]["backbone"] == 1
-    assert metadata["retention_contract"]["repeat"].startswith("selected latent")
 
 
 def test_dense_retention_cells_reserve_a_single_exposure_repeat_target(
     tmp_path: Path,
 ) -> None:
     cfg = make_cfg(tmp_path, ["retention"])
-    cfg.data.eval_sets.num_sequences = 12
+    cfg.data.eval_sets.retention.num_worlds = 12
+    cfg.data.eval_sets.retention.monitor_num_sequences = 12
     cfg.data.eval_sets.module_counts = [4]
     cfg.data.eval_sets.canonical.task_count = 12
     cfg.data.eval_sets.task_variation.surplus_tasks = {"min": 9, "max": 9}
     export_eval_sets(cfg)
 
     repeat = load_suite(tmp_path / "retention__repeat__m04__t12__d002")
-    novel = load_suite(tmp_path / "retention__novel__m04__t12__d002")
+    novel = load_suite(tmp_path / "retention__unexposed__m04__t12__d002")
     shared = load_suite(tmp_path / "retention__shared__m04__t12__d002")
     for index, position in enumerate(repeat["original_task_position"]):
         history = repeat["latents"][index, :12]
@@ -213,18 +218,18 @@ def test_dense_retention_cells_reserve_a_single_exposure_repeat_target(
         assert len(supports) < comb(4, 2) < len(history)
         assert sum(np.array_equal(selected, latent) for latent in history) == 1
 
-        novel_latent = novel["latents"][index, -1]
-        assert tuple(np.flatnonzero(novel_latent)) not in supports
+        novel_latent = novel["latents"][index, position]
+        assert not set(np.flatnonzero(novel_latent)) & set(np.flatnonzero(selected))
 
-        shared_latent = shared["latents"][index, -1]
+        shared_latent = shared["latents"][index, position]
         np.testing.assert_array_equal(np.flatnonzero(shared_latent), np.flatnonzero(selected))
         assert not any(np.array_equal(shared_latent, latent) for latent in history)
 
 
 def test_retention_requires_enough_sequences_to_represent_every_position(tmp_path: Path) -> None:
     cfg = make_cfg(tmp_path, ["retention"])
-    cfg.data.eval_sets.num_sequences = 6
-    with pytest.raises(ValueError, match="largest evaluated task count"):
+    cfg.data.eval_sets.retention.monitor_num_sequences = 3
+    with pytest.raises(ValueError, match="monitoring requires"):
         export_eval_sets(cfg)
 
 
@@ -233,3 +238,26 @@ def test_binary_evaluation_omits_the_degenerate_shared_control(tmp_path: Path) -
     cfg.data.weighting = "binary"
     assert export_eval_sets(cfg) == 23  # validation + 11 cells x repeat/novel
     assert not list(tmp_path.glob("retention__shared__*.npz"))
+
+
+def test_rehearsal_export_is_opt_in_and_separate(tmp_path: Path) -> None:
+    cfg = make_cfg(tmp_path, ["retention"])
+    cfg.data.eval_sets.canonical = {"module_count": 8, "task_count": 8}
+    cfg.data.eval_sets.module_counts = [8]
+    assert export_rehearsal_sets(cfg) == 0
+    cfg.data.eval_sets.rehearsal.enabled = True
+    assert export_rehearsal_sets(cfg) == 3
+    suites = load_eval_suites(tmp_path)
+    assert len(suites) == 3
+    for suite in suites.values():
+        assert suite["tokens"].shape[0] == 12
+        assert suite["__meta__"]["capability"] == "rehearsal"
+        assert not suite["target_module_pre_exposures"].any()
+        assert set(suite["rehearsal_mode"]) == {"none", "one", "both"}
+    hashes = {
+        p.name: load_suite_metadata(p)["archive_sha256"] for p in tmp_path.glob("*.meta.json")
+    }
+    export_rehearsal_sets(cfg)
+    assert hashes == {
+        p.name: load_suite_metadata(p)["archive_sha256"] for p in tmp_path.glob("*.meta.json")
+    }

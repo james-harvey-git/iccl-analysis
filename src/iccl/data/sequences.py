@@ -127,6 +127,7 @@ def build_sequence(
     fixed_final_latent: np.ndarray | None = None,
     fixed_curriculum_latents: np.ndarray | None = None,
     fixed_demo_counts: tuple[int, ...] | None = None,
+    fixed_task_inputs: tuple[np.ndarray, ...] | None = None,
 ) -> SequenceSample:
     """Build one sequence from a fresh world or supplied paired-control state."""
     assert_feasible(cfg, family.cfg.num_modules)
@@ -188,6 +189,16 @@ def build_sequence(
     if revisit_demos > 0:
         demo_counts.append(revisit_demos)
 
+    if fixed_task_inputs is not None:
+        if len(fixed_task_inputs) != len(latents):
+            raise ValueError("fixed_task_inputs must contain one array per serialized task")
+        expected_shapes = [(demos, family.cfg.input_dim) for demos in demo_counts]
+        actual_shapes = [inputs.shape for inputs in fixed_task_inputs]
+        if actual_shapes != expected_shapes:
+            raise ValueError(
+                f"fixed_task_inputs shapes must be {expected_shapes}, got {actual_shapes}"
+            )
+
     token_dim = max(family.cfg.input_dim, family.cfg.output_dim)
     sequence_length = 2 * sum(demo_counts) + int(cfg.signal_boundaries) * len(latents)
     tokens = np.zeros((sequence_length, token_dim), dtype=np.float32)
@@ -199,13 +210,17 @@ def build_sequence(
     task_spans: list[tuple[int, int]] = []
     base_mse: list[np.ndarray] = []
     position = 0
-    for latent, demos in zip(latents, demo_counts, strict=True):
+    for task_index, (latent, demos) in enumerate(zip(latents, demo_counts, strict=True)):
         if cfg.signal_boundaries:
             boundaries.append(position)
             token_type[position] = TOKEN_BOUNDARY
             position += 1
         start = position
-        x = rng.uniform(-1.0, 1.0, size=(demos, family.cfg.input_dim)).astype(np.float32)
+        x = (
+            rng.uniform(-1.0, 1.0, size=(demos, family.cfg.input_dim)).astype(np.float32)
+            if fixed_task_inputs is None
+            else fixed_task_inputs[task_index].astype(np.float32, copy=False)
+        )
         y = teacher_forward(pool, latent, x)
         base_mse.append(((y - y.mean(axis=0)) ** 2).mean(axis=0))
         for demo in range(demos):

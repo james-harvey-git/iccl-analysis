@@ -24,9 +24,9 @@ sequence:
   graph_ordered: false      # preserve structured edge order; ignored for task_graph=random
 
 eval_sets:
-  num_sequences: 256       # per physical cell/condition and training validation
+  num_sequences: 256       # per ICL/composition cell/condition and training validation
   demos_per_task: 32       # positive D shared by every capability task block
-  out_dir: data/eval_sets  # frozen archives written by scripts/make_eval_sets.py
+  out_dir: data/eval_sets  # authoritative bundle; prepare with scripts/make_eval_sets.py
   bootstrap_seed: 0        # independent seed for confidence intervals
   bootstrap_replicates: 1000  # <2 disables bootstrap resampling
   best_metric: validation/token_mse  # raw token MSE on the training distribution
@@ -45,10 +45,15 @@ eval_sets:
       max: 3
   composition:
     constituent_task_exposures: 1  # prior tasks containing each target module
-    controls: [matched_prefix, no_history]  # matched_prefix required; no_history optional
-  # Retention repeats are balanced over every history-task position.
+    controls: [unexposed, no_history]  # unexposed required; no_history optional
+  # Retention worlds are paired across every history-task position.
   retention:
-    controls: [novel, shared]  # novel required; shared omitted for binary weighting
+    controls: [unexposed, shared]  # unexposed required; shared omitted for binary weighting
+    num_worlds: 256           # independent worlds per cell, each evaluated at every delay
+    monitor_num_sequences: 256  # canonical row subset; T <= count <= num_worlds
+  rehearsal:
+    enabled: false          # opt-in export; evaluate with evaluation.suites=rehearsal
+    num_worlds: 256          # worlds paired across first/middle and none/one/both
 
 distribution_diagnostic:
   num_sequences: 10000       # sequences sampled by analyze_sequence_distribution.py

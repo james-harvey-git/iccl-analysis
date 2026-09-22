@@ -7,7 +7,6 @@ import pytest
 
 from iccl.data.controls import (
     build_paired_composition_controls,
-    build_paired_retention_control,
 )
 from iccl.data.curriculum import (
     TASK_ORIGIN_CODES,
@@ -153,96 +152,45 @@ def test_revisit_rejects_an_out_of_range_history_position() -> None:
         )
 
 
-def test_paired_retention_control_shares_everything_but_the_final_task() -> None:
-    family = make_family()
-    cfg = make_seq_cfg()
-    rng = sequence_rng(0, 0)
-    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
-    control = build_paired_retention_control(family, seq, rng, mode="novel")
-
-    start, end = seq.info["task_spans"][-1]
-    np.testing.assert_array_equal(control.tokens[:start], seq.tokens[:start])
-    np.testing.assert_array_equal(control.targets[:start], seq.targets[:start])
-    np.testing.assert_array_equal(control.token_type, seq.token_type)
-    np.testing.assert_array_equal(control.loss_mask, seq.loss_mask)
-    for key in ("demo_counts", "boundaries", "task_spans"):
-        np.testing.assert_array_equal(control.info[key], seq.info[key])
-    assert control.info["num_curriculum_tasks"] == seq.info["num_curriculum_tasks"]
-    assert control.info["world"] is seq.info["world"]
-
-    # The final block keeps its inputs and swaps its targets, so the model meets
-    # the block in the same state and answers its first demonstration alike.
-    x_positions = np.arange(start, end, 2)
-    np.testing.assert_array_equal(control.tokens[x_positions], seq.tokens[x_positions])
-    assert not np.array_equal(control.targets[x_positions], seq.targets[x_positions])
-    np.testing.assert_array_equal(
-        control.tokens[x_positions + 1, : family.cfg.output_dim],
-        control.targets[x_positions],
+def test_fixed_task_inputs_preserve_complete_logical_task_blocks() -> None:
+    family = make_family(num_modules=4)
+    cfg = make_seq_cfg(phases=(), curriculum_sampler="constructive", surplus_tasks=1)
+    rng = sequence_rng(3, 7)
+    original = build_sequence(
+        family,
+        cfg,
+        rng,
+        revisit_demos=3,
+        revisit_task_index=1,
+        include_world=True,
+        fixed_demo_counts=(3, 3, 3, 3),
     )
-    expected = control.targets[x_positions]
-    np.testing.assert_allclose(
-        control.info["base_mse"][-1],
-        ((expected - expected.mean(axis=0)) ** 2).mean(axis=0),
-        rtol=1e-5,
+    inputs = tuple(
+        original.tokens[start + 2 * np.arange(count), : family.cfg.input_dim].copy()
+        for (start, _), count in zip(
+            original.info["task_spans"], original.info["demo_counts"], strict=True
+        )
+    )
+    order = np.array([2, 0, 1, 3])
+    rebuilt = build_sequence(
+        family,
+        cfg,
+        sequence_rng(9, 9),
+        revisit_demos=3,
+        revisit_task_index=2,
+        include_world=True,
+        world=original.info["world"],
+        fixed_curriculum_latents=original.info["latents"][:4][order],
+        fixed_demo_counts=(3, 3, 3, 3),
+        fixed_task_inputs=tuple(inputs[index] for index in order) + (inputs[-1],),
     )
 
-
-def test_retention_control_modes_pick_their_supports() -> None:
-    family = make_family()
-    cfg = make_seq_cfg()
-    rng = sequence_rng(0, 0)
-    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
-    revisited = seq.info["latents"][-1]
-    demonstrated = {tuple(np.flatnonzero(lat)) for lat in seq.info["latents"]}
-
-    novel = build_paired_retention_control(family, seq, rng, mode="novel").info["latents"][-1]
-    assert tuple(np.flatnonzero(novel)) not in demonstrated
-    assert np.count_nonzero(novel) == np.count_nonzero(revisited)
-
-    shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
-    np.testing.assert_array_equal(np.flatnonzero(shared), np.flatnonzero(revisited))
-    assert not any(np.array_equal(shared, latent) for latent in seq.info["latents"][:-1])
-
-
-def test_shared_retention_control_rejects_other_historical_latents(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    family = make_family()
-    cfg = make_seq_cfg()
-    rng = sequence_rng(0, 0)
-    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
-    history = seq.info["latents"][:-1]
-    revisited = seq.info["latents"][-1]
-    active = np.flatnonzero(revisited)
-
-    def candidate(weights: tuple[float, ...]) -> np.ndarray:
-        latent = np.zeros_like(revisited)
-        latent[active] = weights
-        return latent
-
-    values = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
-    candidates = [candidate(weights) for weights in product(values, repeat=len(active))]
-    historical = next(latent for latent in candidates if not np.array_equal(latent, revisited))
-    history[1] = historical
-    unseen = next(
-        latent
-        for latent in candidates
-        if not any(np.array_equal(latent, previous) for previous in history)
-    )
-    candidates = iter([historical, unseen])
-    monkeypatch.setattr(family, "apply_weighting", lambda rng, pattern: next(candidates))
-
-    shared = build_paired_retention_control(family, seq, rng, mode="shared").info["latents"][-1]
-    np.testing.assert_array_equal(shared, unseen)
-
-
-def test_shared_retention_control_is_degenerate_under_binary_weighting() -> None:
-    family = make_family(weighting="binary")
-    cfg = make_seq_cfg()
-    rng = sequence_rng(0, 0)
-    seq = build_sequence(family, cfg, rng, revisit_demos=3, include_world=True)
-    with pytest.raises(ValueError, match="weighting=binary"):
-        build_paired_retention_control(family, seq, rng, mode="shared")
+    for task, logical_task in enumerate(order):
+        start = int(rebuilt.info["task_spans"][task, 0])
+        positions = start + 2 * np.arange(3)
+        np.testing.assert_array_equal(rebuilt.tokens[positions, :4], inputs[logical_task])
+    final_start = int(rebuilt.info["task_spans"][-1, 0])
+    np.testing.assert_array_equal(rebuilt.tokens[final_start + 2 * np.arange(3), :4], inputs[-1])
 
 
 def test_base_mse_matches_targets() -> None:

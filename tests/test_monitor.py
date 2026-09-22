@@ -7,19 +7,23 @@ def curve_rows() -> list[dict[str, Any]]:
     specifications = (
         ("icl", "ordinary", "within_task_learning"),
         ("icl", "ordinary", "episode_learning"),
-        ("composition", "constituent", "composition_learning"),
-        ("composition", "matched_prefix", "composition_learning"),
+        ("composition", "exposed", "composition_learning"),
+        ("composition", "unexposed", "composition_learning"),
         ("composition", "no_history", "composition_learning"),
         ("retention", "original", "retention_learning"),
         ("retention", "repeat", "retention_learning"),
-        ("retention", "novel", "retention_learning"),
+        ("retention", "unexposed", "retention_learning"),
         ("retention", "shared", "retention_learning"),
+        ("retention", "unexposed", "retention_error_delay"),
+        ("retention", "repeat", "retention_error_delay"),
+        ("retention", "savings", "retention_delay"),
     )
     return [
         {
             "capability": capability,
             "condition": condition,
             "curve_type": curve_type,
+            "retention_component": "total" if curve_type == "retention_delay" else None,
             "x_value": position,
             "nmse": 0.5,
             "ci_low": 0.4,
@@ -30,13 +34,16 @@ def curve_rows() -> list[dict[str, Any]]:
     ]
 
 
-def test_canonical_monitor_has_four_fixed_demo_capability_panels() -> None:
+def test_canonical_monitor_has_seven_fixed_demo_capability_panels() -> None:
     figures = canonical_monitor_figures(curve_rows(), 5000)
     assert set(figures) == {
         "monitor-curves/icl_within_task",
         "monitor-curves/icl_across_episode",
         "monitor-curves/composition_final_task",
         "monitor-curves/retention_final_task",
+        "monitor-curves/retention_unexposed_vs_delay",
+        "monitor-curves/retention_repeat_vs_delay",
+        "monitor-curves/retention_total_savings_vs_delay",
     }
     retention = cast(Any, figures["monitor-curves/retention_final_task"].data)
     assert len(retention) == 4

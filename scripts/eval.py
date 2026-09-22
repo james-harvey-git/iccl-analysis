@@ -22,9 +22,15 @@ from iccl.checkpoints import (
     evaluation_checkpoint_references,
     resolve_checkpoint_path,
     source_from_checkpoint,
+    validate_evaluation_config,
 )
+from iccl.data.eval_bundle import select_evaluation_suite, validate_eval_bundle
 from iccl.evaluation.metrics import evaluate_suites, load_eval_suites
-from iccl.evaluation.results import write_evaluation_results
+from iccl.evaluation.results import (
+    evaluation_identity,
+    read_evaluation_results,
+    write_evaluation_results,
+)
 from iccl.models.model import model_from_config
 from iccl.reporting.figures import evaluation_figures, write_html_figures
 from iccl.reporting.logger import RunLogger
@@ -34,17 +40,26 @@ from iccl.utils import resolve_device, seed_everything
 
 @hydra.main(version_base=None, config_path="../configs", config_name="config")
 def main(cfg: DictConfig) -> None:
+    bundle = validate_eval_bundle(cfg)
     seed_everything(cfg.seed)
     device = resolve_device(cfg.device)
     references = evaluation_checkpoint_references(cfg)
     first_path, first_is_artifact = resolve_checkpoint_path(references[0])
     first_checkpoint = torch.load(first_path, map_location=device, weights_only=False)
+    validate_evaluation_config(first_checkpoint, cfg)
     model = model_from_config(cfg).to(device)
     model.eval()
 
     out_dir = Path(HydraConfig.get().runtime.output_dir)
-    suites = load_eval_suites(Path(cfg.data.eval_sets.out_dir))
-    results_dir = out_dir / "evaluation-results"
+    suites = load_eval_suites(
+        Path(cfg.data.eval_sets.out_dir),
+        select=lambda meta: select_evaluation_suite(meta, str(cfg.evaluation.suites)),
+    )
+    results_dir = (
+        Path(cfg.evaluation.results_dir)
+        if cfg.evaluation.results_dir
+        else out_dir / "evaluation-results"
+    )
     first_source = source_from_checkpoint(first_checkpoint)
     job_type = "eval" if len(references) == 1 else "eval-trajectory"
     logger = RunLogger(cfg, out_dir, job_type=job_type, source=first_source)
@@ -57,6 +72,7 @@ def main(cfg: DictConfig) -> None:
         else:
             path, is_artifact = resolve_checkpoint_path(reference)
             checkpoint = torch.load(path, map_location=device, weights_only=False)
+            validate_evaluation_config(checkpoint, cfg)
         step = int(checkpoint["step"])
         if step <= previous_step:
             raise ValueError(
@@ -72,33 +88,53 @@ def main(cfg: DictConfig) -> None:
         if is_artifact:
             logger.use_artifact(reference.removeprefix(WANDB_SCHEME))
         model.load_state_dict(checkpoint["model"])
-        report = evaluate_suites(
-            model,
+        dtype = resolve_autocast_dtype(cfg.training.precision, device)
+        identity = evaluation_identity(
+            checkpoint,
             suites,
-            device,
-            autocast_dtype=resolve_autocast_dtype(cfg.training.precision, device),
-            bootstrap_seed=int(cfg.data.eval_sets.get("bootstrap_seed", 0)),
-            bootstrap_replicates=int(cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
+            bundle,
+            batch_size=int(cfg.evaluation.batch_size),
+            bootstrap_seed=int(cfg.data.eval_sets.bootstrap_seed),
+            bootstrap_replicates=int(cfg.data.eval_sets.bootstrap_replicates),
+            backend=str(cfg.model.backend),
+            device=device,
+            dtype=dtype,
         )
+        report = read_evaluation_results(results_dir / f"step_{step:07d}", identity, suites)
+        cached = report is not None
+        if report is None:
+            report = evaluate_suites(
+                model,
+                suites,
+                device,
+                batch_size=int(cfg.evaluation.batch_size),
+                autocast_dtype=resolve_autocast_dtype(cfg.training.precision, device),
+                bootstrap_seed=int(cfg.data.eval_sets.get("bootstrap_seed", 0)),
+                bootstrap_replicates=int(cfg.data.eval_sets.get("bootstrap_replicates", 1000)),
+            )
         figures = evaluation_figures(report.summary_rows, report.curve_rows)
         resolved = cast(dict[str, Any], OmegaConf.to_container(cfg, resolve=True))
-        result_path = write_evaluation_results(
-            report,
-            results_dir,
-            step,
-            {
-                "checkpoint_reference": reference,
-                "checkpoint_path": str(path),
-                "source_run": None if source is None else asdict(source),
-                "resolved_config": resolved,
-                "evaluation_config": resolved["evaluation"],
-                "data_evaluation_config": resolved["data"]["eval_sets"],
-                "model_config": resolved["model"],
-                "reporting_config": resolved["wandb"],
-                "training_config": checkpoint.get("config"),
-                "suites": {name: suite["__meta__"] for name, suite in suites.items()},
-            },
-        )
+        result_path = results_dir / f"step_{step:07d}"
+        if not cached:
+            result_path = write_evaluation_results(
+                report,
+                results_dir,
+                step,
+                {
+                    "checkpoint_reference": reference,
+                    "evaluation_identity": identity,
+                    "checkpoint_path": str(path),
+                    "source_run": None if source is None else asdict(source),
+                    "resolved_config": resolved,
+                    "evaluation_config": resolved["evaluation"],
+                    "data_evaluation_config": resolved["data"]["eval_sets"],
+                    "model_config": resolved["model"],
+                    "reporting_config": resolved["wandb"],
+                    "training_config": checkpoint.get("config"),
+                    "eval_bundle": bundle,
+                    "suites": {name: suite["__meta__"] for name, suite in suites.items()},
+                },
+            )
         write_html_figures(figures.items(), result_path / "plots")
         logger.log_full_evaluation(report, step, figures, reference)
         print(f"evaluation results written to {result_path}")
