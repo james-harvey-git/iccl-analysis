@@ -58,10 +58,19 @@ def test_indexed_banks_and_fresh_examples() -> None:
         control_modes=("unexposed",),
     )
     assert set(binary) == {"repeat", "unexposed"}
-    with pytest.raises(ValueError, match="full_rank"):
-        build_factorial_cell(
-            family, replace(cfg, require_full_rank=True), seed=0, world=0, preceding=0, delay=0
+    for identifiable, full_rank in ((False, False), (False, True), (True, True)):
+        overridden = build_factorial_cell(
+            family,
+            replace(cfg, require_identifiable=identifiable, require_full_rank=full_rank),
+            seed=12,
+            world=2,
+            preceding=0,
+            delay=0,
         )
+        for condition, sample in overridden.items():
+            np.testing.assert_array_equal(sample.tokens, empty[condition].tokens)
+            np.testing.assert_array_equal(sample.targets, empty[condition].targets)
+            np.testing.assert_array_equal(sample.info["latents"], empty[condition].info["latents"])
 
 
 @pytest.fixture(scope="module")

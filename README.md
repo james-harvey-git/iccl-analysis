@@ -127,6 +127,8 @@ Each world fixes the teacher, target, controls and fresh examples across the
 whole grid. Independent preceding and intervening banks exclude both target
 modules; each cell uses nested prefixes of those banks. Background tasks are
 sampled without coverage/connectivity conditioning, including in longer cells.
+The factorial builder overrides both training `require_identifiable` and
+`require_full_rank` flags to false.
 This is intentionally different from the standard retention curriculum. Frozen
 metadata records the independent sampler and null constructive surplus (`S`);
 the integer archive field uses -1 for that inapplicable surplus.

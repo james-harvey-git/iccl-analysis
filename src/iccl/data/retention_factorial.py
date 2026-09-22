@@ -41,6 +41,7 @@ def build_factorial_cell(
 
     Logical blocks 0/1 are original/final; even IDs >=2 are preceding blocks,
     odd IDs >=3 are intervening blocks. Bank prefixes never depend on grid size.
+    Training identifiability and full-rank constraints do not apply to these banks.
     """
     demos = cfg.demos_per_task
     if (
@@ -51,8 +52,6 @@ def build_factorial_cell(
         or min(preceding, delay) < 0
     ):
         raise ValueError("factorial retention requires M>=4, 2-hot tasks, D>=1 and p,d>=0")
-    if cfg.require_full_rank:
-        raise ValueError("factorial retention is incompatible with require_full_rank")
     rng = sequence_rng(seed + FACTORIAL_SEED_OFFSET, world)
     streams = rng.integers(0, 2**32, size=5).tolist()
     pool = sample_module_pool(family.cfg, sequence_rng(streams[0], 0))
@@ -76,7 +75,9 @@ def build_factorial_cell(
     logical = np.array([*(2 + 2 * np.arange(preceding)), 0, *(3 + 2 * np.arange(delay))])
     repeat = build_sequence(
         family,
-        replace(cfg, require_identifiable=False, phases=(), surplus_tasks=None),
+        replace(
+            cfg, require_identifiable=False, require_full_rank=False, phases=(), surplus_tasks=None
+        ),
         rng,
         revisit_demos=demos,
         revisit_task_index=preceding,

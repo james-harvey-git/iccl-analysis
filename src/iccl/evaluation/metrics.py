@@ -44,7 +44,8 @@ METRIC_DEFINITIONS = {
 METRIC_DEFINITIONS.update(
     {
         f"factorial_{name}_mean": (
-            f"at fixed preceding/intervening counts, mean final-demo {name} nMSE over paired worlds"
+            f"at fixed preceding/intervening counts, final-task {name} nMSE per demo, "
+            "averaged over all demonstrations and paired worlds"
         )
         for name in ("repeat", "shared", "unexposed", "total", "module", "episodic")
     }
