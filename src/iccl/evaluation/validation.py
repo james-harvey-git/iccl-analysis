@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from iccl.data.curriculum import check_compositional, check_connected, task_categories
+from iccl.data.retention_factorial import FACTORIAL_PROTOCOL, factorial_axis
 from iccl.data.retention_position import REHEARSAL_PROTOCOL, RETENTION_PROTOCOL
 
 
@@ -71,16 +72,19 @@ def _row(suite: dict[str, Any], index: int, condition: str, rehearsal: bool) -> 
     else:
         _require(mode == "natural" and len(slots) == 0, "rehearsal leaked into standard retention")
     _equal(post, expected_post, "incorrect target post-exposure")
-    core_indices = np.array([i for i in range(tasks) if i != position and i not in slots])
+    core_indices = np.array(
+        [i for i in range(tasks) if i != position and i not in slots], dtype=int
+    )
     _equal(suite["background_task_indices"][index], core_indices, "incorrect background indices")
     _require(
         not active[core_indices][:, support].any(), "target exposure outside encounter/rehearsal"
     )
     core = active[core_indices][:, remaining]
-    _require(
-        check_compositional(core, modules - 2) and check_connected(core),
-        "background must cover and connect all non-target modules independently",
-    )
+    if suite["__meta__"]["capability"] != "retention_factorial":
+        _require(
+            check_compositional(core, modules - 2) and check_connected(core),
+            "background must cover and connect all non-target modules independently",
+        )
     exposed = int(condition != "unexposed")
     expected = {
         "prior_target_latent_count": int(condition == "repeat"),
@@ -93,8 +97,8 @@ def _row(suite: dict[str, Any], index: int, condition: str, rehearsal: bool) -> 
             active[:, support] * suite["demo_counts"][index, :-1, None]
         ).sum(axis=0),
         "background_num_modules": modules - 2,
-        "background_covered": True,
-        "background_connected": True,
+        "background_covered": check_compositional(core, modules - 2),
+        "background_connected": check_connected(core),
         "history_covered": check_compositional(active, modules),
         "history_connected": check_connected(active),
         "presentation_category": task_categories(latents),
@@ -125,14 +129,25 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
     repeat = conditions["repeat"]
     meta = repeat["__meta__"]
     rehearsal = meta["capability"] == "rehearsal"
-    protocol = REHEARSAL_PROTOCOL if rehearsal else RETENTION_PROTOCOL
+    factorial = meta["capability"] == "retention_factorial"
+    protocol = (
+        FACTORIAL_PROTOCOL if factorial else REHEARSAL_PROTOCOL if rehearsal else RETENTION_PROTOCOL
+    )
     _require(meta.get("protocol") == protocol, "obsolete protocol")
     count = len(repeat["tokens"])
     tasks = int(meta["num_tasks"])
     groups = repeat["position_group_id"]
     worlds = np.unique(groups)
     _equal(len(worlds), meta["num_worlds"], "world count mismatch")
-    _equal(count, len(worlds) * (6 if rehearsal else tasks), "incomplete world-position population")
+    _equal(
+        count,
+        len(worlds) * (1 if factorial else 6 if rehearsal else tasks),
+        "incomplete world-position population",
+    )
+    if factorial:
+        _equal(groups, np.arange(meta["num_worlds"]), "factorial world order/identity mismatch")
+        _equal(repeat["intervening_tasks"], np.full(count, meta["delay"]), "cell delay mismatch")
+        _require(set(conditions) == set(meta["conditions"]), "missing factorial condition")
     _require(len(np.unique(repeat["pair_id"])) == count, "duplicate pair identifiers")
     for condition, suite in conditions.items():
         _equal(suite["__meta__"].get("protocol"), protocol, "mixed protocols")
@@ -195,6 +210,8 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
             if rehearsal
             else {(p, "natural") for p in range(tasks)}
         )
+        if factorial:
+            expected = {(meta["original_task_position"], "natural")}
         _require(
             set(zip(positions.tolist(), modes.tolist(), strict=True)) == expected,
             "missing or repeated position/mode",
@@ -274,3 +291,53 @@ def validate_retention_group(conditions: dict[str, dict[str, Any]]) -> None:
                                 suite[key][base, mask],
                                 "mode changed an unaffected block",
                             )
+
+
+def validate_factorial_grid(suites: list[dict[str, Any]]) -> None:
+    """Check complete cells and immutable logical blocks across the factorial grid."""
+    if not suites:
+        return
+    first = suites[0]
+    meta = first["__meta__"]
+    ps, ds = factorial_axis(meta["preceding_tasks"]), factorial_axis(meta["intervening_tasks"])
+    expected = {(p, d, c) for p in ps for d in ds for c in meta["conditions"]}
+    seen: set[tuple[int, int, str]] = set()
+    blocks: dict[tuple[str, int, int], tuple[np.ndarray, ...]] = {}
+    for suite in suites:
+        info = suite["__meta__"]
+        p, d, condition = info["original_task_position"], info["delay"], info["condition"]
+        cell = (p, d, condition)
+        _require(cell in expected and cell not in seen, "missing or duplicate factorial cell")
+        seen.add(cell)
+        for key in (
+            "preceding_tasks",
+            "intervening_tasks",
+            "conditions",
+            "num_worlds",
+            "num_modules",
+            "demos_per_task",
+            "seed",
+        ):
+            _equal(info[key], meta[key], f"factorial grid disagrees on {key}")
+        _equal(info["num_tasks"], p + d + 1, "incorrect factorial history length")
+        _require(info["sampler"] == "independent", "incorrect factorial sampler")
+        for key in (k for k in first if k.startswith("world_")):
+            _equal(suite[key], first[key], "teacher/world changed across grid")
+        logical = np.array([*(2 + 2 * np.arange(p)), 0, *(3 + 2 * np.arange(d)), 1])
+        _equal(
+            suite["logical_task_id"],
+            np.tile(logical, (info["num_worlds"], 1)),
+            "invalid bank block IDs",
+        )
+        for world in range(info["num_worlds"]):
+            for task, identity in enumerate(logical):
+                start, end = suite["task_spans"][world, task]
+                block = tuple(suite[k][world, start:end] for k in ("tokens", "targets")) + (
+                    suite["latents"][world, task],
+                    suite["base_mse"][world, task],
+                )
+                key = (condition, world, int(identity))
+                reference = blocks.setdefault(key, block)
+                for actual, frozen in zip(block, reference, strict=True):
+                    _equal(actual, frozen, "logical block changed across factorial grid")
+    _require(seen == expected, "incomplete factorial grid")

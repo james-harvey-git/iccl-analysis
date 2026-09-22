@@ -51,6 +51,11 @@ eval_sets:
     controls: [unexposed, shared]  # unexposed required; shared omitted for binary weighting
     num_worlds: 256           # independent worlds per cell, each evaluated at every delay
     monitor_num_sequences: 256  # canonical row subset; T <= count <= num_worlds
+  retention_factorial:
+    enabled: true           # independent position x delay diagnostic; excluded from monitoring
+    num_worlds: 64           # paired across the full grid; independent of retention.num_worlds
+    preceding_tasks: [0, 1, 2, 3, 4, 5, 6, 7]  # distinct nonnegative task counts
+    intervening_tasks: [0, 1, 2, 3, 4, 5, 6, 7]  # reference M and evaluation D; variable T
   rehearsal:
     enabled: false          # opt-in export; evaluate with evaluation.suites=rehearsal
     num_worlds: 256          # worlds paired across first/middle and none/one/both

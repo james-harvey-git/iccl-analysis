@@ -34,6 +34,7 @@ from iccl.data.dataset import (
     to_tensors,
 )
 from iccl.data.eval_cells import EvalCell, resolve_eval_cells
+from iccl.data.retention_factorial import FACTORIAL_PROTOCOL, build_factorial_cell, factorial_axis
 from iccl.data.retention_position import (
     REHEARSAL_PROTOCOL,
     RETENTION_PROTOCOL,
@@ -473,6 +474,75 @@ def export_rehearsal_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> in
         )
         export_suite(samples, out_dir / metadata["suite"], metadata)
     return len(conditions)
+
+
+def export_factorial_sets(cfg: DictConfig, *, out_dir: Path | None = None) -> int:
+    """Freeze length-homogeneous factorial cells at the reference module count."""
+    data, spec = cfg.data, cfg.data.eval_sets.retention_factorial
+    if not spec.enabled or "retention" not in data.eval_sets.capabilities:
+        return 0
+    preceding, delays = factorial_axis(spec.preceding_tasks), factorial_axis(spec.intervening_tasks)
+    worlds = spec.num_worlds
+    if type(worlds) is not int or worlds < 1:
+        raise ValueError("retention_factorial.num_worlds must be a positive integer")
+    reference = next(c for c in resolve_eval_cells(data) if "canonical" in c.family_memberships)
+    family = make_family(data, extra_hotness=2, num_modules=reference.num_modules)
+    sequence = _sequence_config(sequence_config_from(data), reference)
+    modes = tuple(
+        str(mode)
+        for mode in data.eval_sets.retention.controls
+        if mode != "shared" or data.weighting != "binary"
+    )
+    root = Path(data.eval_sets.out_dir) if out_dir is None else out_dir
+    base = {
+        "config": OmegaConf.to_container(data, resolve=True),
+        "seed": int(cfg.seed),
+        "num_worlds": worlds,
+        "protocol": FACTORIAL_PROTOCOL,
+        "sample_scope": "full",
+        "preceding_tasks": list(preceding),
+        "intervening_tasks": list(delays),
+        "sampler": "independent",
+        "conditions": ["repeat", *modes],
+        "enum_mappings": {"curriculum_sampler": CURRICULUM_SAMPLER_CODES},
+    }
+    for p in preceding:
+        for d in delays:
+            cell = replace(
+                reference, family_memberships=("retention_factorial",), num_tasks=p + d + 1
+            )
+            cell_id = f"{cell.cell_id}__p{p:02d}__k{d:02d}"
+            group = f"retention_factorial__{cell_id}"
+            samples: dict[str, list[SequenceSample]] = {c: [] for c in ("repeat", *modes)}
+            for world in range(worlds):
+                for condition, sample in build_factorial_cell(
+                    family,
+                    sequence,
+                    seed=int(cfg.seed),
+                    world=world,
+                    preceding=p,
+                    delay=d,
+                    control_modes=modes,
+                ).items():
+                    samples[condition].append(sample)
+            for condition, rows in samples.items():
+                metadata = _metadata(
+                    base,
+                    "retention_factorial",
+                    condition,
+                    cell,
+                    sampling_kind="independent_non_target_banks",
+                    pair_group=group,
+                )
+                metadata.update(
+                    suite=f"retention_factorial__{condition}__{cell_id}",
+                    cell_id=cell_id,
+                    num_surplus_tasks=None,
+                    original_task_position=p,
+                    delay=d,
+                )
+                export_suite(rows, root / metadata["suite"], metadata)
+    return len(preceding) * len(delays) * (1 + len(modes))
 
 
 def load_suite(path: Path) -> dict[str, np.ndarray]:

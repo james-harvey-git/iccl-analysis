@@ -21,6 +21,7 @@ _EVAL_KEYS = {
     "composition",
     "retention",
     "rehearsal",
+    "retention_factorial",
 }
 
 

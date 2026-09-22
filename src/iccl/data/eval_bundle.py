@@ -15,10 +15,10 @@ from typing import Any, cast
 
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.data.export import _sha256, export_eval_sets, export_rehearsal_sets
+from iccl.data.export import _sha256, export_eval_sets, export_factorial_sets, export_rehearsal_sets
 
 # Increment when frozen sampling or archive semantics change incompatibly.
-BUNDLE_VERSION = 2
+BUNDLE_VERSION = 3
 
 
 def generation_config(cfg: DictConfig) -> dict[str, Any]:
@@ -93,6 +93,7 @@ def prepare_eval_bundle(cfg: DictConfig) -> Path:
             staging = Path(temporary) / "bundle"
             count = export_eval_sets(cfg, out_dir=staging)
             count += export_rehearsal_sets(cfg, out_dir=staging)
+            count += export_factorial_sets(cfg, out_dir=staging)
             manifest = {
                 "bundle_version": BUNDLE_VERSION,
                 "generation_config": generation_config(cfg),
@@ -132,7 +133,9 @@ def select_evaluation_suite(metadata: dict[str, Any], selection: str) -> bool:
     if selection == "rehearsal":
         return capability == "rehearsal"
     if selection == "retention_position":
-        return capability == "retention" and "canonical" in metadata.get("family_memberships", ())
-    return capability in {"icl", "composition", "retention"} or (
+        return capability == "retention_factorial" or (
+            capability == "retention" and "canonical" in metadata.get("family_memberships", ())
+        )
+    return capability in {"icl", "composition", "retention", "retention_factorial"} or (
         selection == "all" and capability == "validation"
     )

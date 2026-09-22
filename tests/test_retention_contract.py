@@ -18,6 +18,7 @@ def bundle_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
             config_name="config",
             overrides=[
                 f"data.eval_sets.out_dir={root}",
+                "data.eval_sets.retention_factorial.enabled=false",
                 "data.input_dim=4",
                 "data.output_dim=4",
                 "data.hidden_dims=[4]",

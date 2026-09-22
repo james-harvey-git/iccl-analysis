@@ -292,6 +292,7 @@ def test_trainer_runs_validation_and_tracks_best(tmp_path: Path) -> None:
     out_dir = Path(cfg.data.eval_sets.out_dir)
     cfg.data.eval_sets = OmegaConf.load("configs/data/hyperteacher.yaml").eval_sets
     cfg.data.eval_sets.out_dir = str(out_dir)
+    cfg.data.eval_sets.retention_factorial.enabled = False
     cfg.data.eval_sets.module_counts = [8]
     cfg.data.eval_sets.num_sequences = 8
     cfg.data.eval_sets.demos_per_task = 2
