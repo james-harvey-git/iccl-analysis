@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import plotly.graph_objects as go
 
+from iccl.reporting.factorial import FactorialGrid, factorial_figures
 from iccl.visualization import grouped_figure
 
 PRIMARY_METRICS = {
@@ -246,6 +247,15 @@ def evaluation_figures(
     task_rows = [row for row in primary if _has_family(row, "task_variation")]
     module_rows = [row for row in primary if _has_family(row, "module_variation")]
     figures: dict[str, go.Figure] = {}
+    if any(row["capability"] == "retention_factorial" for row in summary_rows):
+        # Runtime figures describe one checkpoint; its step is carried by the logger.
+        grid = FactorialGrid.from_rows([dict(row, step=0) for row in summary_rows])
+        figures.update(
+            {
+                f"evaluation/retention_factorial/{name}": figure
+                for name, figure in factorial_figures(grid, preceding=min(grid.preceding)).items()
+            }
+        )
     if task_rows:
         figures["evaluation/task_variation_summary"] = _task_summary(task_rows)
     if module_rows:

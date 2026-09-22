@@ -41,6 +41,14 @@ METRIC_DEFINITIONS = {
     "edge_excess_mean": "within-world mean edge savings minus mean interior savings",
     "rehearsal_effect_mean": "within-world controlled-rehearsal savings minus no-rehearsal savings",
 }
+METRIC_DEFINITIONS.update(
+    {
+        f"factorial_{name}_mean": (
+            f"at fixed preceding/intervening counts, mean final-demo {name} nMSE over paired worlds"
+        )
+        for name in ("repeat", "shared", "unexposed", "total", "module", "episodic")
+    }
+)
 
 
 @dataclass
