@@ -1,0 +1,36 @@
+defaults:
+  - module_decoder
+  - _self_
+
+# Reduce workload only; retain the complete decoder for the selected GDN checkpoint.
+dataset:
+  counts:
+    train: 256
+    validation: 32
+    test: 32
+  shard_size: 64
+
+capture:
+  batch_size: 1
+  num_workers: 0
+
+solver:
+  num_threads: 2
+
+training:
+  batch_size: 8
+  num_steps: 20
+  warmup_steps: 2
+  num_workers: 0
+  log_every: 5
+  validation_every: 10
+  checkpoint_every: 20
+
+evaluation:
+  functional_inputs_per_task: 8
+  bootstrap_replicates: 100
+
+benchmark:
+  warmup_steps: 2
+  measured_steps: 10
+  profile_steps: 3

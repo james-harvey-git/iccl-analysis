@@ -1,0 +1,37 @@
+defaults:
+  - data: hyperteacher
+  - probe: module_decoder
+  - _self_
+
+seed: 0                      # Decoder initialization and training sample order.
+device: auto                 # cuda > mps > cpu; explicit devices remain supported.
+torch_num_threads: 1         # PyTorch CPU intra-op threads, separate from the solver.
+float32_matmul_precision: highest  # highest | high | medium; record actual settings.
+
+# Reuse the production teacher and fix this experiment's episode distribution.
+data:
+  num_modules: 8
+  sequence:
+    curriculum_sampler: constructive
+    hotness: 2
+    surplus_tasks: 1          # T = M - 1 + S = 8.
+    demos_per_task: 32
+    signal_boundaries: true
+    require_identifiable: true
+    require_full_rank: false
+
+wandb:
+  mode: disabled             # disabled | offline | online
+  project: iccl-analysis
+  entity: jublett-university-of-oxford
+  name: null
+  upload_weights: false      # Opt-in final decoder weights; never automatic full-state uploads.
+  upload_results: false      # Opt-in probe numerical results and figures.
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/module-decoder/runs/${hydra:job.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: multirun/module-decoder/${now:%Y-%m-%d_%H-%M-%S}

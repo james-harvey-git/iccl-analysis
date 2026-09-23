@@ -72,11 +72,13 @@ class RunLogger:
         *,
         job_type: str,
         source: SourceRun | None = None,
+        protocol: str = METRIC_VERSION,
     ) -> None:
         self.cfg = cfg
         self.out_dir = Path(out_dir)
         self.job_type = job_type
         self.source = source
+        self.protocol = protocol
         self.run = None
         self._pending_step: int | None = None
         self._pending_payload: dict[str, Any] = {}
@@ -95,7 +97,7 @@ class RunLogger:
             "checkpoints": repo_relative(self.out_dir / "checkpoints"),
             "snapshots": repo_relative(self.out_dir / "snapshots"),
         }
-        config["evaluation_protocol"] = METRIC_VERSION
+        config["evaluation_protocol"] = self.protocol
         tags = [self.job_type]
         notes = None
         if self.source is not None:

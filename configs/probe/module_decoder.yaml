@@ -1,0 +1,58 @@
+# Pilot operating defaults, to be revised from the cluster benchmark.
+dataset:
+  path: null                 # Required: capture writes here; other stages read here.
+  seed: 0                    # Capture-only seed; derive namespaced train/validation/test streams.
+  counts:                    # Capture-only requested counts, independently indexed per split.
+    train: 10000
+    validation: 1000
+    test: 1000
+  shard_size: 512             # Episodes per shard; ~256 MiB of default-width states.
+
+capture:
+  checkpoint: null           # Required for capture: local GDN checkpoint or wandb:// reference.
+  batch_size: 32             # Episodes per frozen-GDN forward pass.
+  num_workers: 2             # CPU episode-generation workers; 0 runs in the main process.
+  backend: auto              # auto | reference | fla; resolve auto using the selected device.
+  precision: auto            # auto | bf16 | fp32; state storage is always FP32.
+  resume: true               # Reuse compatible completed shards; reject identity mismatches.
+
+solver:
+  num_threads: 8             # Persistent native workers; exact branch_warm is the fixed method.
+  cache_dir: outputs/.cache/probe-assignment  # Source/build/platform-keyed native libraries.
+
+loss:
+  readout_weight: 1.0         # Positive; 1 gives equal weight per scalar; denominator is 4608.
+
+training:
+  control: none              # none | constant | shuffled_targets; controls are explicit runs.
+  batch_size: 128
+  num_steps: 10000            # Pilot update budget, not a convergence claim.
+  optimizer: adamw
+  lr: 3.0e-4
+  warmup_steps: 1000
+  schedule: constant         # constant | cosine after linear warmup.
+  weight_decay: 0.003         # Matrix parameters only, using the existing optimizer helper.
+  grad_clip: null             # null disables; otherwise maximum global gradient norm.
+  precision: auto             # Decoder matmul; parameters, optimizer state and loss stay FP32.
+  num_workers: 2              # Captured-shard reader workers, separate from native solver threads.
+  log_every: 25
+  validation_every: 250       # Validation joint aligned MSE selects best.pt.
+  checkpoint_every: 1000      # Rolling resumable last.pt; also save at completion.
+  resume: null               # Local full-state probe checkpoint; never a source GDN checkpoint.
+
+evaluation:
+  checkpoint: null           # Required for standalone evaluation: a local probe checkpoint.
+  split: test                # validation | test; checkpoint selection only uses validation.
+  batch_size: ${probe.training.batch_size}
+  precision: ${probe.training.precision}
+  functional_inputs_per_task: 64  # Fresh oracle-coefficient diagnostic inputs.
+  functional_seed: 0         # Separate namespace from demonstration and training RNGs.
+  bootstrap_replicates: 1000 # Resample whole episodes for 95% confidence intervals.
+  bootstrap_seed: 0
+  results_dir: null          # null writes <Hydra run dir>/probe-results.
+
+benchmark:
+  capture_first: false       # true calls the production capture stage before timing training.
+  warmup_steps: 10           # Real optimizer updates, excluded from throughput statistics.
+  measured_steps: 100        # Real full-decoder updates, including data and matching transfers.
+  profile_steps: 10          # Separate instrumented updates; 0 disables the timing breakdown.
