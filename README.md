@@ -25,6 +25,14 @@ uv run python scripts/make_eval_sets.py
 uv run python scripts/train.py
 ```
 
+## Linear module decoder
+
+The [module-decoder guide](docs/module-decoder.md) covers final-memory capture,
+the full affine decoder with exact native symmetry matching, controls, resumable
+training, held-out reconstruction, saved-result plots and the H100 benchmark.
+These analyses use `configs/probe.yaml` and separate captured datasets under
+`outputs/module-decoder/`.
+
 ## Frozen evaluation data
 
 `data/eval_sets/` is the authoritative bundle. It contains training-distribution
