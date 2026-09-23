@@ -193,6 +193,11 @@ change the alignment or enter training. This does not measure coefficient recove
 
 ## Full-decoder cluster benchmark
 
+On Isambard, use the dedicated
+[job scripts](../scripts/cluster/isambard/README.md), including
+`scripts/cluster/isambard/benchmark_probe.slurm`. They load CUDA and select the
+tested GCC/G++ host compilers automatically before running Python.
+
 Capture a small real dataset, then measure the reference-width decoder at batch
 size 128. Launch from the repository root:
 

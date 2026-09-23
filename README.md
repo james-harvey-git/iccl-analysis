@@ -16,6 +16,12 @@ Requires [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
+### Isambard jobs
+
+Dedicated [Isambard launchers](scripts/cluster/isambard/README.md) cover GDN
+training/evaluation and probe dataset capture, training, evaluation and
+benchmarking. They automatically load CUDA and select GCC/G++ 12 inside each job.
+
 ### Isambard GPU tests
 
 The Linux ARM environment uses PyTorch's CUDA 12.8 build, whose locked Triton
