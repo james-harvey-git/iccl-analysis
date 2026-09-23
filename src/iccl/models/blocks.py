@@ -117,9 +117,10 @@ class GDNLayer(nn.Module):
         *,
         backend: Backend = "auto",
         return_states: bool = False,
+        return_final_state: bool = False,
     ) -> tuple[
         Float[torch.Tensor, "batch seq d_model"],
-        Float[torch.Tensor, "batch seq heads value_dim key_dim"] | None,
+        Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
     ]:
         if self.use_short_conv:
             q, k, v = (
@@ -144,6 +145,7 @@ class GDNLayer(nn.Module):
             allow_neg_eigval=self.allow_neg_eigval,
             backend=backend,
             return_states=return_states,
+            return_final_state=return_final_state,
         )
         if self.use_gate:
             g = rearrange(self.g_proj(x), "b t (h d) -> b t h d", d=self.head_v_dim)
@@ -203,11 +205,17 @@ class GDNBlock(nn.Module):
         *,
         backend: Backend = "auto",
         return_states: bool = False,
+        return_final_state: bool = False,
     ) -> tuple[
         Float[torch.Tensor, "batch seq d_model"],
-        Float[torch.Tensor, "batch seq heads value_dim key_dim"] | None,
+        Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
     ]:
-        mixed, states = self.mixer(self.mixer_norm(x), backend=backend, return_states=return_states)
+        mixed, states = self.mixer(
+            self.mixer_norm(x),
+            backend=backend,
+            return_states=return_states,
+            return_final_state=return_final_state,
+        )
         x = x + mixed
         x = x + self.mlp(self.mlp_norm(x))
         return x, states

@@ -122,6 +122,32 @@ def test_capture_requires_reference_backend() -> None:
         model(batch["tokens"], batch["token_type"], capture=True)
 
 
+def test_final_capture_after_terminal_boundary() -> None:
+    model = small_model()
+    tokens = torch.randn(1, 521, D_IN)
+    types = torch.zeros((1, 521), dtype=torch.long)
+    tokens[:, -1] = 0
+    types[:, -1] = TOKEN_BOUNDARY
+    with torch.inference_mode():
+        trajectory = model(tokens, types, capture=True)
+        final = model(tokens, types, capture_final=True)
+        plain = model(tokens, types)
+        prefix = model(tokens[:, :-1], types[:, :-1], capture_final=True)
+    assert final.states is None and final.hidden is None
+    assert plain.final_states is None and trajectory.final_states is None
+    assert final.final_states is not None and trajectory.states is not None
+    assert prefix.final_states is not None
+    assert torch.equal(final.preds, plain.preds)
+    for terminal, states, before in zip(
+        final.final_states, trajectory.states, prefix.final_states, strict=True
+    ):
+        assert terminal.shape == (1, 2, 32, 16)
+        assert torch.equal(terminal, states[:, -1])
+        assert not torch.allclose(terminal, before)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        model(tokens, types, capture=True, capture_final=True)
+
+
 def test_state_dict_roundtrip_across_backend_settings() -> None:
     batch = small_batch()
     source = small_model(backend="auto")

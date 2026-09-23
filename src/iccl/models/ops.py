@@ -27,10 +27,15 @@ from jaxtyping import Float
 Backend = Literal["auto", "fla", "reference"]
 
 
-def resolve_backend(backend: Backend) -> Literal["fla", "reference"]:
-    """Map "auto" to "fla" on CUDA machines and "reference" elsewhere."""
+def resolve_backend(
+    backend: Backend, device: torch.device | None = None
+) -> Literal["fla", "reference"]:
+    """Resolve automatic dispatch using the execution device when supplied."""
     if backend == "auto":
-        return "fla" if torch.cuda.is_available() else "reference"
+        cuda = device.type == "cuda" if device is not None else torch.cuda.is_available()
+        return "fla" if cuda else "reference"
+    if backend not in ("fla", "reference"):
+        raise ValueError(f"unknown gated delta rule backend: {backend}")
     return backend
 
 
@@ -46,27 +51,33 @@ def gated_delta_rule(
     allow_neg_eigval: bool = False,
     backend: Backend = "auto",
     return_states: bool = False,
+    return_final_state: bool = False,
 ) -> tuple[
     Float[torch.Tensor, "batch seq heads value_dim"],
-    Float[torch.Tensor, "batch seq heads value_dim key_dim"] | None,
+    Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
 ]:
     """Causal gated delta rule over a sequence.
 
     ``a`` and ``b`` are the raw ``a_proj``/``b_proj`` outputs; ``A_log`` and
     ``dt_bias`` the per-head gate parameters. Returns the per-position readouts
     and, when ``return_states`` (reference backend only), the per-step state
-    trajectory.
+    trajectory. ``return_final_state`` instead returns the terminal matrix on
+    either backend, in ``[batch, heads, value_dim, key_dim]`` order.
     """
-    match resolve_backend(backend):
+    if return_states and return_final_state:
+        raise ValueError("request either a state trajectory or a final state, not both")
+    match resolve_backend(backend, q.device):
         case "fla":
             if return_states:
                 raise NotImplementedError(
                     "per-step states require the reference backend; "
                     "chunked kernels only materialize state at chunk boundaries"
                 )
+            if q.device.type != "cuda":
+                raise ValueError("the fla backend requires CUDA tensors")
             from fla.ops.gated_delta_rule import chunk_gated_delta_rule  # type: ignore
 
-            output, _final_state = chunk_gated_delta_rule(
+            output, final_state = chunk_gated_delta_rule(
                 q=q,
                 k=k,
                 v=v,
@@ -79,8 +90,9 @@ def gated_delta_rule(
                 use_beta_sigmoid_in_kernel=True,
                 allow_neg_eigval=allow_neg_eigval,
                 state_v_first=True,
+                output_final_state=return_final_state,
             )
-            return output, None
+            return output, final_state if return_final_state else None
         case "reference":
             from iccl.models.reference import gated_delta_rule_reference
 
@@ -94,4 +106,5 @@ def gated_delta_rule(
                 dt_bias,
                 allow_neg_eigval=allow_neg_eigval,
                 return_states=return_states,
+                return_final_state=return_final_state,
             )

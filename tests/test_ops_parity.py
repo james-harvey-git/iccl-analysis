@@ -133,3 +133,52 @@ def test_full_model_parity() -> None:
         preds_ref = model(tokens, token_type, backend="reference").preds
         preds_fla = model(tokens, token_type, backend="fla").preds
     torch.testing.assert_close(preds_fla, preds_ref, rtol=MODEL_RTOL, atol=MODEL_ATOL)
+
+
+@pytest.mark.parametrize("seq", [63, 64, 65, 521])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_terminal_state_parity(seq: int, dtype: torch.dtype) -> None:
+    inputs = make_inputs(batch=1, seq=seq, heads=2, dtype=dtype)
+    out, actual = gated_delta_rule(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")),
+        backend="fla",
+        return_final_state=True,
+    )
+    reference, expected = gated_delta_rule(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")),
+        backend="reference",
+        return_final_state=True,
+    )
+    truth_inputs = {name: value.double() for name, value in inputs.items()}
+    _, truth = gated_delta_rule(
+        *(truth_inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")),
+        backend="reference",
+        return_final_state=True,
+    )
+    assert actual is not None and expected is not None and truth is not None
+    assert actual.shape == (1, 2, 128, 64)
+    assert actual.dtype == torch.float32
+    # BF16 kernels quantize intermediate dot products; the reference retains FP32 state.
+    cap = 0.02 if dtype == torch.bfloat16 else 0.005
+    assert rms_ratio(actual, truth) <= max(cap, REF_ERROR_FACTOR * rms_ratio(expected, truth))
+    assert rms_ratio(out, reference) <= cap
+
+
+@pytest.mark.parametrize("precision", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_full_model_terminal_state_parity(precision: torch.dtype) -> None:
+    torch.manual_seed(17)
+    model = GDNModel(d_in=16, d_out=16, d_model=64, n_layers=2, n_heads=2, d_ffw=128).cuda()
+    tokens = torch.randn(2, 521, 16, device="cuda")
+    types = torch.randint(0, 3, (2, 521), device="cuda")
+    tokens[:, -1] = 0
+    types[:, -1] = 2
+    with torch.autocast("cuda", dtype=precision, enabled=precision == torch.bfloat16):
+        ref = model(tokens, types, backend="reference", capture_final=True)
+        actual = model(tokens, types, backend="fla", capture_final=True)
+    assert ref.final_states is not None and actual.final_states is not None
+    cap = 0.04 if precision == torch.bfloat16 else 0.01
+    assert rms_ratio(actual.preds, ref.preds) <= cap
+    for state, truth in zip(actual.final_states, ref.final_states, strict=True):
+        assert rms_ratio(state, truth) <= cap

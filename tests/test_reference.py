@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -174,3 +175,49 @@ def test_l2norm_matches_fla_semantics() -> None:
     norms = y.norm(dim=-1)
     assert (norms <= 1.0 + 1e-6).all()
     assert math.isclose(norms.max().item(), 1.0, rel_tol=1e-3)
+
+
+@pytest.mark.parametrize("seq", [1, 63, 64, 65, 521])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.bfloat16])
+def test_final_state_equals_trajectory_terminal(seq: int, dtype: torch.dtype) -> None:
+    inputs = {name: value.to(dtype) for name, value in make_inputs(seq=seq).items()}
+    expected, trajectory = gated_delta_rule_reference(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")), return_states=True
+    )
+    actual, terminal = gated_delta_rule_reference(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")), return_final_state=True
+    )
+    assert trajectory is not None and terminal is not None
+    assert terminal.ndim == 4
+    assert torch.equal(actual, expected)
+    assert torch.equal(terminal, trajectory[:, -1])
+    assert terminal.dtype == torch.promote_types(dtype, torch.float32)
+
+
+def test_capture_modes_are_exclusive() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        gated_delta_rule_reference(
+            *(make_inputs()[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")),
+            return_states=True,
+            return_final_state=True,
+        )
+    with pytest.raises(ValueError, match="not both"):
+        gated_delta_rule(
+            *(make_inputs()[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")),
+            return_states=True,
+            return_final_state=True,
+        )
+
+
+def test_automatic_backend_follows_tensor_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    inputs = make_inputs()
+    expected, state = gated_delta_rule_reference(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")), return_final_state=True
+    )
+    actual, terminal = gated_delta_rule(
+        *(inputs[k] for k in ("q", "k", "v", "a", "b", "A_log", "dt_bias")), return_final_state=True
+    )
+    assert state is not None and terminal is not None
+    assert torch.equal(actual, expected)
+    assert torch.equal(terminal, state)

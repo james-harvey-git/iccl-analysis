@@ -45,9 +45,10 @@ def gated_delta_rule_reference(
     *,
     allow_neg_eigval: bool = False,
     return_states: bool = False,
+    return_final_state: bool = False,
 ) -> tuple[
     Float[torch.Tensor, "batch seq heads value_dim"],
-    Float[torch.Tensor, "batch seq heads value_dim key_dim"] | None,
+    Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
 ]:
     """Causal gated delta rule; see module docstring for conventions.
 
@@ -57,7 +58,11 @@ def gated_delta_rule_reference(
     ``o_t = S_t q_t / sqrt(key_dim)``. Returns the outputs and, when
     ``return_states``, the compute-dtype state trajectory in fla's
     ``state_v_first`` layout ``[batch, seq, heads, value_dim, key_dim]``.
+    Alternatively, ``return_final_state`` returns only ``[batch, heads,
+    value_dim, key_dim]`` after the final token, without stacking a trajectory.
     """
+    if return_states and return_final_state:
+        raise ValueError("request either a state trajectory or a final state, not both")
     in_dtype = v.dtype
     compute_dtype = torch.promote_types(in_dtype, torch.float32)
     q = l2norm(q.to(compute_dtype))
@@ -87,4 +92,4 @@ def gated_delta_rule_reference(
 
     output = torch.stack(outputs, dim=1).to(in_dtype)
     trajectory = torch.stack(states, dim=1) if states is not None else None
-    return output, trajectory
+    return output, state if return_final_state else trajectory

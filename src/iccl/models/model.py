@@ -50,11 +50,13 @@ class TokenEmbedding(nn.Module):
 class ModelOutput:
     """``preds`` at every position; ``states``/``hidden`` are per-layer lists
     (fast-weight trajectories and post-block residual stream) filled only under
-    ``capture=True``."""
+    ``capture=True``. ``final_states`` holds terminal matrices only when
+    ``capture_final=True``; it does not collect residual activations."""
 
     preds: Float[torch.Tensor, "batch seq d_out"]
     states: list[Float[torch.Tensor, "batch seq heads value_dim key_dim"]] | None = None
     hidden: list[Float[torch.Tensor, "batch seq d_model"]] | None = None
+    final_states: list[Float[torch.Tensor, "batch heads value_dim key_dim"]] | None = None
 
 
 class GDNModel(nn.Module):
@@ -104,25 +106,35 @@ class GDNModel(nn.Module):
         *,
         backend: Backend | None = None,
         capture: bool = False,
+        capture_final: bool = False,
     ) -> ModelOutput:
         """Predict at every position. ``capture=True`` (reference backend only)
         additionally records per-layer fast-weight trajectories and the residual
-        stream after each block."""
+        stream after each block. ``capture_final=True`` records only each
+        layer's terminal fast-weight matrix and supports both backends."""
+        if capture and capture_final:
+            raise ValueError("capture and capture_final are mutually exclusive")
         backend = backend if backend is not None else self.backend
-        if capture and resolve_backend(backend) != "reference":
+        if capture and resolve_backend(backend, tokens.device) != "reference":
             raise ValueError("capture=True requires the reference backend")
 
         h = self.embed(tokens, token_type)
         states: list[torch.Tensor] | None = [] if capture else None
         hidden: list[torch.Tensor] | None = [] if capture else None
+        final_states: list[torch.Tensor] | None = [] if capture_final else None
         for block in self.blocks:
-            h, block_states = block(h, backend=backend, return_states=capture)
+            h, block_states = block(
+                h, backend=backend, return_states=capture, return_final_state=capture_final
+            )
             if states is not None and hidden is not None:
                 assert block_states is not None
                 states.append(block_states)
                 hidden.append(h)
+            if final_states is not None:
+                assert block_states is not None
+                final_states.append(block_states)
         preds = self.head(self.final_norm(h))
-        return ModelOutput(preds=preds, states=states, hidden=hidden)
+        return ModelOutput(preds=preds, states=states, hidden=hidden, final_states=final_states)
 
 
 def model_from_config(cfg: DictConfig) -> GDNModel:
