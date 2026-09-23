@@ -259,6 +259,22 @@ class RunLogger:
         self.run.log_artifact(artifact, aliases=["latest"])
         print(f"uploading evaluation results as {artifact.name}:latest")
 
+    def upload_probe_artifact(self, path: Path, *, kind: str) -> None:
+        """Explicit probe uploads; callers supply weights-only checkpoints or result files."""
+        if kind not in {"weights", "results"}:
+            raise ValueError("probe artifact kind must be weights or results")
+        if self.run is None or not self.cfg.wandb.get(f"upload_{kind}", False):
+            return
+        import wandb
+
+        label = _ARTIFACT_UNSAFE.sub("-", self.run.name or self.run.id)
+        artifact = wandb.Artifact(f"probe-{kind}-{label}", type=f"probe-{kind}")
+        if path.is_dir():
+            artifact.add_dir(str(path))
+        else:
+            artifact.add_file(str(path))
+        self.run.log_artifact(artifact, aliases=["latest"])
+
     def use_artifact(self, reference: str) -> None:
         """Records this run as a consumer of an artifact, drawing the lineage
         edge from weights to the numbers computed from them."""

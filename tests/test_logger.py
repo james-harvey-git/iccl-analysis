@@ -91,6 +91,31 @@ def make_logger(out_dir: Path, source: SourceRun | None = None) -> RunLogger:
     return RunLogger(cfg, out_dir, job_type="eval", source=source)
 
 
+def test_probe_protocol_and_artifacts_are_explicit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = FakeRun()
+    fake = FakeWandb(run)
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    cfg = OmegaConf.create({"wandb": {"mode": "online", "project": "test", "entity": None}})
+    logger = RunLogger(cfg, tmp_path, job_type="probe-train", protocol="module-decoder-v1")
+    logger.start()
+    assert fake.captured["config"]["evaluation_protocol"] == "module-decoder-v1"
+    logger.upload_probe_artifact(tmp_path, kind="results")
+    assert run.logged == []
+    cfg.wandb.upload_results = True
+    logger.upload_probe_artifact(tmp_path, kind="results")
+    assert run.logged[0][0].type == "probe-results"
+    assert run.logged[0][0].directories == [str(tmp_path)]
+    cfg.wandb.upload_weights = True
+    path = tmp_path / "weights.pt"
+    path.write_bytes(b"weights only")
+    logger.upload_probe_artifact(path, kind="weights")
+    assert run.logged[1][0].type == "probe-weights"
+    assert run.logged[1][0].files == [str(path)]
+    logger.finish()
+
+
 def start_with_fake_wandb(
     monkeypatch: pytest.MonkeyPatch,
     out_dir: Path,
