@@ -26,10 +26,17 @@ is available. The locked ARM wheel requires glibc 2.34 or newer. See
 [FLA's backend selection](https://github.com/fla-org/flash-linear-attention/blob/v0.5.2/fla/ops/common/backends/tilelang/__init__.py)
 and [Isambard's CUDA setup](https://docs.isambard.ac.uk/user-documentation/guides/gpus_and_cuda/#loading-the-cuda-toolkit).
 
-Inside an Isambard GPU allocation, load the compiler module before running Python:
+Inside an Isambard GPU allocation, load CUDA and select the host compilers before
+running Python. The versioned GCC 12 paths follow
+[Isambard's compiler guidance](https://docs.isambard.ac.uk/user-documentation/guides/python-advanced/#compilers)
+and support [CUDA 12.6's C++20 requirements](https://docs.nvidia.com/cuda/archive/12.6.3/cuda-installation-guide-linux/index.html#host-compiler-support-policy).
 
 ```bash
 module load cudatoolkit
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+"$CC" --version
+"$CXX" --version
 nvcc --version
 uv sync --locked
 uv run --locked pytest -q tests/test_ops_parity.py \
@@ -37,11 +44,18 @@ uv run --locked pytest -q tests/test_ops_parity.py \
 uv run --locked pytest -q
 ```
 
-Load the module in every GPU job that runs these tests or trains the GDN. Keep
-`FLA_DISABLE_BACKEND_DISPATCH` and `FLA_TILELANG` unset so FLA can select its
-supported implementation. The parity test retains its FP64 truth comparison and
-gradient tolerances. CPU tensors use the reference recurrence even when the host
-has CUDA available.
+Set `CC` and `CXX` after all module loads: the NVIDIA SDK environment can select
+`nvc` and `nvc++`. Triton uses `CC` for its C launcher, and `nvc` rejects its
+`-Wno-psabi` flag. TileLang uses `CXX` as NVCC's host compiler; with the SDK's
+`nvc++`, NVCC can ignore `-std=c++20` and fail on the C++ template headers. If the
+versioned GCC paths are absent, locate a CUDA-compatible GCC/G++ pair before
+continuing; an unversioned compiler may select an unsuitable version.
+
+Apply this setup in each GPU job, including probe capture and evaluation: Triton
+can compile launchers during inference. Keep `FLA_DISABLE_BACKEND_DISPATCH` and
+`FLA_TILELANG` unset so FLA can select its supported implementation. The parity
+test retains its FP64 truth comparison and gradient tolerances. CPU tensors use
+the reference recurrence even when the host has CUDA available.
 
 The GDN backward workaround is separate from probe training: state capture runs
 the frozen GDN without gradients, and the linear decoder has an ordinary PyTorch
