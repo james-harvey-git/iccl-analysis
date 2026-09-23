@@ -1,20 +1,95 @@
 from pathlib import Path
 
 import numpy as np
+import plotly.io as pio
 import pytest
 import torch
 from omegaconf import DictConfig
 
 from iccl.analysis.capture import CaptureEpisodes, collate_capture
+from iccl.analysis.plotting import probe_evaluation_figures
 from iccl.analysis.probe_evaluation import (
     episode_interval,
     functional_reconstruction,
     score_predictions,
+    summarize_scores,
 )
 from iccl.analysis.probe_loss import aligned_targets
 from iccl.analysis.probe_matching import Assignment, AssignmentSolver
-from iccl.analysis.probe_results import read_results, require_comparable, write_results
+from iccl.analysis.probe_results import (
+    probe_summary_rows,
+    read_results,
+    require_comparable,
+    write_results,
+)
 from iccl.analysis.probe_targets import flat_targets
+
+
+@pytest.mark.parametrize("control", ["none", "constant", "shuffled_targets"])
+def test_dashboard_figures_use_saved_episode_statistics_and_baselines(control: str) -> None:
+    metadata = {
+        "control": control,
+        "split": "validation",
+        "step": 200,
+        "confidence": 0.95,
+        "variance_floor": 1e-12,
+    }
+    arrays = {"episode_index": np.array([10, 11, 12, 13]), "latent_rank": np.array([7, 8, 8, 8])}
+    for label, scale in (("decoder", 0.5), ("zero", 1.0)):
+        base = np.arange(1, 5, dtype=np.float64) * scale
+        for metric in ("joint_mse", "weight_mse", "bias_mse", "readout_mse", "repeated_module_mse"):
+            arrays[f"{label}_{metric}"] = (
+                base if label == "decoder" or metric != "repeated_module_mse" else np.zeros(4)
+            )
+        for metric in ("module_mse_by_task", "functional_mse_by_task", "functional_nmse_by_task"):
+            arrays[f"{label}_{metric}"] = base[:, None] * np.arange(1, 9)[None, :]
+        arrays[f"{label}_functional_variance_floored"] = np.zeros((4, 8), dtype=bool)
+        arrays[f"{label}_repeated_module_count"] = np.full(4, 4)
+    summary = summarize_scores(arrays, seed=42, replicates=100)
+    figures = probe_evaluation_figures(metadata, arrays, summary)
+    prefix = "probe/validation/figures/"
+    assert set(figures) == {
+        prefix + name
+        for name in (
+            "module_by_task",
+            "functional_by_task",
+            "parameter_components",
+            "episode_error_distribution",
+            "latent_rank",
+            "repeated_module_consistency",
+        )
+    }
+    for figure in figures.values():
+        assert pio.from_json(figure.to_json()).layout.title.text == figure.layout.title.text
+    module = figures[prefix + "module_by_task"].to_plotly_json()["data"]
+    estimate = summary["decoder"]["all"]["metrics"]["module_mse_by_task"]
+    np.testing.assert_allclose(module[1]["y"], estimate["mean"])
+    np.testing.assert_allclose(
+        np.array(module[0]["y"]) - np.array(module[0]["error_y"]["array"]), estimate["ci_low"]
+    )
+    np.testing.assert_allclose(
+        np.array(module[0]["y"]) + np.array(module[0]["error_y"]["array"]), estimate["ci_high"]
+    )
+    rows = probe_summary_rows(summary)
+    singleton = next(
+        row for row in rows if row["population"] == "rank_7" and row["metric"] == "joint_mse"
+    )
+    assert singleton["n_episodes"] == 1 and singleton["ci_low"] is None
+    rank_intervals = figures[prefix + "latent_rank"].to_plotly_json()["data"][0]
+    assert tuple(rank_intervals["x"]) == (8,)
+    distribution = figures[prefix + "episode_error_distribution"].to_plotly_json()["data"]
+    np.testing.assert_array_equal(distribution[0]["x"], [0.5, 1, 1.5, 2])
+    np.testing.assert_array_equal(distribution[0]["y"], [0.25, 0.5, 0.75, 1])
+    np.testing.assert_allclose(
+        distribution[1]["x"], arrays["decoder_functional_nmse_by_task"].mean(axis=1)
+    )
+    consistency = figures[prefix + "repeated_module_consistency"].to_plotly_json()
+    np.testing.assert_array_equal(consistency["data"][1]["y"], np.zeros(4))
+    assert "Consistency alone" in consistency["layout"]["annotations"][-1]["text"]
+    # Preserve a saved interval even when few bootstrap replicates place it above the mean.
+    estimate["ci_low"], estimate["ci_high"] = [100.0] * 8, [101.0] * 8
+    unusual = probe_evaluation_figures(metadata, arrays, summary)[prefix + "module_by_task"]
+    assert tuple(unusual.to_plotly_json()["data"][0]["y"]) == (100.5,) * 8
 
 
 def test_exact_parameters_with_swaps_and_common_hidden_permutation_reconstruct_functions(

@@ -149,6 +149,47 @@ def test_metrics_from_one_optimizer_step_share_one_wandb_record(
     assert run.records == [({"train/token_mse": 0.5, "validation/token_mse": 0.4}, 1000)]
 
 
+@pytest.mark.parametrize("mode", ["online", "offline"])
+def test_probe_figures_and_estimates_log_without_artifact_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    run = FakeRun()
+    logger, _ = start_with_fake_wandb(
+        monkeypatch, tmp_path, run=run, mode=mode, upload_results=False, upload_weights=False
+    )
+    rows = [
+        {
+            "prediction": "decoder",
+            "population": "all",
+            "metric": "joint_mse",
+            "task_position": None,
+            "mean": 0.4,
+            "ci_low": 0.3,
+            "ci_high": 0.5,
+            "n_episodes": 100,
+            "variance_floored_tasks": 0,
+        }
+    ]
+    figure = object()
+    logger.log_probe_evaluation(
+        {"probe/test/decoder/joint_mse": 0.4},
+        rows,
+        {"probe/test/figures/module_by_task": figure},
+        40,
+        namespace="probe/test",
+    )
+    logger.finish()
+    assert len(run.records) == 1 and not run.logged
+    payload, step = run.records[0]
+    assert step == 40 and payload["probe/test/decoder/joint_mse"] == 0.4
+    assert payload["probe/test/figures/module_by_task"] is figure
+    table = payload["probe/test/summary"]
+    assert table.data == [[rows[0][key] for key in table.columns]]
+    disabled = make_logger(tmp_path)
+    disabled.log_probe_evaluation({}, rows, {"figure": figure}, 40, namespace="probe/test")
+    assert len(run.records) == 1
+
+
 def test_source_round_trips_through_a_checkpoint() -> None:
     source = source_from_checkpoint({"step": 100000, "wandb_run": REFERENCE})
     assert source == SourceRun(step=100000, **REFERENCE)

@@ -20,6 +20,33 @@ RESULT_VERSION = f"{PROTOCOL}/results-v1"
 TARGET_LAYOUT = {"modules": list(MODULE_SHAPE), "readout": [16, 16], "features": OUTPUT_FEATURES}
 
 
+def probe_summary_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten saved episode-level estimates without recomputing their confidence intervals."""
+    rows = []
+    for prediction, populations in summary.items():
+        for population, report in populations.items():
+            for metric, estimate in report["metrics"].items():
+                by_task = isinstance(estimate["mean"], list)
+                means = estimate["mean"] if by_task else [estimate["mean"]]
+                for index, mean in enumerate(means):
+                    row = {
+                        "prediction": prediction,
+                        "population": population,
+                        "metric": metric,
+                        "task_position": index + 1 if by_task else None,
+                        "mean": float(mean),
+                        "n_episodes": int(estimate["n_episodes"]),
+                        "variance_floored_tasks": int(report["variance_floored_tasks"]),
+                    }
+                    for key in ("ci_low", "ci_high"):
+                        value = estimate[key]
+                        row[key] = (
+                            None if value is None else float(value[index] if by_task else value)
+                        )
+                    rows.append(row)
+    return rows
+
+
 def save_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
     """Atomically replace one local checkpoint, including its optimizer when supplied."""
     path.parent.mkdir(parents=True, exist_ok=True)

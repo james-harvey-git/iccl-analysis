@@ -1,4 +1,6 @@
+from operator import itemgetter
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -9,14 +11,15 @@ from iccl.analysis.capture import capture_dataset
 from iccl.analysis.probe_dataset import CapturedDataset
 from iccl.analysis.probe_evaluation import evaluate_probe
 from iccl.analysis.probe_matching import AssignmentSolver
-from iccl.analysis.probe_results import read_results
+from iccl.analysis.probe_results import probe_summary_rows, read_results
 from iccl.analysis.probe_training import ProbeTrainer, optimizer_update
 from iccl.analysis.probes import LinearModuleDecoder
+from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import build_optimizer, build_scheduler
 
 
 def test_capture_train_interrupted_resume_and_evaluate(
-    probe_cfg: DictConfig, tmp_path: Path
+    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     capture_dataset(probe_cfg, tmp_path / "capture")
     with ProbeTrainer(probe_cfg, tmp_path / "complete") as trainer:
@@ -57,6 +60,8 @@ def test_capture_train_interrupted_resume_and_evaluate(
         torch.testing.assert_close(trainer.next_batch()["episode_index"], next_indices)
     probe_cfg.probe.training.num_workers = 0
     probe_cfg.probe.evaluation.checkpoint = str(tmp_path / "interrupted/checkpoints/best.pt")
+    dashboard = Mock()
+    monkeypatch.setattr(RunLogger, "log_probe_evaluation", dashboard)
     result = evaluate_probe(probe_cfg, tmp_path / "evaluation")
     metadata, arrays, summary = read_results(result)
     assert metadata["split"] == "test"
@@ -64,6 +69,20 @@ def test_capture_train_interrupted_resume_and_evaluate(
     assert summary["decoder"]["all"]["n_episodes"] == 2
     assert (result / "plots/reconstruction-by-position.png").is_file()
     assert (result / "plots/control-comparison.png").is_file()
+    dashboard.assert_called_once()
+    metrics, rows, figures, step = dashboard.call_args.args
+    assert step == metadata["step"] == expected["best_step"]
+    assert dashboard.call_args.kwargs == {"namespace": "probe/test"}
+    assert len(metrics) == 14 and len(figures) == 6
+    row_key = itemgetter("prediction", "population", "metric", "task_position")
+    assert sorted(rows, key=row_key) == sorted(probe_summary_rows(summary), key=row_key)
+    for prediction in ("decoder", "zero"):
+        for metric in ("joint_mse", "functional_nmse", "repeated_module_mse"):
+            assert (
+                metrics[f"probe/test/{prediction}/{metric}"]
+                == summary[prediction]["all"]["metrics"][metric]["mean"]
+            )
+    assert all(key.startswith("probe/test/figures/") for key in figures)
     with pytest.raises(FileExistsError):
         evaluate_probe(probe_cfg, tmp_path / "evaluation")
 

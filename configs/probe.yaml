@@ -26,7 +26,7 @@ wandb:
   entity: jublett-university-of-oxford
   name: null
   upload_weights: false      # Opt-in final decoder weights; never automatic full-state uploads.
-  upload_results: false      # Opt-in probe numerical results and figures.
+  upload_results: false      # Opt-in full results bundle; dashboard figures follow wandb.mode.
 
 hydra:
   job:

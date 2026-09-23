@@ -275,6 +275,38 @@ class RunLogger:
             artifact.add_file(str(path))
         self.run.log_artifact(artifact, aliases=["latest"])
 
+    def log_probe_evaluation(
+        self,
+        metrics: dict[str, float],
+        rows: list[dict[str, Any]],
+        figures: dict[str, Any],
+        step: int,
+        *,
+        namespace: str,
+    ) -> None:
+        """Publish compact dashboard figures and an estimate table independently of artifacts."""
+        if self.run is not None:
+            import wandb
+
+            columns = [
+                "prediction",
+                "population",
+                "metric",
+                "task_position",
+                "mean",
+                "ci_low",
+                "ci_high",
+                "n_episodes",
+                "variance_floored_tasks",
+            ]
+            payload: dict[str, Any] = dict(metrics)
+            payload[f"{namespace}/summary"] = wandb.Table(
+                columns=cast(Any, columns), data=[[row.get(key) for key in columns] for row in rows]
+            )
+            payload.update({key: wandb.Plotly(figure) for key, figure in figures.items()})
+            self._queue(payload, step)
+        self._print(metrics, step)
+
     def use_artifact(self, reference: str) -> None:
         """Records this run as a consumer of an artifact, drawing the lineage
         edge from weights to the numbers computed from them."""

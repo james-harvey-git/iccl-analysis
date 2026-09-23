@@ -159,6 +159,27 @@ primary aggregate includes all sampled episodes. Confidence intervals resample
 whole episodes, retaining within-episode dependence. Intervals are omitted when
 fewer than two episodes or two bootstrap replicates are available.
 
+With `wandb.mode=online`, standalone evaluation also reports six interactive
+Plotly panels under `probe/test/figures/` (or `probe/validation/figures/`):
+
+- Module reconstruction error by task position, with confidence intervals.
+- Functional reconstruction MSE and nMSE by task position, with confidence intervals.
+- Weight, bias and readout reconstruction errors, with confidence intervals.
+- Cumulative distributions of episode parameter and functional errors.
+- Reconstruction errors by observed latent rank, with group sizes and confidence intervals.
+- Repeated-module consistency versus reconstruction error for individual episodes.
+
+Each panel includes the zero-output baseline and identifies the evaluated decoder
+or control. Hover labels expose exact estimates, intervals or episode IDs as
+appropriate. The matching `probe/<split>/summary` table includes all position and
+rank estimates, interval bounds, episode counts and floored-variance counts.
+All-population scalar means are logged under `probe/<split>/{decoder,zero}/`
+at the evaluated checkpoint's training step. These dashboard outputs use the
+saved measurements and intervals; they do not refit or realign predictions.
+`wandb.mode=offline` records the same media locally for later sync.
+Dashboard figures and the table do not require `wandb.upload_results=true`;
+that flag controls the full results artifact separately.
+
 Consistency is within-module occurrence variance, equally averaged over repeated
 module IDs in the common predicted hidden basis. Zero output is perfectly
 consistent, so interpret this metric alongside reconstruction accuracy.
@@ -189,7 +210,7 @@ sbatch scripts/cluster/probe.slurm benchmark \
 The launcher also accepts `capture`, `train` and `eval`. It requests one GPU,
 12 CPUs and 64 GiB host memory; machine settings live in SLURM directives.
 It does not prepare capability bundles. `WANDB_MODE=disabled sbatch ...` disables
-its default online scalars. A local operational smoke is:
+its default online reporting. A local operational smoke is:
 
 ```bash
 uv run python scripts/benchmark_probe.py probe=smoke \
@@ -235,8 +256,9 @@ plots and `checkpoints/{last,best}.pt`. Evaluations contain `manifest.json`,
 `summary.json`, `episodes.npz` and plots. Generated artifacts/native libraries live
 under ignored `outputs/`; no scratchpad file is a runtime dependency.
 
-Scalars respect `wandb.mode`. `wandb.upload_weights=true` opts into a weights-only
-probe upload; `wandb.upload_results=true` opts into numerical results. Captured
+Scalars and dashboard figures respect `wandb.mode`. `wandb.upload_weights=true`
+opts into a weights-only probe upload; `wandb.upload_results=true` opts into the
+full numerical results bundle and saved figures. Captured
 datasets and resumable Adam checkpoints stay local.
 
 ```bash

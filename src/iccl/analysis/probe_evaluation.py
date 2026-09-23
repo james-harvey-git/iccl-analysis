@@ -20,7 +20,13 @@ from iccl.analysis.probe_config import (
 from iccl.analysis.probe_dataset import CapturedDataset, file_digest
 from iccl.analysis.probe_loss import aligned_targets, parameter_errors
 from iccl.analysis.probe_matching import Assignment, AssignmentSolver
-from iccl.analysis.probe_results import TARGET_LAYOUT, load_checkpoint, source_run, write_results
+from iccl.analysis.probe_results import (
+    TARGET_LAYOUT,
+    load_checkpoint,
+    probe_summary_rows,
+    source_run,
+    write_results,
+)
 from iccl.analysis.probe_targets import MODULE_FEATURES, MODULE_SHAPE, PROTOCOL
 from iccl.analysis.probe_training import probe_loader
 from iccl.analysis.probes import make_decoder
@@ -307,17 +313,21 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
             }
             write_results(destination, metadata, arrays, summary)
             # Figures depend only on the portable artifacts, never on the model or data loader.
-            from iccl.analysis.plotting import plot_probe_results
+            from iccl.analysis.plotting import plot_probe_results, probe_evaluation_figures
 
             plot_probe_results([destination], destination / "plots")
-            logger.log(
-                {
-                    f"probe/{e.split}/{label}/joint_mse": summary[label]["all"]["metrics"][
-                        "joint_mse"
-                    ]["mean"]
-                    for label in ("decoder", "zero")
-                },
+            rows = probe_summary_rows(summary)
+            scalars = {
+                f"probe/{e.split}/{row['prediction']}/{row['metric']}": row["mean"]
+                for row in rows
+                if row["population"] == "all" and row["task_position"] is None
+            }
+            logger.log_probe_evaluation(
+                scalars,
+                rows,
+                probe_evaluation_figures(metadata, arrays, summary),
                 checkpoint["step"],
+                namespace=f"probe/{e.split}",
             )
             logger.upload_probe_artifact(destination, kind="results")
             return destination
