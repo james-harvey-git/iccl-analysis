@@ -185,7 +185,11 @@ def test_corruption_is_rejected(factorial_bundle, damage: str) -> None:
             validate_factorial_grid(items)
 
 
-def test_original_prefix_predictions_are_causal(factorial_bundle) -> None:
+def test_original_prefix_predictions_are_causal(
+    factorial_bundle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # CPU evaluation must use the reference recurrence even on a CUDA host.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     torch.manual_seed(1)
     model = model_from_config(factorial_bundle).eval()
     suites = factorial_suites(factorial_bundle)
