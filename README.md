@@ -16,6 +16,37 @@ Requires [uv](https://docs.astral.sh/uv/).
 uv sync
 ```
 
+### Isambard GPU tests
+
+The Linux ARM environment uses PyTorch's CUDA 12.8 build, whose locked Triton
+version is 3.6.0. FLA blocks its gated backward kernel on Hopper with Triton
+3.4.0–3.7.0 because of incorrect gradients. The ARM dependencies include
+TileLang, which FLA selects for that backward operation when a working `nvcc`
+is available. The locked ARM wheel requires glibc 2.34 or newer. See
+[FLA's backend selection](https://github.com/fla-org/flash-linear-attention/blob/v0.5.2/fla/ops/common/backends/tilelang/__init__.py)
+and [Isambard's CUDA setup](https://docs.isambard.ac.uk/user-documentation/guides/gpus_and_cuda/#loading-the-cuda-toolkit).
+
+Inside an Isambard GPU allocation, load the compiler module before running Python:
+
+```bash
+module load cudatoolkit
+nvcc --version
+uv sync --locked
+uv run --locked pytest -q tests/test_ops_parity.py \
+  tests/test_retention_factorial.py::test_original_prefix_predictions_are_causal
+uv run --locked pytest -q
+```
+
+Load the module in every GPU job that runs these tests or trains the GDN. Keep
+`FLA_DISABLE_BACKEND_DISPATCH` and `FLA_TILELANG` unset so FLA can select its
+supported implementation. The parity test retains its FP64 truth comparison and
+gradient tolerances. CPU tensors use the reference recurrence even when the host
+has CUDA available.
+
+The GDN backward workaround is separate from probe training: state capture runs
+the frozen GDN without gradients, and the linear decoder has an ordinary PyTorch
+backward pass. The decoder's native assignment solver requires a C++17 compiler.
+
 ## Usage
 
 Experiments are dispatched with [Hydra](https://hydra.cc/); configs live in `configs/`.
