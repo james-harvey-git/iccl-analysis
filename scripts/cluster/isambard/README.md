@@ -10,7 +10,7 @@ worker/thread budgets. See
 | --- | --- | ---: | ---: | ---: |
 | GDN training | `train.slurm` | 8 | 64 GiB | 12 hours |
 | GDN evaluation | `eval.slurm` | 4 | 64 GiB | 4 hours |
-| Probe dataset capture | `capture_probe.slurm` | 4 | 32 GiB | 4 hours |
+| Probe dataset capture | `capture_probe.slurm` | 4 | 32 GiB | 15 minutes |
 | Probe training | `train_probe.slurm` | 12 | 64 GiB | 12 hours |
 | Probe evaluation | `eval_probe.slurm` | 12 | 32 GiB | 4 hours |
 | Probe benchmark | `benchmark_probe.slurm` | 12 | 64 GiB | 1 hour |
@@ -21,6 +21,10 @@ with headroom for loader workers, mapped dataset shards and checkpoint loading
 or serialization. Explicit requests avoid inheriting an oversized site default.
 Override them with `sbatch --mem=...` before the script name when a workload
 needs a different budget.
+
+The 15-minute capture default targets the reference 12,000-episode dataset.
+For larger datasets, override `--time` before the script name using timings from
+the capture run's `capture.json`; short captures can be dominated by startup.
 
 Slurm records resource requests when a job is submitted; editing a script does
 not change queued jobs. For a pending job, set its per-node memory request in
