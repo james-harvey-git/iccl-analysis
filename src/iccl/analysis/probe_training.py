@@ -410,7 +410,9 @@ class ProbeTrainer:
         started = time.perf_counter()
         while self.step < self.p.training.num_steps:
             tick = time.perf_counter()
-            result = self.update(self.next_batch())
+            batch = self.next_batch()
+            data_wait = time.perf_counter() - tick
+            result = self.update(batch)
             record = {
                 "step": self.step,
                 "loss": result.loss,
@@ -419,12 +421,24 @@ class ProbeTrainer:
                 "samples_consumed": self.consumed,
                 "episodes": result.episodes,
                 "seconds": time.perf_counter() - tick,
+                "data_wait_seconds": data_wait,
                 "matching_nodes_mean": float(result.assignment.counters[:, 1].mean()),
             }
             self.history.append(record)
-            if self.step % self.p.training.log_every == 0 or self.step == self.p.training.num_steps:
+            if (
+                self.step == 1
+                or self.step % self.p.training.log_every == 0
+                or self.step == self.p.training.num_steps
+            ):
                 self.logger.log(
-                    {f"probe/train/{k}": float(record[k]) for k in ("loss", "grad_norm", "lr")},
+                    {
+                        **{
+                            f"probe/train/{k}": float(record[k])
+                            for k in ("loss", "grad_norm", "lr")
+                        },
+                        "probe/train/seconds_per_update": float(record["seconds"]),
+                        "probe/train/data_wait_seconds": data_wait,
+                    },
                     self.step,
                 )
             if (
@@ -437,6 +451,7 @@ class ProbeTrainer:
                 if self.best_loss is None or validation < self.best_loss:
                     self.best_loss, self.best_step = validation, self.step
                     self.save("best")
+            self.logger.flush()
             if (
                 self.step % self.p.training.checkpoint_every == 0
                 or self.step == self.p.training.num_steps

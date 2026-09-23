@@ -1,11 +1,13 @@
 import copy
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader
 
+from iccl.analysis import probe_dataset
 from iccl.analysis.capture import CaptureEpisodes, capture_dataset, collate_capture
 from iccl.analysis.probe_config import stream_seed
 from iccl.analysis.probe_dataset import (
@@ -139,3 +141,35 @@ def test_sampler_resume_ignores_prefetched_batches() -> None:
     resumed = iter(EpisodeBatchSampler(7, 3, seed=4, consumed=sum(map(len, consumed))))
     assert [next(resumed) for _ in range(5)] == expected
     assert len(expected[0]) == 1
+
+
+@pytest.mark.parametrize("shuffled", [False, True])
+def test_batch_reads_group_shards_and_preserve_episode_order(
+    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shuffled: bool
+) -> None:
+    probe_cfg.probe.dataset.shard_size = 1
+    capture_dataset(probe_cfg, tmp_path / "capture")
+    plain = CapturedDataset(probe_cfg.probe.dataset.path, "train")
+    originals = [plain[index] for index in range(len(plain))]
+    plain.close()
+    pairing = shuffled_pairing(len(plain), 0) if shuffled else None
+    dataset = CapturedDataset(probe_cfg.probe.dataset.path, "train", pairing)
+    # More distinct shards than the cache exercises eviction within each batch.
+    monkeypatch.setattr(probe_dataset, "_SHARD_CACHE_SIZE", 2)
+    loads = Mock(wraps=np.load)
+    monkeypatch.setattr(probe_dataset.np, "load", loads)
+    order = [2, 0, 3, 1, 2, 0, 3, 1]
+    batch = next(iter(DataLoader(dataset, batch_sampler=[order], num_workers=0)))
+    passes = 2 if shuffled else 1
+    assert loads.call_count <= passes * len(set(order)) * len(dataset.manifest["schema"])
+    assert len(dataset._cache) <= 2
+    dataset.close()
+    for position, index in enumerate(order):
+        target_index = index if pairing is None else int(pairing[index])
+        for name, value in batch.items():
+            if name == "target_episode_index":
+                expected = target_index
+            else:
+                source = originals[index if name in {"states", "episode_index"} else target_index]
+                expected = source[name]
+            np.testing.assert_array_equal(value[position].numpy(), expected)

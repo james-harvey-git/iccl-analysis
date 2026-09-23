@@ -1,5 +1,6 @@
 from operator import itemgetter
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -133,6 +134,44 @@ def test_resume_rejects_changed_settings_and_population(
     with pytest.raises(ValueError, match="split changed"):
         ProbeTrainer(probe_cfg, tmp_path / "invalid2")
     CapturedDataset(probe_cfg.probe.dataset.path, "test").close()
+
+
+def test_training_flushes_first_and_validation_metrics_before_next_update(
+    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture_dataset(probe_cfg, tmp_path / "capture")
+    probe_cfg.probe.training.log_every = 2
+    sink = SimpleNamespace(
+        entity="unit", project="unit", id="unit", name="unit", log=Mock(), finish=Mock()
+    )
+    with ProbeTrainer(probe_cfg, tmp_path / "train") as trainer:
+        monkeypatch.setattr(trainer.logger, "start", lambda: None)
+        monkeypatch.setattr(trainer.logger, "run", sink)
+        original = trainer.next_batch
+
+        def next_batch() -> dict[str, torch.Tensor]:
+            if trainer.step == 1:
+                assert sink.log.call_count == 1
+                call = sink.log.call_args
+                assert call.kwargs["step"] == 1
+                assert "probe/train/loss" in call.args[0]
+                assert call.args[0]["probe/train/data_wait_seconds"] >= 0
+                assert (
+                    call.args[0]["probe/train/seconds_per_update"]
+                    >= call.args[0]["probe/train/data_wait_seconds"]
+                )
+            if trainer.step == 2:
+                assert sink.log.call_count == 2
+                call = sink.log.call_args
+                assert call.kwargs["step"] == 2
+                assert "probe/train/loss" in call.args[0]
+                assert "probe/validation/joint_mse" in call.args[0]
+            return original()
+
+        monkeypatch.setattr(trainer, "next_batch", next_batch)
+        trainer.fit()
+        assert [call.kwargs["step"] for call in sink.log.call_args_list] == [1, 2, 4]
+        assert all(call.kwargs["commit"] is True for call in sink.log.call_args_list)
 
 
 def test_known_linear_signal_learns_through_the_production_assignment_update(

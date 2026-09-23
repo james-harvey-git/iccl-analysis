@@ -21,6 +21,8 @@ from iccl.analysis.probe_targets import PROTOCOL, episode_targets, flat_targets
 from iccl.data.dataset import sequence_rng
 from iccl.data.teacher import ModulePool
 
+_SHARD_CACHE_SIZE = 32
+
 
 def digest(value: Any) -> str:
     return hashlib.sha256(
@@ -345,42 +347,60 @@ class CapturedDataset(Dataset):
     def __len__(self) -> int:
         return self.count
 
-    def _row(self, index: int, *, include_states: bool = True) -> dict[str, np.ndarray]:
-        if not 0 <= index < self.count:
-            raise IndexError(index)
+    def _shard(self, number: int) -> dict[str, np.ndarray]:
         if self._pid != os.getpid():
             self.close()
             self._pid = os.getpid()
-        number = bisect_right(self.ends, index)
         if number not in self._cache:
             path = self.root / self.entries[number]["name"]
             self._cache[number] = {
                 key: np.load(path / f"{key}.npy", mmap_mode="r", allow_pickle=False)
                 for key in self.manifest["schema"]
             }
-            if len(self._cache) > 2:
+            if len(self._cache) > _SHARD_CACHE_SIZE:
                 _, old = self._cache.popitem(last=False)
                 _close_arrays(old)
         self._cache.move_to_end(number)
-        offset = index - self.entries[number]["start"]
-        return {
-            key: value[offset].copy()
-            for key, value in self._cache[number].items()
-            if include_states or key != "states"
-        }
+        return self._cache[number]
+
+    def _rows(
+        self, indices: list[int], *, include_states: bool = True
+    ) -> list[dict[str, np.ndarray]]:
+        groups: dict[int, list[tuple[int, int]]] = {}
+        for position, index in enumerate(indices):
+            if not 0 <= index < self.count:
+                raise IndexError(index)
+            number = bisect_right(self.ends, index)
+            groups.setdefault(number, []).append((position, index - self.entries[number]["start"]))
+        rows: list[dict[str, np.ndarray]] = [{} for _ in indices]
+        # Group file access while restoring the sampler's order, including repeated indices.
+        for number, positions in groups.items():
+            arrays = self._shard(number)
+            for position, offset in positions:
+                rows[position] = {
+                    key: value[offset].copy()
+                    for key, value in arrays.items()
+                    if include_states or key != "states"
+                }
+        return rows
+
+    def __getitems__(self, indices: list[int]) -> list[dict[str, np.ndarray]]:
+        """Fetch each required shard once per pass, preserving complete episode pairings."""
+        items = self._rows(indices)
+        target_indices = indices
+        if self.target_permutation is not None:
+            target_indices = [int(self.target_permutation[index]) for index in indices]
+            targets = self._rows(target_indices, include_states=False)
+            for item, target in zip(items, targets, strict=True):
+                for key in item.keys() - {"states", "episode_index"}:
+                    item[key] = target[key]
+        for item, target_index in zip(items, target_indices, strict=True):
+            item["target"] = flat_targets(item["modules"], item["readout"])
+            item["target_episode_index"] = np.asarray(target_index, np.int64)
+        return items
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
-        item = self._row(index)
-        target_index = (
-            index if self.target_permutation is None else int(self.target_permutation[index])
-        )
-        if target_index != index:
-            target = self._row(target_index, include_states=False)
-            for key in item.keys() - {"states", "episode_index"}:
-                item[key] = target[key]
-        item["target"] = flat_targets(item["modules"], item["readout"])
-        item["target_episode_index"] = np.asarray(target_index, np.int64)
-        return item
+        return self.__getitems__([index])[0]
 
     def close(self) -> None:
         for arrays in self._cache.values():

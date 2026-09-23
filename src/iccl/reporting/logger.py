@@ -157,7 +157,7 @@ class RunLogger:
     def flush(self) -> None:
         """Commit the pending W&B record, if any."""
         if self.run is not None and self._pending_step is not None:
-            self.run.log(self._pending_payload, step=self._pending_step)
+            self.run.log(self._pending_payload, step=self._pending_step, commit=True)
         self._pending_step = None
         self._pending_payload = {}
 

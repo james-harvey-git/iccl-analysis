@@ -82,6 +82,9 @@ validation/test populations remain fixed. Different checkpoints, numerical
 settings or generation/capture source hashes require a fresh dataset path.
 One writer holds the capture lock. Shards publish atomically with checksums and
 recoverable manifest updates. Readers reject incomplete/corrupt requested splits.
+Batch reads group file access by shard and restore the requested episode order.
+Each reader process retains at most 32 mapped shards; rows are copied before
+eviction, and shuffled controls retain complete target-episode pairings.
 
 ## Train, resume and controls
 
@@ -103,6 +106,11 @@ checkpoint cadence and output directory may change. The saved cursor counts
 **consumed** samples, never prefetched samples. Adam, scheduler and Python/NumPy/
 Torch RNG states continue with the decoder. Extending a captured training split
 requires a new probe run, since it changes the sample population.
+
+Training reports the first completed update and the configured logging cadence.
+Metrics are flushed to W&B at the end of the same step, after merging any
+validation result. `probe/train/seconds_per_update` includes batch loading and
+optimization; `probe/train/data_wait_seconds` isolates waiting for that batch.
 
 `last.pt` and validation-selected `best.pt` are both resumable. Keep the pair
 together when moving runs. A prior selected best is carried into a new resume

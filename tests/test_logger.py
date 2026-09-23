@@ -51,6 +51,7 @@ class FakeRun:
         self.logged: list[tuple[FakeArtifact, list[str]]] = []
         self.used: list[str] = []
         self.records: list[tuple[dict[str, Any], int]] = []
+        self.commits: list[bool | None] = []
         self.finished = False
 
     def log_artifact(self, artifact: FakeArtifact, aliases: list[str]) -> None:
@@ -59,8 +60,9 @@ class FakeRun:
     def use_artifact(self, reference: str) -> None:
         self.used.append(reference)
 
-    def log(self, payload: dict[str, Any], step: int) -> None:
+    def log(self, payload: dict[str, Any], step: int, *, commit: bool | None = None) -> None:
         self.records.append((payload, step))
+        self.commits.append(commit)
 
     def finish(self) -> None:
         self.finished = True
@@ -147,6 +149,7 @@ def test_metrics_from_one_optimizer_step_share_one_wandb_record(
     logger.flush()
 
     assert run.records == [({"train/token_mse": 0.5, "validation/token_mse": 0.4}, 1000)]
+    assert run.commits == [True]
 
 
 @pytest.mark.parametrize("mode", ["online", "offline"])
