@@ -2,18 +2,32 @@
 
 Submit these scripts from the repository root. Each job requests one GPU on one
 node, runs one Python process, and uses the site's default partition and account.
-Isambard allocates a GH200 Superchip with its associated host memory per GPU;
-the scripts set CPU counts for their worker/thread budgets. See
+The scripts explicitly request host memory per node and CPU counts for their
+worker/thread budgets. See
 [Isambard's batch-job guide](https://docs.isambard.ac.uk/user-documentation/guides/slurm/#running-a-single-batch-job).
 
-| Job | Script | CPUs per task | Walltime |
-| --- | --- | ---: | ---: |
-| GDN training | `train.slurm` | 8 | 12 hours |
-| GDN evaluation | `eval.slurm` | 4 | 4 hours |
-| Probe dataset capture | `capture_probe.slurm` | 4 | 4 hours |
-| Probe training | `train_probe.slurm` | 12 | 12 hours |
-| Probe evaluation | `eval_probe.slurm` | 12 | 4 hours |
-| Probe benchmark | `benchmark_probe.slurm` | 12 | 1 hour |
+| Job | Script | CPUs per task | Host RAM | Walltime |
+| --- | --- | ---: | ---: | ---: |
+| GDN training | `train.slurm` | 8 | 64 GiB | 12 hours |
+| GDN evaluation | `eval.slurm` | 4 | 64 GiB | 4 hours |
+| Probe dataset capture | `capture_probe.slurm` | 4 | 32 GiB | 4 hours |
+| Probe training | `train_probe.slurm` | 12 | 64 GiB | 12 hours |
+| Probe evaluation | `eval_probe.slurm` | 12 | 32 GiB | 4 hours |
+| Probe benchmark | `benchmark_probe.slurm` | 12 | 64 GiB | 1 hour |
+
+Each `#SBATCH --mem=...` sets total host RAM per node. GPU memory is a separate
+resource. These are conservative starting budgets for the reference workloads,
+with headroom for loader workers, mapped dataset shards and checkpoint loading
+or serialization. Explicit requests avoid inheriting an oversized site default.
+Override them with `sbatch --mem=...` before the script name when a workload
+needs a different budget.
+
+Slurm records resource requests when a job is submitted; editing a script does
+not change queued jobs. For a pending job, set its per-node memory request in
+MiB with `scontrol update JobId=<job-id> MinMemoryNode=32768` for 32 GiB, or
+`MinMemoryNode=65536` for 64 GiB, then verify `ReqTRES` with
+`scontrol show job <job-id>`. This preserves its job ID and dependencies. See
+the [scontrol documentation](https://slurm.schedmd.com/scontrol.html#OPT_MinMemoryNode).
 
 All launchers delegate to `run.sh`, which initializes the module command if
 needed, loads `cudatoolkit`, then exports `CC=/usr/bin/gcc-12` and
@@ -25,7 +39,7 @@ exports; future Isambard launchers should also delegate to this runner.
 W&B defaults to online. Set `WANDB_MODE=offline` or `WANDB_MODE=disabled` when
 submitting to select another mode. Model/data/probe settings are ordinary Hydra
 arguments after the script name. Scheduler overrides such as `--time`,
-`--cpus-per-task`, `--partition` or `--account` go before the script name. Set
+`--mem`, `--cpus-per-task`, `--partition` or `--account` go before the script name. Set
 `OMP_NUM_THREADS` and `MKL_NUM_THREADS` explicitly if needed; both default to one.
 
 Create the log directory before submission: Slurm opens these files before the
