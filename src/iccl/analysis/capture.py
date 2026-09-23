@@ -221,7 +221,7 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
         ) as writer:
             writer.record_provenance(provenance)
             logger.start()
-            if artifact:
+            if artifact and cfg.wandb.mode == "online":
                 logger.use_artifact(str(p.capture.checkpoint).removeprefix(WANDB_SCHEME))
             for split in SPLITS:
                 episodes = CaptureEpisodes(
@@ -272,13 +272,15 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
                         split, {name: np.concatenate(parts) for name, parts in buffers.items()}
                     )
             dataset_id = writer.manifest["dataset_id"]
+        elapsed = time.perf_counter() - started
         report = {
             "dataset_path": str(Path(p.dataset.path).resolve()),
             "dataset_id": dataset_id,
             "new_episodes": generated,
             "checkpoint_load_seconds": load_seconds,
             "forward_and_transfer_seconds": forward_seconds,
-            "total_seconds": time.perf_counter() - started,
+            "total_seconds": elapsed,
+            "new_episodes_per_second": generated / elapsed,
             "estimated_array_bytes": sum(counts.values()) * bytes_per_episode,
             "timing_scope": (
                 "total includes checkpoint resolution, validation, generation, inference and writes"

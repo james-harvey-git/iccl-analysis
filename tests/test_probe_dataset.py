@@ -18,6 +18,26 @@ from iccl.analysis.probe_dataset import (
 )
 
 
+def test_offline_artifact_capture_keeps_provenance_without_online_lineage(
+    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Path(probe_cfg.probe.capture.checkpoint)
+    reference = "wandb://entity/project/source:v0"
+    probe_cfg.probe.capture.checkpoint = reference
+    probe_cfg.wandb.mode = "offline"
+    lineage: list[str] = []
+    monkeypatch.setattr("iccl.analysis.capture.resolve_checkpoint_path", lambda _: (source, True))
+    monkeypatch.setattr("iccl.analysis.capture.RunLogger.start", lambda self: None)
+    monkeypatch.setattr(
+        "iccl.analysis.capture.RunLogger.use_artifact", lambda self, ref: lineage.append(ref)
+    )
+    report = capture_dataset(probe_cfg, tmp_path / "capture")
+    assert report["new_episodes_per_second"] > 0
+    assert not lineage
+    manifest = read_manifest(probe_cfg.probe.dataset.path)
+    assert manifest["source_provenance"]["checkpoint_reference"] == reference
+
+
 def test_capture_storage_resume_and_training_extension(
     probe_cfg: DictConfig, tmp_path: Path
 ) -> None:

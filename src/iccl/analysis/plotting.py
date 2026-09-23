@@ -24,8 +24,13 @@ def plot_probe_results(
     require_comparable([report[0] for report in reports])
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    names = {
+        "none": "Full decoder",
+        "constant": "Constant control",
+        "shuffled_targets": "Shuffled targets",
+    }
     labels = [
-        f"{meta['control']} · step {meta['step']} · {Path(path).name}"
+        f"{names[meta['control']]} · step {meta['step']} · {Path(path).name}"
         for (meta, _, _), path in zip(reports, results, strict=True)
     ]
     saved = []

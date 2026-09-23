@@ -42,6 +42,14 @@ def test_benchmark_runs_real_updates_with_separate_windows(
     assert report["timing_scope"]["checkpoint_write_seconds"] == 0
     assert (tmp_path / "benchmark/benchmark.json").is_file()
     assert not (tmp_path / "benchmark/checkpoints").exists()
+    probe_cfg.probe.benchmark.capture_first = False
+    probe_cfg.probe.benchmark.warmup_steps = 0
+    probe_cfg.probe.benchmark.measured_steps = 1
+    probe_cfg.probe.benchmark.profile_steps = 0
+    unprofiled = benchmark_probe(probe_cfg, tmp_path / "unprofiled")
+    assert unprofiled["profiled"]["updates"] == 0
+    assert unprofiled["profiled"]["records"] == []
+    assert unprofiled["measured"]["updates"] == 1
 
 
 def test_benchmark_rejects_constant_control_before_capture(
