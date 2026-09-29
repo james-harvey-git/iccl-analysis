@@ -69,3 +69,21 @@ def test_old_module_count_is_rejected(probe_cfg: DictConfig) -> None:
     probe_cfg.data.num_modules = 8
     with pytest.raises(ValueError, match="four"):
         validate_probe_config(probe_cfg, "capture")
+
+
+def test_wandb_resume_requires_online_checkpoint_training(probe_cfg: DictConfig) -> None:
+    probe_cfg.wandb.resume = True
+    with pytest.raises(ValueError, match="online training with probe.training.resume"):
+        validate_probe_config(probe_cfg, "train")
+    probe_cfg.probe.training.resume = "/tmp/last.pt"
+    with pytest.raises(ValueError, match="online training with probe.training.resume"):
+        validate_probe_config(probe_cfg, "train")
+    probe_cfg.wandb.mode = "online"
+    validate_probe_config(probe_cfg, "train")
+    probe_cfg.probe.evaluation.checkpoint = "/tmp/best.pt"
+    for stage in ("capture", "eval", "benchmark"):
+        with pytest.raises(ValueError, match="online training with probe.training.resume"):
+            validate_probe_config(probe_cfg, stage)
+    probe_cfg.wandb.resume = "must"
+    with pytest.raises(ValueError, match="true or false"):
+        validate_probe_config(probe_cfg, "train")

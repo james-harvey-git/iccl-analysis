@@ -154,6 +154,18 @@ checkpoint cadence and output directory may change. The saved cursor counts
 Torch RNG states continue with the decoder. Extending a captured training split
 requires a new probe run, since it changes the sample population.
 
+To continue the same W&B run, add `wandb.mode=online wandb.resume=true` when
+resuming training. Its ID is read from the probe checkpoint, and the configured
+entity/project must match. W&B must find that existing run; a missing identity
+or deleted run is an error. The default `wandb.resume=false` creates a separate
+W&B run even when training resumes from a checkpoint. Evaluation uses its own
+run and must keep `wandb.resume=false`.
+
+When the checkpoint predates the last uploaded metrics, training replays those
+updates but does not upload their metrics again. W&B history is preserved, with
+new points appended once training reaches its next writable step. Local stdout
+and history still record the replayed updates.
+
 Training reports the first completed update and the configured logging cadence.
 Training and validation report module, weight, bias and readout MSEs as well as
 the joint loss. AdamW retains the existing matrix-weight decay policy; biases

@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -154,6 +155,53 @@ def test_old_checkpoint_requires_new_capture_and_training(
     probe_cfg.probe.training.resume = str(old)
     with pytest.raises(ValueError, match="capture fresh M=4"):
         ProbeTrainer(probe_cfg, tmp_path / "train")
+
+
+@pytest.mark.parametrize("resume_wandb", [False, True])
+def test_checkpoint_resume_can_continue_its_wandb_run(
+    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_wandb: bool
+) -> None:
+    capture_dataset(probe_cfg, tmp_path / "capture")
+    with ProbeTrainer(probe_cfg, tmp_path / "interrupted") as trainer:
+        for _ in range(2):
+            trainer.update(trainer.next_batch())
+        state = trainer.checkpoint()
+    path = tmp_path / "last.pt"
+    probe_cfg.probe.training.resume = str(path)
+    probe_cfg.wandb.mode = "online"
+    probe_cfg.wandb.resume = True
+    torch.save(state, path)
+    with pytest.raises(ValueError, match="checkpoint with a W&B run identity"):
+        ProbeTrainer(probe_cfg, tmp_path / "missing-identity")
+    reference = {
+        "entity": probe_cfg.wandb.entity,
+        "project": probe_cfg.wandb.project,
+        "run_id": "existing-probe",
+        "name": "original-training",
+    }
+    state["wandb_run"] = reference
+    torch.save(state, path)
+    probe_cfg.wandb.resume = resume_wandb
+    sink = SimpleNamespace(
+        entity=reference["entity"],
+        project=reference["project"],
+        id=reference["run_id"] if resume_wandb else "new-probe",
+        name=reference["name"],
+        step=4 if resume_wandb else 0,
+        log=Mock(),
+        finish=Mock(),
+    )
+    init = Mock(return_value=sink)
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init))
+    with ProbeTrainer(probe_cfg, tmp_path / "resumed") as trainer:
+        assert trainer.step == 2
+        trainer.fit()
+        assert trainer.checkpoint()["wandb_run"]["run_id"] == sink.id
+    assert init.call_args.kwargs["resume"] == ("must" if resume_wandb else "never")
+    assert init.call_args.kwargs["id"] == (reference["run_id"] if resume_wandb else None)
+    assert [call.kwargs["step"] for call in sink.log.call_args_list] == (
+        [4] if resume_wandb else [3, 4]
+    )
 
 
 def test_training_flushes_first_and_validation_metrics_before_next_update(

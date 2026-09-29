@@ -131,6 +131,11 @@ def validate_probe_config(cfg: DictConfig, stage: str) -> None:
     _integer(p.benchmark.measured_steps, "benchmark.measured_steps")
     if cfg.wandb.mode not in {"disabled", "offline", "online"}:
         raise ValueError("invalid W&B mode")
+    resume_wandb = cfg.wandb.get("resume", False)
+    if type(resume_wandb) is not bool:
+        raise ValueError("wandb.resume must be true or false")
+    if resume_wandb and (stage != "train" or not p.training.resume or cfg.wandb.mode != "online"):
+        raise ValueError("wandb.resume=true requires online training with probe.training.resume")
     workers = p.capture.num_workers if stage == "capture" else p.training.num_workers
     required = cfg.torch_num_threads + workers + (0 if stage == "capture" else p.solver.num_threads)
     allocation = os.environ.get("SLURM_CPUS_PER_TASK")

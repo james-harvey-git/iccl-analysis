@@ -200,7 +200,11 @@ Capture resume reuses compatible completed shards. To recover an interrupted
 chain, resubmit capture with the **same dataset path and capture settings**, then
 submit new `afterok` dependencies on the new job IDs. For an interrupted training
 run, also pass `probe.training.resume=<train-dir>/checkpoints/last.pt` with the
-same training settings and update budget. A dependency on a failed job does not
+same training settings and update budget. Add `wandb.resume=true` to continue the
+online W&B run recorded in that checkpoint; keep it false for the evaluation job,
+which receives its own run. Replayed updates at or before the last uploaded W&B step
+are retained locally, and W&B receives only new steps.
+A dependency on a failed job does not
 become successful when a different job resumes its work. Use a fresh evaluation
 directory if an earlier evaluation already wrote results.
 

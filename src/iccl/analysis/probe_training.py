@@ -36,6 +36,7 @@ from iccl.analysis.probe_results import (
 )
 from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
 from iccl.analysis.probes import make_decoder
+from iccl.checkpoints import SourceRun, source_from_checkpoint
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import build_optimizer, build_scheduler, resolve_autocast_dtype
 
@@ -238,18 +239,20 @@ class ProbeTrainer:
             "solver_source": self.solver.identity["source_sha256"],
             "validation_every": int(self.p.training.validation_every),
         }
+        self._iterator: Iterator[dict[str, torch.Tensor]] | None = None
+        resume_run = None
+        if self.p.training.resume:
+            tick = time.perf_counter()
+            resume_run = self._resume(Path(self.p.training.resume))
+            self.timings["checkpoint_load"] = time.perf_counter() - tick
         self.logger = RunLogger(
             cfg,
             self.out_dir,
             job_type=f"probe-{stage}",
             source=source_run(self.train.manifest),
             protocol=PROTOCOL,
+            resume_run=resume_run,
         )
-        self._iterator: Iterator[dict[str, torch.Tensor]] | None = None
-        if self.p.training.resume:
-            tick = time.perf_counter()
-            self._resume(Path(self.p.training.resume))
-            self.timings["checkpoint_load"] = time.perf_counter() - tick
         self.loader = probe_loader(
             self.train,
             self.p.training.batch_size,
@@ -273,7 +276,7 @@ class ProbeTrainer:
             f"device={self.device}; control={self.control}"
         )
 
-    def _resume(self, path: Path) -> None:
+    def _resume(self, path: Path) -> SourceRun | None:
         state = load_checkpoint(path, self.train)
         if state.get("kind") != "resumable" or state.get("training_contract") != self.contract:
             raise ValueError(
@@ -281,6 +284,11 @@ class ProbeTrainer:
             )
         if state["split_signatures"]["validation"] != self.validation.signature:
             raise ValueError("validation population changed since the checkpoint")
+        resume_run = None
+        if self.cfg.wandb.get("resume", False):
+            resume_run = source_from_checkpoint(state)
+            if resume_run is None:
+                raise ValueError("wandb.resume=true requires a checkpoint with a W&B run identity")
         saved_mapping = state["target_permutation"]
         if (saved_mapping is None) != (self.mapping is None) or (
             self.mapping is not None and not np.array_equal(saved_mapping, self.mapping)
@@ -294,6 +302,7 @@ class ProbeTrainer:
         self.history, self.validation_history = state["history"], state["validation_history"]
         self._previous_best = state.get("best_checkpoint") or str(path.parent / "best.pt")
         _restore_rng(state["rng"])
+        return resume_run
 
     def next_batch(self) -> dict[str, torch.Tensor]:
         if self._iterator is None:

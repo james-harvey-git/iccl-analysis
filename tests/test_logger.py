@@ -53,6 +53,7 @@ class FakeRun:
         self.records: list[tuple[dict[str, Any], int]] = []
         self.commits: list[bool | None] = []
         self.finished = False
+        self.step = 0
 
     def log_artifact(self, artifact: FakeArtifact, aliases: list[str]) -> None:
         self.logged.append((artifact, aliases))
@@ -150,6 +151,57 @@ def test_metrics_from_one_optimizer_step_share_one_wandb_record(
 
     assert run.records == [({"train/token_mse": 0.5, "validation/token_mse": 0.4}, 1000)]
     assert run.commits == [True]
+
+
+def test_resume_requires_existing_run_and_preserves_uploaded_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    run.step = 69751
+    fake = FakeWandb(run)
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    cfg = OmegaConf.create(
+        {
+            "wandb": {
+                "mode": "online",
+                "entity": REFERENCE["entity"],
+                "project": REFERENCE["project"],
+            }
+        }
+    )
+    logger = RunLogger(
+        cfg, tmp_path, job_type="probe-train", resume_run=SourceRun(step=69000, **REFERENCE)
+    )
+    logger.start()
+    assert fake.captured["id"] == REFERENCE["run_id"]
+    assert fake.captured["resume"] == "must"
+    for step in (69025, 69750):
+        logger.log({"probe/train/loss": 0.2}, step)
+        logger.flush()
+    assert run.records == []
+    logger.log({"probe/train/loss": 0.1}, 69751)
+    logger.log({"probe/validation/joint_mse": 0.3}, 69751)
+    logger.flush()
+    assert run.records == [({"probe/train/loss": 0.1, "probe/validation/joint_mse": 0.3}, 69751)]
+    assert logger.run_reference() == REFERENCE
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"mode": "offline"}, {"entity": "other"}, {"project": "other"}]
+)
+def test_resume_rejects_offline_or_different_destination(tmp_path: Path, overrides: dict) -> None:
+    cfg = OmegaConf.create(
+        {
+            "wandb": {
+                "mode": "online",
+                "entity": REFERENCE["entity"],
+                "project": REFERENCE["project"],
+                **overrides,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="online mode|entity/project"):
+        RunLogger(cfg, tmp_path, job_type="probe-train", resume_run=SourceRun(step=2, **REFERENCE))
 
 
 @pytest.mark.parametrize("mode", ["online", "offline"])

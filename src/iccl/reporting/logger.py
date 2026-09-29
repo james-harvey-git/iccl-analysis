@@ -63,6 +63,10 @@ class RunLogger:
     can build its model and fail before a run is created. ``source`` names the
     training run an evaluated checkpoint came from: it goes into this run's
     config for filtering and into its notes as a link.
+
+    ``resume_run`` explicitly continues an existing online run recorded in a
+    training checkpoint. Earlier metric steps are preserved when the checkpoint
+    predates the last uploaded metrics.
     """
 
     def __init__(
@@ -73,13 +77,29 @@ class RunLogger:
         job_type: str,
         source: SourceRun | None = None,
         protocol: str = METRIC_VERSION,
+        resume_run: SourceRun | None = None,
     ) -> None:
         self.cfg = cfg
         self.out_dir = Path(out_dir)
         self.job_type = job_type
         self.source = source
         self.protocol = protocol
+        self.resume_run = resume_run
+        if resume_run is not None:
+            if cfg.wandb.mode != "online":
+                raise ValueError("resuming a W&B run requires online mode")
+            if (
+                not resume_run.run_id
+                or not resume_run.entity
+                or not resume_run.project
+                or cfg.wandb.entity != resume_run.entity
+                or cfg.wandb.project != resume_run.project
+            ):
+                raise ValueError(
+                    "the checkpoint's W&B identity must match the configured entity/project"
+                )
         self.run = None
+        self._first_wandb_step = 0
         self._pending_step: int | None = None
         self._pending_payload: dict[str, Any] = {}
 
@@ -120,12 +140,19 @@ class RunLogger:
             # None is W&B's "generate one", so an unset name needs no branch.
             name=self.cfg.wandb.get("name"),
             job_type=self.job_type,
-            resume="never",
+            id=self.resume_run.run_id if self.resume_run is not None else None,
+            resume="must" if self.resume_run is not None else "never",
             tags=tags,
             notes=notes,
             config=config,
             dir=str(self.out_dir),
         )
+        if self.resume_run is not None and self.run is not None:
+            self._first_wandb_step = self.run.step
+            print(
+                f"resuming W&B run {self.resume_run.url}; "
+                f"appending metrics from step {self._first_wandb_step}"
+            )
         if self.source is not None and self.source.url:
             print(f"evaluating a checkpoint from {self.source.url}")
 
@@ -147,7 +174,7 @@ class RunLogger:
 
     def _queue(self, payload: dict[str, Any], step: int) -> None:
         """Merge all values produced at one optimizer step into one W&B record."""
-        if self.run is None:
+        if self.run is None or step < self._first_wandb_step:
             return
         if self._pending_step is not None and self._pending_step != step:
             self.flush()
