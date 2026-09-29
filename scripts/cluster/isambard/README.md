@@ -77,47 +77,150 @@ sbatch scripts/cluster/isambard/eval.slurm \
 
 ## Probe dataset, training and evaluation
 
-Capture final memory states from a GDN checkpoint into a reusable dataset:
+The set decoder uses **M=4, T=7, D=32**, with state capture after the final
+boundary and a 1,344-output affine decoder. `module-set-decoder-v1` requires a
+fresh M=4 dataset and new training. Existing M=8 states/checkpoints are rejected;
+leave previous results intact. The [probe guide](../../../docs/module-decoder.md)
+describes the exact matching objective, controls, plots and storage contract.
+
+The following **Bash** block queues a complete pilot with distinct W&B names.
+Replace the GDN reference with an immutable artifact version or a local path.
+Run it from the repository checkout. Datasets, Hydra outputs, Slurm logs,
+artifact downloads and the listed caches go directly to `$SCRATCHDIR`; no home
+directory symlink is needed. W&B is explicitly online and full checkpoint/data
+uploads stay disabled.
 
 ```bash
-sbatch scripts/cluster/isambard/capture_probe.slurm \
-  probe.capture.checkpoint=/path/to/gdn/checkpoint.pt \
-  probe.dataset.path=outputs/module-decoder/datasets/reference
+bash <<'BASH'
+set -euo pipefail
+: "${SCRATCHDIR:?SCRATCHDIR must point to your Isambard scratch directory}"
+set_probe_gdn='wandb://ENTITY/PROJECT/ARTIFACT:VERSION'  # Or /absolute/path/to/gdn.pt.
+set_probe_root="$SCRATCHDIR/iccl-analysis"
+set_probe_train_count=10000
+set_probe_steps=10000
+set_probe_shard=512
+set_probe_capture_time=00:15:00
+set_probe_capture_mem=32G
+set_probe_train_time=02:00:00
+set_probe_eval_time=01:00:00
+set_probe_run="set-m4t7d32-n${set_probe_train_count}-b128-u${set_probe_steps}-s0-$(date +%Y%m%d-%H%M%S)"
+set_probe_dataset="$set_probe_root/module-decoder/datasets/$set_probe_run"
+set_probe_runs="$set_probe_root/module-decoder/runs/$set_probe_run"
+set_probe_logs="$set_probe_root/logs/slurm"
+
+export WANDB_MODE=online
+export WANDB_CACHE_DIR="$set_probe_root/cache/wandb"
+export WANDB_DATA_DIR="$set_probe_root/cache/wandb-staging"
+export WANDB_ARTIFACT_DIR="$set_probe_root/artifacts"
+export UV_CACHE_DIR="$set_probe_root/cache/uv"
+mkdir -p "$set_probe_logs" "$set_probe_runs" "$WANDB_CACHE_DIR" \
+  "$WANDB_DATA_DIR" "$WANDB_ARTIFACT_DIR" "$UV_CACHE_DIR"
+
+set_probe_common=(
+  "probe.dataset.path=$set_probe_dataset"
+  "probe.solver.cache_dir=$set_probe_root/cache/probe-assignment"
+  seed=0
+)
+set_probe_log_args=(
+  "--output=$set_probe_logs/%x_%j.out"
+  "--error=$set_probe_logs/%x_%j.err"
+)
+
+set_probe_capture_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
+  --cpus-per-task=4 "--mem=$set_probe_capture_mem" "--time=$set_probe_capture_time" \
+  scripts/cluster/isambard/capture_probe.slurm \
+  "${set_probe_common[@]}" "probe.capture.checkpoint=$set_probe_gdn" \
+  "probe.dataset.counts.train=$set_probe_train_count" \
+  probe.dataset.counts.validation=1000 probe.dataset.counts.test=1000 \
+  "probe.dataset.shard_size=$set_probe_shard" \
+  "hydra.run.dir=$set_probe_runs/capture" "wandb.name=$set_probe_run-capture")
+set_probe_capture_job=${set_probe_capture_job%%;*}
+
+set_probe_train_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
+  "--dependency=afterok:$set_probe_capture_job" \
+  --cpus-per-task=12 --mem=64G "--time=$set_probe_train_time" \
+  scripts/cluster/isambard/train_probe.slurm \
+  "${set_probe_common[@]}" "probe.training.num_steps=$set_probe_steps" \
+  probe.training.batch_size=128 probe.training.control=none \
+  probe.training.weight_decay=0.003 \
+  "hydra.run.dir=$set_probe_runs/train" "wandb.name=$set_probe_run-train")
+set_probe_train_job=${set_probe_train_job%%;*}
+
+set_probe_eval_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
+  "--dependency=afterok:$set_probe_train_job" \
+  --cpus-per-task=12 --mem=32G "--time=$set_probe_eval_time" \
+  scripts/cluster/isambard/eval_probe.slurm \
+  "${set_probe_common[@]}" \
+  "probe.evaluation.checkpoint=$set_probe_runs/train/checkpoints/best.pt" \
+  probe.evaluation.split=test \
+  "hydra.run.dir=$set_probe_runs/eval" "wandb.name=$set_probe_run-eval")
+set_probe_eval_job=${set_probe_eval_job%%;*}
+
+printf 'Capture: %s\nTrain: %s\nEval: %s\nDataset: %s\nRuns: %s\n' \
+  "$set_probe_capture_job" "$set_probe_train_job" "$set_probe_eval_job" \
+  "$set_probe_dataset" "$set_probe_runs"
+BASH
 ```
 
-After capture completes, train a probe on that dataset:
+For **500,000 training / 1,000 validation / 1,000 test episodes and 100,000
+updates**, change these values near the top of the same block before submitting:
 
 ```bash
-sbatch scripts/cluster/isambard/train_probe.slurm \
-  probe.dataset.path=outputs/module-decoder/datasets/reference
+set_probe_train_count=500000
+set_probe_steps=100000
+set_probe_shard=16384
+set_probe_capture_time=02:00:00
+set_probe_capture_mem=64G
+set_probe_train_time=04:00:00
+set_probe_eval_time=01:00:00
 ```
 
-Evaluate the resulting probe checkpoint on the held-out test split:
+These are initial resource allocations, **not measured completion estimates**.
+Rebenchmark this decoder before tightening them. A 16,384-episode shard holds
+about 8.17 GiB of arrays at reference width; capture needs room for buffers and
+write copies. The entire 502,000-episode dataset holds about **250.28 GiB of
+arrays on disk**, plus file overhead. Keep separate room for rolling
+`best.pt`/`last.pt`, atomic checkpoint writes, artifact downloads and caches.
+Scratch quota and host RAM are different limits. Training reads mmap batches;
+it does not allocate 250 GiB of RAM.
 
-```bash
-sbatch scripts/cluster/isambard/eval_probe.slurm \
-  probe.dataset.path=outputs/module-decoder/datasets/reference \
-  probe.evaluation.checkpoint=/path/to/probe/checkpoints/best.pt \
-  probe.evaluation.split=test
-```
+Capture resume reuses compatible completed shards. To recover an interrupted
+chain, resubmit capture with the **same dataset path and capture settings**, then
+submit new `afterok` dependencies on the new job IDs. For an interrupted training
+run, also pass `probe.training.resume=<train-dir>/checkpoints/last.pt` with the
+same training settings and update budget. A dependency on a failed job does not
+become successful when a different job resumes its work. Use a fresh evaluation
+directory if an earlier evaluation already wrote results.
 
 The probe checkpoint belongs to the decoder; `probe.capture.checkpoint` refers
-to the frozen GDN used to generate the dataset. See the
-[module-decoder guide](../../../docs/module-decoder.md) for controls,
-resumption, figures and output formats.
+to the frozen GDN used to generate the dataset. To fit the constant or shuffled
+control, submit another training/evaluation pair on the same captured dataset,
+changing `probe.training.control` to `constant` or `shuffled_targets` and giving
+both jobs distinct run directories and W&B names. Evaluation restores the
+control kind from its checkpoint. Test episodes are never used for selection.
 
 ## Full-decoder benchmark
 
 Capture a bounded dataset and measure complete decoder updates in one job:
 
 ```bash
-sbatch scripts/cluster/isambard/benchmark_probe.slurm \
+: "${SCRATCHDIR:?SCRATCHDIR must be set}"
+set_probe_root="$SCRATCHDIR/iccl-analysis"
+set_probe_benchmark="set-m4t7d32-benchmark-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$set_probe_root/logs/slurm"
+sbatch --mem=64G --time=01:00:00 \
+  "--output=$set_probe_root/logs/slurm/%x_%j.out" \
+  "--error=$set_probe_root/logs/slurm/%x_%j.err" \
+  scripts/cluster/isambard/benchmark_probe.slurm \
   probe.capture.checkpoint=/path/to/reference-gdn/checkpoint.pt \
-  probe.dataset.path=outputs/module-decoder/datasets/reference-benchmark \
+  "probe.dataset.path=$set_probe_root/module-decoder/datasets/$set_probe_benchmark" \
+  "probe.solver.cache_dir=$set_probe_root/cache/probe-assignment" \
   probe.dataset.counts.train=512 \
   probe.dataset.counts.validation=64 \
   probe.dataset.counts.test=64 \
-  probe.benchmark.capture_first=true
+  probe.benchmark.capture_first=true \
+  "hydra.run.dir=$set_probe_root/module-decoder/runs/$set_probe_benchmark" \
+  "wandb.name=$set_probe_benchmark"
 ```
 
 The default benchmark uses the full decoder and batch size 128. Its

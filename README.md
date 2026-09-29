@@ -80,7 +80,11 @@ uv run python scripts/train.py
 
 The [module-decoder guide](docs/module-decoder.md) covers final-memory capture,
 the full affine decoder with exact native symmetry matching, controls, resumable
-training, held-out reconstruction, saved-result plots and the H100 benchmark.
+training, held-out reconstruction, saved-result plots and the cluster benchmark.
+The probe predicts an unordered set of four modules and a fixed first readout
+block (1,344 outputs), using M=4, T=7, D=32 and capture after a final boundary.
+The `module-set-decoder-v1` protocol requires fresh M=4 captures and new training;
+old occurrence-based captures and checkpoints cannot be reused.
 These analyses use `configs/probe.yaml` and separate captured datasets under
 `outputs/module-decoder/`.
 
