@@ -37,8 +37,20 @@ All launchers delegate to `run.sh`, which initializes the module command if
 needed, loads `cudatoolkit`, then exports `CC=/usr/bin/gcc-12` and
 `CXX=/usr/bin/g++-12`. It checks the compiler commands before starting Python,
 records their versions, the Git commit and GPU information in the job log, and
-uses `uv run --locked`. Add any additional module loads before those compiler
+uses `uv run --locked --no-sync`. Add any additional module loads before those compiler
 exports; future Isambard launchers should also delegate to this runner.
+
+Jobs use the prepared Python environment without syncing dependencies. Concurrent
+jobs share the checkout's `.venv`, and an automatic reinstall during another job's
+PyTorch imports can temporarily remove a required CUDA library. `--locked` prevents
+lockfile updates but still permits environment changes; `--no-sync` prevents those
+changes at launch. See [uv's locking and syncing documentation](https://docs.astral.sh/uv/concepts/projects/sync/).
+
+Run `uv sync --locked` once before submission and after dependency changes, **only
+while no jobs are using that environment**. While jobs are running, use
+`uv run --locked --no-sync ...` for other commands in the same checkout as well.
+If dependencies must change during a running experiment, prepare a separate
+checkout and environment for the new jobs.
 
 W&B defaults to online. Set `WANDB_MODE=offline` or `WANDB_MODE=disabled` when
 submitting to select another mode. Model/data/probe settings are ordinary Hydra
@@ -62,7 +74,7 @@ preparation verifies/reuses a matching bundle; the job launchers do not generate
 it. A default-data run is:
 
 ```bash
-uv run --locked python scripts/make_eval_sets.py
+uv run --locked --no-sync python scripts/make_eval_sets.py
 sbatch scripts/cluster/isambard/train.slurm wandb.name=reference-gdn
 ```
 

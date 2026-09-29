@@ -29,4 +29,5 @@ echo "Job ${SLURM_JOB_ID:-local}; node $(hostname); commit $(git rev-parse --sho
 echo "Entrypoint: ${iccl_entrypoint}; CC=${CC}; CXX=${CXX}"
 nvidia-smi
 
-exec uv run --locked python -u "${iccl_entrypoint}" "wandb.mode=${WANDB_MODE:-online}" "$@"
+# Concurrent jobs share the prepared environment; never reinstall packages at launch.
+exec uv run --locked --no-sync python -u "${iccl_entrypoint}" "wandb.mode=${WANDB_MODE:-online}" "$@"

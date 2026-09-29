@@ -33,7 +33,9 @@ is available. The locked ARM wheel requires glibc 2.34 or newer. See
 and [Isambard's CUDA setup](https://docs.isambard.ac.uk/user-documentation/guides/gpus_and_cuda/#loading-the-cuda-toolkit).
 
 Inside an Isambard GPU allocation, load CUDA and select the host compilers before
-running Python. The versioned GCC 12 paths follow
+running Python. Prepare or update the shared environment only while no other jobs
+are using it; the test commands below skip automatic dependency syncing. The
+versioned GCC 12 paths follow
 [Isambard's compiler guidance](https://docs.isambard.ac.uk/user-documentation/guides/python-advanced/#compilers)
 and support [CUDA 12.6's C++20 requirements](https://docs.nvidia.com/cuda/archive/12.6.3/cuda-installation-guide-linux/index.html#host-compiler-support-policy).
 
@@ -45,9 +47,9 @@ export CXX=/usr/bin/g++-12
 "$CXX" --version
 nvcc --version
 uv sync --locked
-uv run --locked pytest -q tests/test_ops_parity.py \
+uv run --locked --no-sync pytest -q tests/test_ops_parity.py \
   tests/test_retention_factorial.py::test_original_prefix_predictions_are_causal
-uv run --locked pytest -q
+uv run --locked --no-sync pytest -q
 ```
 
 Set `CC` and `CXX` after all module loads: the NVIDIA SDK environment can select
