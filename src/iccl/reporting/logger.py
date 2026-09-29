@@ -293,10 +293,12 @@ class RunLogger:
                 "population",
                 "metric",
                 "task_position",
+                "exposure_count",
                 "mean",
                 "ci_low",
                 "ci_high",
                 "n_episodes",
+                "n_modules",
                 "variance_floored_tasks",
             ]
             payload: dict[str, Any] = dict(metrics)

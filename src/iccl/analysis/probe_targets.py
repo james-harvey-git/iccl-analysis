@@ -4,24 +4,33 @@ import numpy as np
 
 from iccl.data.teacher import ModulePool
 
-PROTOCOL = "module-decoder-v1"
-TASKS, MODULES, WIDTH, AUGMENTED = 8, 8, 16, 17
-MODULE_SHAPE = (TASKS, 2, AUGMENTED, WIDTH)
+PROTOCOL = "module-set-decoder-v1"
+MODULES, WIDTH, AUGMENTED = 4, 16, 17
+MODULE_SHAPE = (MODULES, AUGMENTED, WIDTH)
 MODULE_FEATURES = int(np.prod(MODULE_SHAPE))
-OUTPUT_FEATURES = MODULE_FEATURES + WIDTH * WIDTH
+READOUT_FEATURES = WIDTH * WIDTH
+OUTPUT_FEATURES = READOUT_FEATURES + MODULE_FEATURES
+TARGET_LAYOUT = {
+    "order": ["readout", "modules"],
+    "readout": [WIDTH, WIDTH],
+    "modules": list(MODULE_SHAPE),
+    "features": OUTPUT_FEATURES,
+    "module_assignment": "prediction-slot-to-target-module",
+    "hidden_assignment": "prediction-coordinate-to-target-coordinate",
+}
 
 
 def canonical_pool(pool: ModulePool) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Absorb each readout-row norm into every module's corresponding neuron.
 
     Intermediates are FP64. The resulting FP32 labels preserve the teacher up
-    to rounding and leave only discrete module/neuron assignment symmetries.
+    to rounding and fix the standard positive ReLU scaling symmetry.
     """
     if len(pool.modules) != 1 or len(pool.biases) != 1:
         raise ValueError("module decoding requires exactly one teacher hidden layer")
     weights, biases, readout = pool.modules[0], pool.biases[0], pool.readout
     for value, shape in zip(
-        (weights, biases, readout), ((8, 16, 16), (8, 16), (16, 16)), strict=True
+        (weights, biases, readout), ((MODULES, 16, 16), (MODULES, 16), (16, 16)), strict=True
     ):
         if value.shape != shape or not np.isfinite(value).all():
             raise ValueError(f"invalid teacher array; expected finite {shape}")
@@ -37,27 +46,25 @@ def canonical_pool(pool: ModulePool) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 
 def episode_targets(pool: ModulePool, latents: np.ndarray) -> dict[str, np.ndarray]:
-    """Select unweighted constituents and retain the original world for diagnostics."""
+    """Store each observed module once, retaining the world and task metadata for scoring."""
     latents = np.asarray(latents, dtype=np.float32)
-    if latents.shape != (TASKS, MODULES) or not np.isfinite(latents).all():
-        raise ValueError("latents must be finite [8,8]")
+    if latents.ndim != 2 or latents.shape[1] != MODULES or len(latents) < MODULES - 1:
+        raise ValueError("latents must have shape [T,4] with T >= 3")
+    if not np.isfinite(latents).all():
+        raise ValueError("latents must be finite")
     if not (np.count_nonzero(latents, axis=1) == 2).all() or (latents < 0).any():
         raise ValueError("each task must have exactly two positive module coefficients")
-    ids = np.stack([np.flatnonzero(row) for row in latents]).astype(np.int64)
-    counts = np.bincount(ids.ravel(), minlength=MODULES).astype(np.int64)
+    counts = np.count_nonzero(latents, axis=0).astype(np.int64)
     if (counts == 0).any():
-        raise ValueError("all eight modules must appear in the episode")
-    first = np.asarray([np.flatnonzero(latents[:, m])[0] for m in range(MODULES)], np.int64)
+        raise ValueError("all four modules must appear before terminal state capture")
     modules, readout, norms = canonical_pool(pool)
     return {
-        "modules": modules[ids],
+        "modules": modules,
         "readout": readout,
         "world_modules": pool.modules[0].astype(np.float32),
         "world_biases": pool.biases[0].astype(np.float32),
         "world_readout": pool.readout.astype(np.float32),
         "latents": latents,
-        "module_ids": ids,
-        "first_appearance": first,
         "occurrence_count": counts,
         "latent_rank": np.asarray(np.linalg.matrix_rank(latents), dtype=np.int64),
         "readout_norms": norms,
@@ -65,13 +72,13 @@ def episode_targets(pool: ModulePool, latents: np.ndarray) -> dict[str, np.ndarr
 
 
 def flat_targets(modules: np.ndarray, readout: np.ndarray) -> np.ndarray:
-    """Flatten any leading batch dimensions in the versioned B-then-R layout."""
-    if modules.shape[-4:] != MODULE_SHAPE or readout.shape[-2:] != (WIDTH, WIDTH):
+    """Flatten any leading batch dimensions in the versioned readout-first layout."""
+    if modules.shape[-3:] != MODULE_SHAPE or readout.shape[-2:] != (WIDTH, WIDTH):
         raise ValueError("invalid canonical target shapes")
-    leading = modules.shape[:-4]
+    leading = modules.shape[:-3]
     if readout.shape[:-2] != leading:
         raise ValueError("module and readout batch dimensions differ")
     return np.concatenate(
-        (modules.reshape(*leading, MODULE_FEATURES), readout.reshape(*leading, WIDTH * WIDTH)),
+        (readout.reshape(*leading, READOUT_FEATURES), modules.reshape(*leading, MODULE_FEATURES)),
         axis=-1,
     ).astype(np.float32)

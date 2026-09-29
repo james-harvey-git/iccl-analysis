@@ -12,12 +12,11 @@ import numpy as np
 import torch
 
 from iccl.analysis.probe_dataset import CapturedDataset, file_digest, write_json
-from iccl.analysis.probe_targets import MODULE_SHAPE, OUTPUT_FEATURES, PROTOCOL
+from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
 from iccl.checkpoints import SourceRun
 
 CHECKPOINT_VERSION = f"{PROTOCOL}/checkpoint-v1"
 RESULT_VERSION = f"{PROTOCOL}/results-v1"
-TARGET_LAYOUT = {"modules": list(MODULE_SHAPE), "readout": [16, 16], "features": OUTPUT_FEATURES}
 
 
 def probe_summary_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -34,6 +33,8 @@ def probe_summary_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                         "population": population,
                         "metric": metric,
                         "task_position": index + 1 if by_task else None,
+                        "exposure_count": None,
+                        "n_modules": None,
                         "mean": float(mean),
                         "n_episodes": int(estimate["n_episodes"]),
                         "variance_floored_tasks": int(report["variance_floored_tasks"]),
@@ -44,6 +45,22 @@ def probe_summary_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
                             None if value is None else float(value[index] if by_task else value)
                         )
                     rows.append(row)
+            for exposure, estimate in report["exposure"].items():
+                rows.append(
+                    {
+                        "prediction": prediction,
+                        "population": population,
+                        "metric": "module_mse",
+                        "task_position": None,
+                        "exposure_count": int(exposure),
+                        "mean": estimate["mean"],
+                        "ci_low": estimate["ci_low"],
+                        "ci_high": estimate["ci_high"],
+                        "n_episodes": estimate["n_episodes"],
+                        "n_modules": estimate["n_modules"],
+                        "variance_floored_tasks": None,
+                    }
+                )
     return rows
 
 
@@ -64,7 +81,10 @@ def save_checkpoint(path: Path, checkpoint: dict[str, Any]) -> None:
 def load_checkpoint(path: Path | str, dataset: CapturedDataset) -> dict[str, Any]:
     checkpoint = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=False)
     if checkpoint.get("version") != CHECKPOINT_VERSION:
-        raise ValueError("expected a module-decoder checkpoint, not a source GDN checkpoint")
+        raise ValueError(
+            "expected a module-set-decoder checkpoint; capture fresh M=4 episodes and retrain "
+            "for old task-occurrence checkpoints, or supply a probe rather than GDN checkpoint"
+        )
     identity = dataset.manifest["identity"]
     if (
         checkpoint.get("dataset_id") != dataset.manifest["dataset_id"]
@@ -131,7 +151,10 @@ def read_results(
     directory = Path(directory)
     manifest = json.loads((directory / "manifest.json").read_text())
     if manifest.get("version") != RESULT_VERSION:
-        raise ValueError("incompatible module-decoder result protocol")
+        raise ValueError(
+            "incompatible module-set-decoder result protocol; recapture/retrain and evaluate "
+            "the M=4 set decoder before using this plotting pipeline"
+        )
     if set(manifest["files"]) != {"episodes.npz", "summary.json"}:
         raise ValueError("incomplete probe result manifest")
     for name, checksum in manifest["files"].items():
@@ -145,6 +168,7 @@ def read_results(
 def require_comparable(reports: list[dict[str, Any]]) -> None:
     """Refuse comparison plots when their held-out populations or scoring rules differ."""
     keys = (
+        "protocol",
         "dataset_id",
         "split_signature",
         "readout_weight",

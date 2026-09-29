@@ -4,11 +4,17 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
-from omegaconf import DictConfig
+import torch
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
 from iccl.analysis import probe_dataset
-from iccl.analysis.capture import CaptureEpisodes, capture_dataset, collate_capture
+from iccl.analysis.capture import (
+    CaptureEpisodes,
+    capture_dataset,
+    collate_capture,
+    flatten_final_states,
+)
 from iccl.analysis.probe_config import stream_seed
 from iccl.analysis.probe_dataset import (
     CapturedDataset,
@@ -18,6 +24,8 @@ from iccl.analysis.probe_dataset import (
     shuffled_pairing,
     write_json,
 )
+from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
+from iccl.models.model import model_from_config
 
 
 def test_offline_artifact_capture_keeps_provenance_without_online_lineage(
@@ -48,12 +56,12 @@ def test_capture_storage_resume_and_training_extension(
     root = Path(probe_cfg.probe.dataset.path)
     manifest = read_manifest(root)
     assert manifest["complete"]
-    assert manifest["identity"]["token_count"] == 521
+    assert manifest["identity"]["token_count"] == 456
     assert manifest["identity"]["input_features"] == 64
     train = CapturedDataset(root, "train")
     assert len(train) == 4
     first = train[0]
-    assert first["states"].shape == (64,) and first["target"].shape == (4608,)
+    assert first["states"].shape == (64,) and first["target"].shape == (1344,)
     assert first["states"].dtype == np.float32
     for index in (0, 3, 2, 1):
         assert train[index]["episode_index"] == index
@@ -89,10 +97,58 @@ def test_episode_generation_invariant_to_workers_and_order(probe_cfg: DictConfig
             for name in rows[0]:
                 combined = np.concatenate([batch[name] for batch in batches])
                 np.testing.assert_array_equal(combined[i], dataset[i][name])
-        assert batches[0]["tokens"].shape == (2, 521, 16)
+        assert batches[0]["tokens"].shape == (2, 456, 16)
         assert (batches[0]["token_type"][:, -1] == 2).all()
     same_world = CaptureEpisodes(probe_cfg.data, seed, 12, 13)[0]
     np.testing.assert_array_equal(same_world["world_modules"], rows[0]["world_modules"])
+
+
+@pytest.mark.parametrize("surplus", [0, 4])
+@torch.inference_mode()
+def test_captured_states_equal_reference_trajectory_after_final_boundary(
+    probe_cfg: DictConfig, tmp_path: Path, surplus: int
+) -> None:
+    probe_cfg.data.sequence.surplus_tasks = surplus
+    capture_dataset(probe_cfg, tmp_path / "capture")
+    root = Path(probe_cfg.probe.dataset.path)
+    manifest = read_manifest(root)
+    identity = manifest["identity"]
+    tasks = 3 + surplus
+    assert identity["protocol"] == PROTOCOL and identity["target_layout"] == TARGET_LAYOUT
+    assert identity["task_count"] == tasks and identity["token_count"] == tasks * 65 + 1
+    assert manifest["schema"]["latents"]["shape"] == [tasks, 4]
+    episodes = CaptureEpisodes(probe_cfg.data, identity["split_seeds"]["train"], 0, 2)
+    batch = collate_capture([episodes[0], episodes[1]])
+    checkpoint = torch.load(probe_cfg.probe.capture.checkpoint, weights_only=False)
+    model_config = OmegaConf.create(checkpoint["config"])
+    assert isinstance(model_config, DictConfig)
+    model = model_from_config(model_config)
+    model.load_state_dict(checkpoint["model"])
+    model.eval()
+    output = model(
+        torch.from_numpy(batch["tokens"]), torch.from_numpy(batch["token_type"]), capture=True
+    )
+    assert output.states is not None
+    expected = flatten_final_states(
+        [layer[:, -1] for layer in output.states], identity["state_layout"]
+    )
+    before_boundary = flatten_final_states(
+        [layer[:, -2] for layer in output.states], identity["state_layout"]
+    )
+    with_dataset = CapturedDataset(root, "train")
+    actual = np.stack([with_dataset[i]["states"] for i in range(2)])
+    np.testing.assert_array_equal(actual, expected.numpy())
+    assert not np.allclose(actual, before_boundary.numpy(), rtol=1e-5, atol=1e-8)
+    with_dataset.close()
+
+
+def test_old_capture_is_rejected_without_modifying_files(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    write_json(path, {"protocol": "module-decoder-v1"})
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="capture fresh M=4"):
+        CapturedDataset(tmp_path, "train")
+    assert path.read_bytes() == original
 
 
 def test_uncommitted_shard_recovery_and_corruption(probe_cfg: DictConfig, tmp_path: Path) -> None:
@@ -128,7 +184,7 @@ def test_shuffled_episode_targets_are_intact(probe_cfg: DictConfig, tmp_path: Pa
     for index, target_index in enumerate(pairing):
         actual, source, target = shuffled[index], plain[index], plain[int(target_index)]
         np.testing.assert_array_equal(actual["states"], source["states"])
-        for field in ("target", "latents", "module_ids", "world_readout"):
+        for field in ("target", "latents", "modules", "world_readout"):
             np.testing.assert_array_equal(actual[field], target[field])
     with pytest.raises(ValueError, match="training split"):
         CapturedDataset(probe_cfg.probe.dataset.path, "test", np.array([1, 0]))

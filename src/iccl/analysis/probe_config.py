@@ -8,7 +8,7 @@ from typing import Any, cast
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from iccl.analysis.probe_targets import PROTOCOL
+from iccl.analysis.probe_targets import MODULES, PROTOCOL
 from iccl.utils import resolve_device, seed_everything
 
 SPLITS = ("train", "validation", "test")
@@ -38,6 +38,12 @@ def _integer(value: Any, name: str, minimum: int = 1) -> None:
         raise ValueError(f"{name} must be an integer >= {minimum}")
 
 
+def task_count(data: DictConfig) -> int:
+    """One fixed constructive curriculum length per captured dataset."""
+    _integer(data.sequence.surplus_tasks, "data.sequence.surplus_tasks", 0)
+    return MODULES - 1 + int(data.sequence.surplus_tasks)
+
+
 def validate_probe_config(cfg: DictConfig, stage: str) -> None:
     """Validate only the launch inputs needed for this stage, plus shared invariants."""
     if stage not in {"capture", "train", "eval", "benchmark"}:
@@ -48,18 +54,18 @@ def validate_probe_config(cfg: DictConfig, stage: str) -> None:
     expected = {
         "curriculum_sampler": "constructive",
         "hotness": 2,
-        "surplus_tasks": 1,
         "demos_per_task": 32,
         "signal_boundaries": True,
         "require_identifiable": True,
         "require_full_rank": False,
     }
-    if data.num_modules != 8 or not data.use_bias or data.weighting != "discrete":
-        raise ValueError("module decoding requires eight biased modules and discrete weights")
+    if data.num_modules != MODULES or not data.use_bias or data.weighting != "discrete":
+        raise ValueError("set decoding requires four biased modules and discrete weights")
+    task_count(data)
     if not math.isclose(float(data.scale), math.sqrt(3), rel_tol=1e-12):
         raise ValueError("teacher scale must be sqrt(3)")
     if any(data.sequence.get(key) != value for key, value in expected.items()):
-        raise ValueError("probe episodes require the constructive M=T=8, D=32 contract")
+        raise ValueError("probe episodes require the constructive M=4, D=32 contract")
     if data.sequence.get("phases") is not None:
         raise ValueError("fixed-phase curricula are not supported by this probe protocol")
     if not p.dataset.path:

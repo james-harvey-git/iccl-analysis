@@ -100,9 +100,9 @@ def test_probe_protocol_and_artifacts_are_explicit(
     fake = FakeWandb(run)
     monkeypatch.setitem(sys.modules, "wandb", fake)
     cfg = OmegaConf.create({"wandb": {"mode": "online", "project": "test", "entity": None}})
-    logger = RunLogger(cfg, tmp_path, job_type="probe-train", protocol="module-decoder-v1")
+    logger = RunLogger(cfg, tmp_path, job_type="probe-train", protocol="module-set-decoder-v1")
     logger.start()
-    assert fake.captured["config"]["evaluation_protocol"] == "module-decoder-v1"
+    assert fake.captured["config"]["evaluation_protocol"] == "module-set-decoder-v1"
     logger.upload_probe_artifact(tmp_path, kind="results")
     assert run.logged == []
     cfg.wandb.upload_results = True
@@ -166,6 +166,8 @@ def test_probe_figures_and_estimates_log_without_artifact_uploads(
             "population": "all",
             "metric": "joint_mse",
             "task_position": None,
+            "exposure_count": None,
+            "n_modules": None,
             "mean": 0.4,
             "ci_low": 0.3,
             "ci_high": 0.5,
@@ -177,7 +179,7 @@ def test_probe_figures_and_estimates_log_without_artifact_uploads(
     logger.log_probe_evaluation(
         {"probe/test/decoder/joint_mse": 0.4},
         rows,
-        {"probe/test/figures/module_by_task": figure},
+        {"probe/test/figures/module_by_exposure": figure},
         40,
         namespace="probe/test",
     )
@@ -185,7 +187,7 @@ def test_probe_figures_and_estimates_log_without_artifact_uploads(
     assert len(run.records) == 1 and not run.logged
     payload, step = run.records[0]
     assert step == 40 and payload["probe/test/decoder/joint_mse"] == 0.4
-    assert payload["probe/test/figures/module_by_task"] is figure
+    assert payload["probe/test/figures/module_by_exposure"] is figure
     table = payload["probe/test/summary"]
     assert table.data == [[rows[0][key] for key in table.columns]]
     disabled = make_logger(tmp_path)

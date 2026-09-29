@@ -17,7 +17,14 @@ import numpy as np
 from torch.utils.data import Dataset, Sampler
 
 from iccl.analysis.probe_config import SPLITS, stream_seed
-from iccl.analysis.probe_targets import PROTOCOL, episode_targets, flat_targets
+from iccl.analysis.probe_targets import (
+    MODULE_SHAPE,
+    MODULES,
+    PROTOCOL,
+    TARGET_LAYOUT,
+    episode_targets,
+    flat_targets,
+)
 from iccl.data.dataset import sequence_rng
 from iccl.data.teacher import ModulePool
 
@@ -50,25 +57,23 @@ def write_json(path: Path, value: Any) -> None:
         Path(name).unlink(missing_ok=True)
 
 
-def array_schema(features: int) -> dict[str, dict[str, Any]]:
+def array_schema(features: int, tasks: int) -> dict[str, dict[str, Any]]:
+    if type(features) is not int or features < 1 or type(tasks) is not int or tasks < MODULES - 1:
+        raise ValueError("schema requires positive feature count and integer T >= 3")
     shapes = {
         "states": (features,),
-        "modules": (8, 2, 17, 16),
+        "modules": MODULE_SHAPE,
         "readout": (16, 16),
-        "world_modules": (8, 16, 16),
-        "world_biases": (8, 16),
+        "world_modules": (MODULES, 16, 16),
+        "world_biases": (MODULES, 16),
         "world_readout": (16, 16),
-        "latents": (8, 8),
-        "module_ids": (8, 2),
-        "first_appearance": (8,),
-        "occurrence_count": (8,),
+        "latents": (tasks, MODULES),
+        "occurrence_count": (MODULES,),
         "latent_rank": (),
         "readout_norms": (16,),
         "episode_index": (),
     }
     integers = {
-        "module_ids",
-        "first_appearance",
         "occurrence_count",
         "latent_rank",
         "episode_index",
@@ -130,13 +135,22 @@ def read_manifest(root: Path | str) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError(f"no captured probe manifest at {path}")
     value = json.loads(path.read_text())
-    if value.get("protocol") != PROTOCOL or value.get("dataset_id") != digest(
-        value.get("identity")
-    ):
-        raise ValueError("incompatible or malformed probe dataset identity")
-    features = value["identity"]["input_features"]
-    if type(features) is not int or features < 1 or value.get("schema") != array_schema(features):
+    if value.get("protocol") != PROTOCOL:
+        raise ValueError(
+            "incompatible probe dataset protocol; capture fresh M=4 episodes and retrain "
+            "the set decoder (old task-occurrence states cannot be converted)"
+        )
+    identity = value.get("identity", {})
+    if value.get("dataset_id") != digest(identity) or identity.get("protocol") != PROTOCOL:
+        raise ValueError("malformed probe dataset identity")
+    features, tasks = identity.get("input_features"), identity.get("task_count")
+    if value.get("schema") != array_schema(features, tasks):
         raise ValueError("invalid probe array schema")
+    if (
+        identity.get("target_layout") != TARGET_LAYOUT
+        or identity.get("token_count") != tasks * 65 + 1
+    ):
+        raise ValueError("incompatible probe target layout or terminal boundary semantics")
     if set(value["shards"]) != set(SPLITS) or set(value["requested_counts"]) != set(SPLITS):
         raise ValueError("invalid probe dataset splits")
     for split in SPLITS:
@@ -244,7 +258,9 @@ class DatasetWriter:
                 "protocol": PROTOCOL,
                 "identity": self.identity,
                 "dataset_id": digest(self.identity),
-                "schema": array_schema(self.identity["input_features"]),
+                "schema": array_schema(
+                    self.identity["input_features"], self.identity["task_count"]
+                ),
                 "requested_counts": dict(self.counts),
                 "shard_size": self.shard_size,
                 "shards": {split: [] for split in SPLITS},

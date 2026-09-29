@@ -17,11 +17,11 @@ capture:
   resume: true               # Reuse compatible completed shards; reject identity mismatches.
 
 solver:
-  num_threads: 8             # Persistent native workers; exact branch_warm is the fixed method.
+  num_threads: 8             # Persistent native workers; exact warm_enumeration is fixed.
   cache_dir: outputs/.cache/probe-assignment  # Source/build/platform-keyed native libraries.
 
 loss:
-  readout_weight: 1.0         # Positive; 1 gives equal weight per scalar; denominator is 4608.
+  readout_weight: 1.0         # Positive; 1 gives equal weight per scalar; denominator is 1344.
 
 training:
   control: none              # none | constant | shuffled_targets; controls are explicit runs.

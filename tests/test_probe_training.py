@@ -1,4 +1,3 @@
-from operator import itemgetter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -66,19 +65,29 @@ def test_capture_train_interrupted_resume_and_evaluate(
     result = evaluate_probe(probe_cfg, tmp_path / "evaluation")
     metadata, arrays, summary = read_results(result)
     assert metadata["split"] == "test"
-    assert arrays["decoder_module_mse_by_task"].shape == (2, 8)
+    assert arrays["decoder_module_mse_by_module"].shape == (2, 4)
     assert summary["decoder"]["all"]["n_episodes"] == 2
-    assert (result / "plots/reconstruction-by-position.png").is_file()
+    assert (result / "plots/reconstruction-by-exposure.png").is_file()
     assert (result / "plots/control-comparison.png").is_file()
+    assert len(list((result / "plots").glob("*.html"))) == 5
     dashboard.assert_called_once()
     metrics, rows, figures, step = dashboard.call_args.args
     assert step == metadata["step"] == expected["best_step"]
     assert dashboard.call_args.kwargs == {"namespace": "probe/test"}
-    assert len(metrics) == 14 and len(figures) == 6
-    row_key = itemgetter("prediction", "population", "metric", "task_position")
+    assert len(metrics) == 14 and len(figures) == 5
+
+    def row_key(row: dict) -> tuple:
+        return (
+            row["prediction"],
+            row["population"],
+            row["metric"],
+            row["task_position"] or 0,
+            row["exposure_count"] or 0,
+        )
+
     assert sorted(rows, key=row_key) == sorted(probe_summary_rows(summary), key=row_key)
     for prediction in ("decoder", "zero"):
-        for metric in ("joint_mse", "functional_nmse", "repeated_module_mse"):
+        for metric in ("joint_mse", "functional_nmse", "module_mse"):
             assert (
                 metrics[f"probe/test/{prediction}/{metric}"]
                 == summary[prediction]["all"]["metrics"][metric]["mean"]
@@ -96,12 +105,12 @@ def test_explicit_controls_train_and_leave_validation_paired(
     probe_cfg.probe.training.control = control
     with ProbeTrainer(probe_cfg, tmp_path / control) as trainer:
         if control == "constant":
-            assert sum(p.numel() for p in trainer.model.parameters()) == 4608
+            assert sum(p.numel() for p in trainer.model.parameters()) == 1344
             torch.testing.assert_close(
                 trainer.model(torch.randn(2, 64))[0], trainer.model(torch.randn(3, 64))[2]
             )
         else:
-            assert sum(p.numel() for p in trainer.model.parameters()) == 64 * 4608 + 4608
+            assert sum(p.numel() for p in trainer.model.parameters()) == 64 * 1344 + 1344
             assert trainer.mapping is not None
             assert np.all(trainer.mapping != np.arange(4))
         assert trainer.validation.target_permutation is None
@@ -134,6 +143,17 @@ def test_resume_rejects_changed_settings_and_population(
     with pytest.raises(ValueError, match="split changed"):
         ProbeTrainer(probe_cfg, tmp_path / "invalid2")
     CapturedDataset(probe_cfg.probe.dataset.path, "test").close()
+
+
+def test_old_checkpoint_requires_new_capture_and_training(
+    probe_cfg: DictConfig, tmp_path: Path
+) -> None:
+    capture_dataset(probe_cfg, tmp_path / "capture")
+    old = tmp_path / "old.pt"
+    torch.save({"version": "module-decoder-v1/checkpoint-v1"}, old)
+    probe_cfg.probe.training.resume = str(old)
+    with pytest.raises(ValueError, match="capture fresh M=4"):
+        ProbeTrainer(probe_cfg, tmp_path / "train")
 
 
 def test_training_flushes_first_and_validation_metrics_before_next_update(
@@ -181,8 +201,8 @@ def test_known_linear_signal_learns_through_the_production_assignment_update(
     torch.manual_seed(44)
     model = LinearModuleDecoder(3)
     states = torch.randn(32, 3)
-    truth = torch.randn(4608, 3) * 0.08
-    offset = torch.randn(4608) * 3
+    truth = torch.randn(1344, 3) * 0.08
+    offset = torch.randn(1344) * 3
     with torch.no_grad():
         model.linear.weight.zero_()
         model.linear.bias.copy_(offset)

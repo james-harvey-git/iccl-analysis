@@ -21,12 +21,12 @@ class LinearModuleDecoder(nn.Module):
 
     def forward(
         self, states: Float[torch.Tensor, "batch features"]
-    ) -> Float[torch.Tensor, "batch 4608"]:
+    ) -> Float[torch.Tensor, "batch 1344"]:
         return self.linear(states)
 
 
 class ConstantModuleDecoder(nn.Module):
-    """A trained 4,608-vector shared across episodes, with no state-dependent output."""
+    """A trained 1,344-vector shared across episodes, with no state-dependent output."""
 
     def __init__(self, input_features: int) -> None:
         super().__init__()
@@ -38,7 +38,7 @@ class ConstantModuleDecoder(nn.Module):
 
     def forward(
         self, states: Float[torch.Tensor, "batch features"]
-    ) -> Float[torch.Tensor, "batch 4608"]:
+    ) -> Float[torch.Tensor, "batch 1344"]:
         return self.output.unsqueeze(0).expand(states.shape[0], -1)
 
 

@@ -15,6 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from iccl.analysis.probe_results import probe_summary_rows, read_results, require_comparable
+from iccl.analysis.probe_targets import PROTOCOL
 
 _PREDICTION_NAMES = {
     "none": "Full decoder",
@@ -73,6 +74,7 @@ def _estimate_trace(
             if row["ci_low"] is None
             else f"[{row['ci_low']:.5g}, {row['ci_high']:.5g}]",
             label,
+            row.get("n_modules"),
         ]
         for row, label in zip(rows, coordinate_labels, strict=True)
     ]
@@ -93,7 +95,13 @@ def _estimate_trace(
             customdata=custom,
             hovertemplate=(
                 "%{customdata[2]}<br>Mean: %{y:.5g}<br>Episodes: %{customdata[0]}"
-                "<br>CI: %{customdata[1]}<extra>%{fullData.name}</extra>"
+                "<br>CI: %{customdata[1]}"
+                + (
+                    "<br>Modules: %{customdata[3]}"
+                    if any(row.get("n_modules") is not None for row in rows)
+                    else ""
+                )
+                + "<extra>%{fullData.name}</extra>"
             ),
         ),
         row=1,
@@ -116,7 +124,7 @@ def probe_evaluation_figures(
     floor_count = summary["decoder"]["all"]["variance_floored_tasks"]
     functional_note = (
         "Oracle task coefficients; predicted readout. "
-        f"{floor_count:,}/{8 * count:,} task variances "
+        f"{floor_count:,}/{metadata['task_count'] * count:,} task variances "
         f"floored at {metadata['variance_floor']:g}."
     )
 
@@ -157,7 +165,33 @@ def probe_evaluation_figures(
         figures[f"probe/{metadata['split']}/figures/{key}"] = figure
         return figure
 
-    module = panel("module_by_task", "Module reconstruction by task position")
+    module = panel(
+        "module_by_exposure",
+        "Module reconstruction by exposure count",
+        note=f"Each distinct module contributes once within its exposure group.<br>{ci_note}",
+    )
+    for prediction, name in labels.items():
+        selected = sorted(
+            (
+                row
+                for row in rows
+                if row["prediction"] == prediction
+                and row["population"] == "all"
+                and row["exposure_count"] is not None
+            ),
+            key=lambda row: row["exposure_count"],
+        )
+        _estimate_trace(
+            module,
+            [row["exposure_count"] for row in selected],
+            selected,
+            prediction=prediction,
+            name=name,
+        )
+    module.update_xaxes(
+        title_text="Tasks containing the module", tickmode="linear", tick0=1, dtick=1
+    )
+    module.update_yaxes(title_text="Aligned module weight and bias MSE")
     functional = panel(
         "functional_by_task",
         "Oracle-coefficient functional reconstruction",
@@ -165,7 +199,6 @@ def probe_evaluation_figures(
         note=f"{functional_note}<br>{ci_note}",
     )
     for figure, metric, y_title, col in (
-        (module, "module_mse_by_task", "Module weight and bias MSE", 1),
         (functional, "functional_mse_by_task", "Output MSE", 1),
         (functional, "functional_nmse_by_task", "Output nMSE", 2),
     ):
@@ -230,7 +263,8 @@ def probe_evaluation_figures(
         "Distribution of episode errors",
         ("Joint parameter error", "Functional error"),
         note=(
-            "Each point is one whole episode; functional errors are averaged over its eight tasks."
+            "Each point is one whole episode; functional errors are averaged "
+            f"over its {metadata['task_count']} tasks."
         ),
     )
     for prediction, name in labels.items():
@@ -309,48 +343,13 @@ def probe_evaluation_figures(
         range=[min(rank_values) - 0.5, max(rank_values) + 0.5],
     )
 
-    consistency = panel(
-        "repeated_module_consistency",
-        "Module consistency versus reconstruction accuracy",
-        note=(
-            "Zero output is perfectly consistent. "
-            "Consistency alone does not establish reconstruction."
-        ),
-    )
-    for prediction, name in labels.items():
-        consistency.add_trace(
-            go.Scatter(
-                x=arrays[f"{prediction}_joint_mse"].tolist(),
-                y=arrays[f"{prediction}_repeated_module_mse"].tolist(),
-                mode="markers",
-                name=name,
-                marker={"color": _COLORS[prediction], "size": 6, "opacity": 0.6},
-                customdata=np.stack(
-                    (
-                        arrays["episode_index"],
-                        arrays["latent_rank"],
-                        arrays[f"{prediction}_repeated_module_count"],
-                    ),
-                    axis=1,
-                ).tolist(),
-                hovertemplate=(
-                    "Joint MSE: %{x:.5g}<br>Within-module variance: %{y:.5g}"
-                    "<br>Episode: %{customdata[0]}<br>Latent rank: %{customdata[1]}"
-                    "<br>Repeated module IDs: %{customdata[2]}<extra>%{fullData.name}</extra>"
-                ),
-            ),
-            row=1,
-            col=1,
-        )
-    consistency.update_xaxes(title_text="Joint aligned parameter MSE")
-    consistency.update_yaxes(title_text="Within-module occurrence variance")
     return figures
 
 
 def plot_probe_results(
     results: list[Path | str], out_dir: Path | str, *, histories: list[Path | str] | None = None
 ) -> list[Path]:
-    """Draw position and control comparisons using checked numerical artifacts only."""
+    """Draw exposure, functional and control comparisons from checked numerical artifacts."""
     if not results:
         raise ValueError("provide at least one probe results directory")
     reports = [read_results(path) for path in results]
@@ -363,25 +362,52 @@ def plot_probe_results(
     ]
     saved = []
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
-    for label, (_, _, summary) in zip(labels, reports, strict=True):
-        for ax, metric in zip(axes, ("module_mse_by_task", "functional_nmse_by_task"), strict=True):
-            values = summary["decoder"]["all"]["metrics"][metric]
-            positions = np.arange(1, 9)
-            ax.plot(positions, values["mean"], marker="o", label=label)
-            if values["ci_low"] is not None:
-                ax.fill_between(positions, values["ci_low"], values["ci_high"], alpha=0.15)
-    for ax, metric, title in zip(
-        axes,
-        ("module_mse_by_task", "functional_nmse_by_task"),
-        ("Module parameters (MSE)", "Oracle-coefficient function (nMSE)"),
-        strict=True,
-    ):
-        values = reports[0][2]["zero"]["all"]["metrics"][metric]
-        ax.plot(np.arange(1, 9), values["mean"], linestyle="--", color="0.4", label="zero output")
-        ax.set(xlabel="Task position", ylabel=title, xticks=np.arange(1, 9))
+    populations = [
+        (label, report[2]["decoder"]["all"]) for label, report in zip(labels, reports, strict=True)
+    ]
+    populations.append(("Zero output", reports[0][2]["zero"]["all"]))
+    for label, report in populations:
+        exposures = sorted(map(int, report["exposure"]))
+        module = [report["exposure"][str(n)] for n in exposures]
+        function = report["metrics"]["functional_nmse_by_task"]
+        positions = np.arange(1, len(function["mean"]) + 1)
+        style = {"linestyle": "--", "color": "0.4"} if label == "Zero output" else {}
+        (line,) = axes[0].plot(
+            exposures, [value["mean"] for value in module], marker="o", label=label, **style
+        )
+        for exposure, value in zip(exposures, module, strict=True):
+            if value["ci_low"] is not None:
+                axes[0].vlines(exposure, value["ci_low"], value["ci_high"], color=line.get_color())
+        axes[1].plot(
+            positions,
+            function["mean"],
+            marker="o",
+            label=label,
+            color=line.get_color(),
+            linestyle=style.get("linestyle", "-"),
+        )
+        if function["ci_low"] is not None:
+            axes[1].fill_between(
+                positions,
+                function["ci_low"],
+                function["ci_high"],
+                alpha=0.15,
+                color=line.get_color(),
+            )
+    axes[0].set(
+        xlabel="Tasks containing the module",
+        ylabel="Module parameters (MSE)",
+        xticks=np.unique(reports[0][1]["occurrence_count"]),
+    )
+    axes[1].set(
+        xlabel="Task position",
+        ylabel="Oracle-coefficient function (nMSE)",
+        xticks=np.arange(1, reports[0][0]["task_count"] + 1),
+    )
+    for ax in axes:
         ax.grid(alpha=0.2)
     axes[0].legend(fontsize=7)
-    path = out_dir / "reconstruction-by-position.png"
+    path = out_dir / "reconstruction-by-exposure.png"
     fig.savefig(path, dpi=180)
     plt.close(fig)
     saved.append(path)
@@ -404,18 +430,30 @@ def plot_probe_results(
     fig.savefig(path, dpi=180)
     plt.close(fig)
     saved.append(path)
+    for index, (metadata, arrays, summary) in enumerate(reports):
+        directory = out_dir if len(reports) == 1 else out_dir / f"report-{index + 1}"
+        directory.mkdir(exist_ok=True)
+        for key, figure in probe_evaluation_figures(metadata, arrays, summary).items():
+            path = directory / f"{key.rsplit('/', 1)[-1]}.html"
+            figure.write_html(path, include_plotlyjs="directory")
+            saved.append(path)
     if histories:
         saved.append(plot_probe_history(histories, out_dir))
     return saved
 
 
 def plot_probe_history(histories: list[Path | str], out_dir: Path | str) -> Path:
+    loaded = [json.loads(Path(source).read_text()) for source in histories]
+    if not loaded or any(history.get("protocol") != PROTOCOL for history in loaded):
+        raise ValueError("learning curves require module-set-decoder histories; recapture/retrain")
+    keys = ("dataset_id", "split_signatures", "target_layout", "readout_weight")
+    if any(any(history[key] != loaded[0][key] for key in keys) for history in loaded[1:]):
+        raise ValueError("learning curves require identical captured populations and objectives")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
-    for source in histories:
+    for source, history in zip(histories, loaded, strict=True):
         source = Path(source)
-        history = json.loads(source.read_text())
         training, validation = history["training"], history["validation"]
         (line,) = ax.plot(
             [r["step"] for r in training],

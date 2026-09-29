@@ -21,16 +21,18 @@ from typing import Any
 
 import numpy as np
 
-from iccl.analysis.probe_targets import OUTPUT_FEATURES
+from iccl.analysis.probe_targets import MODULES, OUTPUT_FEATURES, PROTOCOL
+
+COUNTER_NAMES = ("module_permutations", "hungarian_solves", "dual_bound_skips")
 
 
 @dataclass(frozen=True)
 class Assignment:
-    """p[i] is the target hidden coordinate assigned to prediction coordinate i."""
+    """q[a] and p[i] map predicted module slots/hidden coordinates to their targets."""
 
     scores: np.ndarray
-    masks: np.ndarray
-    permutations: np.ndarray
+    module_permutations: np.ndarray
+    hidden_permutations: np.ndarray
     counters: np.ndarray
     timings: np.ndarray
 
@@ -63,8 +65,10 @@ def build_library(cache_dir: Path) -> tuple[Path, dict[str, Any]]:
         "flags": flags,
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "method": "branch_warm",
-        "abi": 1,
+        "method": "warm_enumeration",
+        "abi": 2,
+        "protocol": PROTOCOL,
+        "counter_names": list(COUNTER_NAMES),
     }
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     directory = cache_dir.expanduser().resolve() / key
@@ -206,9 +210,9 @@ class AssignmentSolver:
     ) -> Assignment:
         result = Assignment(
             np.empty(batch, np.float64),
-            np.empty(batch, np.int32),
+            np.empty((batch, MODULES), np.int32),
             np.empty((batch, 16), np.int32),
-            np.empty((batch, 2), np.int64),
+            np.empty((batch, len(COUNTER_NAMES)), np.int64),
             np.empty((batch, 2), np.float64),
         )
         with self._lock:
@@ -224,8 +228,8 @@ class AssignmentSolver:
                     exhaustive,
                     profile,
                     result.scores.ctypes.data,
-                    result.masks.ctypes.data,
-                    result.permutations.ctypes.data,
+                    result.module_permutations.ctypes.data,
+                    result.hidden_permutations.ctypes.data,
                     result.counters.ctypes.data,
                     result.timings.ctypes.data,
                 )
@@ -240,7 +244,7 @@ class AssignmentSolver:
         *,
         profile: bool = False,
     ) -> Assignment:
-        """Match detached FP32 [batch,4608] predictions to FP32 target episodes."""
+        """Match detached FP32 [batch,1344] readout-first predictions to target sets."""
         self._weight(readout_weight)
         predictions = self._array(predictions, np.float32, (OUTPUT_FEATURES,))
         targets = self._array(targets, np.float32, (OUTPUT_FEATURES,))
@@ -252,7 +256,7 @@ class AssignmentSolver:
 
     def match_costs(self, costs: np.ndarray, *, exhaustive: bool = False) -> Assignment:
         """Verification interface; exhaustive search is not a production config option."""
-        costs = self._array(costs, np.float64, (17, 16, 16))
+        costs = self._array(costs, np.float64, (1 + MODULES * MODULES, 16, 16))
         return self._run(len(costs), None, None, costs, 1.0, exhaustive, False)
 
     def construct_costs(
@@ -264,7 +268,7 @@ class AssignmentSolver:
         targets = self._array(targets, np.float32, (OUTPUT_FEATURES,))
         if predictions.shape != targets.shape:
             raise ValueError("prediction and target batch sizes differ")
-        costs = np.empty((len(predictions), 17, 16, 16), dtype=np.float64)
+        costs = np.empty((len(predictions), 1 + MODULES * MODULES, 16, 16), dtype=np.float64)
         with self._lock:
             self._ensure_open()
             self._check(

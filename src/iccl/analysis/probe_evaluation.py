@@ -21,13 +21,18 @@ from iccl.analysis.probe_dataset import CapturedDataset, file_digest
 from iccl.analysis.probe_loss import aligned_targets, parameter_errors
 from iccl.analysis.probe_matching import Assignment, AssignmentSolver
 from iccl.analysis.probe_results import (
-    TARGET_LAYOUT,
     load_checkpoint,
     probe_summary_rows,
     source_run,
     write_results,
 )
-from iccl.analysis.probe_targets import MODULE_FEATURES, MODULE_SHAPE, PROTOCOL
+from iccl.analysis.probe_targets import (
+    MODULE_SHAPE,
+    MODULES,
+    PROTOCOL,
+    READOUT_FEATURES,
+    TARGET_LAYOUT,
+)
 from iccl.analysis.probe_training import probe_loader
 from iccl.analysis.probes import make_decoder
 from iccl.data.dataset import sequence_rng
@@ -35,36 +40,6 @@ from iccl.data.teacher import ModulePool, teacher_forward
 from iccl.evaluation.metrics import BASE_MSE_FLOOR
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import resolve_autocast_dtype
-
-
-def assigned_module_ids(module_ids: np.ndarray, assignment: Assignment) -> np.ndarray:
-    """True module IDs associated with each predicted task/slot after the chosen swaps."""
-    bits = (assignment.masks[:, None] >> np.arange(8)) & 1
-    pairs = bits[:, :, None] ^ np.arange(2)
-    return np.take_along_axis(module_ids, pairs, axis=2)
-
-
-def repeated_module_error(
-    predictions: np.ndarray, ids: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Mean within-module occurrence variance, equally weighted over repeated module IDs.
-
-    All occurrences already share the decoder's hidden basis. This diagnostic is
-    zero for a constant prediction and therefore does not establish reconstruction.
-    """
-    modules = predictions[:, :MODULE_FEATURES].reshape(-1, *MODULE_SHAPE).astype(np.float64)
-    error = np.zeros(len(predictions), np.float64)
-    counts = np.zeros(len(predictions), np.int64)
-    for episode in range(len(predictions)):
-        values = []
-        for module in np.unique(ids[episode]):
-            occurrences = modules[episode][ids[episode] == module]
-            if len(occurrences) >= 2:
-                values.append(float(np.mean((occurrences - occurrences.mean(axis=0)) ** 2)))
-        if not values:
-            raise ValueError("the fixed eight-module/eight-task protocol requires repeated modules")
-        error[episode], counts[episode] = np.mean(values), len(values)
-    return error, counts
 
 
 def functional_reconstruction(
@@ -76,17 +51,19 @@ def functional_reconstruction(
     seed: int,
 ) -> dict[str, np.ndarray]:
     """Oracle-coefficient reconstruction; parameter matching alone chooses the alignment."""
-    ids = assigned_module_ids(batch["module_ids"], assignment)
-    coefficients = np.take_along_axis(batch["latents"], ids, axis=2) / np.float32(math.sqrt(2))
-    modules = predictions[:, :MODULE_FEATURES].reshape(-1, *MODULE_SHAPE)
-    composed = np.einsum("btsih,bts->btih", modules, coefficients)
-    readout = predictions[:, MODULE_FEATURES:].reshape(-1, 16, 16)
-    mse = np.empty((len(predictions), 8), np.float64)
+    tasks = batch["latents"].shape[1]
+    coefficients = np.take_along_axis(
+        batch["latents"], assignment.module_permutations[:, None, :], axis=2
+    ) / np.float32(math.sqrt(2))
+    modules = predictions[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)
+    composed = np.einsum("bmih,btm->btih", modules, coefficients)
+    readout = predictions[:, :READOUT_FEATURES].reshape(-1, 16, 16)
+    mse = np.empty((len(predictions), tasks), np.float64)
     variance = np.empty_like(mse)
     for episode, index in enumerate(batch["episode_index"]):
         inputs = (
             sequence_rng(seed, int(index))
-            .uniform(-1, 1, size=(8, inputs_per_task, 16))
+            .uniform(-1, 1, size=(tasks, inputs_per_task, 16))
             .astype(np.float32)
         )
         pool = ModulePool(
@@ -94,7 +71,7 @@ def functional_reconstruction(
             [batch["world_biases"][episode]],
             batch["world_readout"][episode],
         )
-        for task in range(8):
+        for task in range(tasks):
             original = teacher_forward(pool, batch["latents"][episode, task], inputs[task]).astype(
                 np.float64
             )
@@ -126,19 +103,19 @@ def score_predictions(
     assignment = solver.match(predictions, batch["target"], readout_weight)
     target = aligned_targets(torch.from_numpy(batch["target"]), assignment)
     errors = parameter_errors(torch.from_numpy(predictions), target, readout_weight)
-    ids = assigned_module_ids(batch["module_ids"], assignment)
-    consistency, counts = repeated_module_error(predictions, ids)
+    # Report module errors in target-ID order so metadata never inherits arbitrary output slots.
+    by_module = np.take_along_axis(
+        errors.by_module.numpy(), np.argsort(assignment.module_permutations, axis=1), axis=1
+    )
     return {
         "joint_mse": errors.joint.numpy(),
         "weight_mse": errors.weights.numpy(),
         "bias_mse": errors.biases.numpy(),
         "readout_mse": errors.readout.numpy(),
-        "module_mse_by_task": errors.by_task.numpy(),
-        "repeated_module_mse": consistency,
-        "repeated_module_count": counts,
-        "swap_mask": assignment.masks,
-        "hidden_permutation": assignment.permutations,
-        "assigned_module_ids": ids,
+        "module_mse": errors.modules.numpy(),
+        "module_mse_by_module": by_module,
+        "module_permutation": assignment.module_permutations,
+        "hidden_permutation": assignment.hidden_permutations,
         "assignment_score": assignment.scores,
         "matching_counters": assignment.counters,
         **functional_reconstruction(
@@ -171,6 +148,41 @@ def episode_interval(values: np.ndarray, *, seed: int, replicates: int) -> dict[
     return result
 
 
+def exposure_interval(
+    errors: np.ndarray, counts: np.ndarray, exposure: int, *, seed: int, replicates: int
+) -> dict[str, Any]:
+    """Pooled distinct-module mean, with episodes as the bootstrap sampling unit."""
+    errors = np.asarray(errors, dtype=np.float64)
+    if errors.ndim != 2 or errors.shape != counts.shape or not np.isfinite(errors).all():
+        raise ValueError("exposure estimates require finite matching episode/module arrays")
+    selected = counts == exposure
+    sums = np.where(selected, errors, 0).sum(axis=1)
+    sizes = selected.sum(axis=1)
+    n_modules, n_episodes = int(sizes.sum()), int(np.count_nonzero(sizes))
+    result = {
+        "mean": float(sums.sum() / n_modules) if n_modules else None,
+        "n_modules": n_modules,
+        "n_episodes": n_episodes,
+        "ci_low": None,
+        "ci_high": None,
+        "bootstrap_valid_replicates": 0,
+        "bootstrap_empty_replicates": 0,
+    }
+    if replicates >= 2 and n_episodes >= 2:
+        rng = sequence_rng(seed, len(errors))
+        draws = []
+        for start in range(0, replicates, 32):
+            indices = rng.integers(0, len(errors), size=(min(32, replicates - start), len(errors)))
+            total_sizes = sizes[indices].sum(axis=1)
+            valid = total_sizes > 0
+            draws.extend((sums[indices].sum(axis=1)[valid] / total_sizes[valid]).tolist())
+        result["bootstrap_valid_replicates"] = len(draws)
+        result["bootstrap_empty_replicates"] = replicates - len(draws)
+        if len(draws) >= 2:
+            result["ci_low"], result["ci_high"] = map(float, np.quantile(draws, [0.025, 0.975]))
+    return result
+
+
 def summarize_scores(
     arrays: dict[str, np.ndarray], *, seed: int, replicates: int
 ) -> dict[str, Any]:
@@ -179,8 +191,7 @@ def summarize_scores(
         "weight_mse",
         "bias_mse",
         "readout_mse",
-        "module_mse_by_task",
-        "repeated_module_mse",
+        "module_mse",
         "functional_mse_by_task",
         "functional_nmse_by_task",
     )
@@ -201,6 +212,16 @@ def summarize_scores(
                 "metrics": {
                     name: episode_interval(value, seed=seed, replicates=replicates)
                     for name, value in measurements.items()
+                },
+                "exposure": {
+                    str(exposure): exposure_interval(
+                        arrays[f"{label}_module_mse_by_module"][selected],
+                        arrays["occurrence_count"][selected],
+                        int(exposure),
+                        seed=seed,
+                        replicates=replicates,
+                    )
+                    for exposure in np.unique(arrays["occurrence_count"][selected])
                 },
                 "variance_floored_tasks": int(
                     arrays[f"{label}_functional_variance_floored"][selected].sum()
@@ -253,7 +274,9 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                     predictions = model(batch["states"].to(device, non_blocking=True))
                 predictions = predictions.float().cpu().numpy()
                 cpu = {key: value.numpy() for key, value in batch.items() if key != "states"}
-                measured = {key: cpu[key] for key in ("episode_index", "latent_rank")}
+                measured = {
+                    key: cpu[key] for key in ("episode_index", "latent_rank", "occurrence_count")
+                }
                 for label, values in (
                     ("decoder", predictions),
                     ("zero", np.zeros_like(predictions)),
@@ -288,6 +311,8 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                 "source_provenance": checkpoint["source_provenance"],
                 "state_layout": checkpoint["state_layout"],
                 "target_layout": TARGET_LAYOUT,
+                "module_count": MODULES,
+                "task_count": dataset.manifest["identity"]["task_count"],
                 "readout_weight": weight,
                 "evaluation_precision": str(dtype or torch.float32),
                 "device": str(device),
@@ -306,6 +331,7 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                 "bootstrap_stream_seed": bootstrap_seed,
                 "bootstrap_replicates": int(e.bootstrap_replicates),
                 "bootstrap_unit": "whole episode",
+                "exposure_estimand": "pooled distinct-module mean within task-exposure count",
                 "confidence": 0.95,
                 "config": resolved_config(cfg),
                 "training_config": checkpoint["config"],
@@ -320,7 +346,9 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
             scalars = {
                 f"probe/{e.split}/{row['prediction']}/{row['metric']}": row["mean"]
                 for row in rows
-                if row["population"] == "all" and row["task_position"] is None
+                if row["population"] == "all"
+                and row["task_position"] is None
+                and row["exposure_count"] is None
             }
             logger.log_probe_evaluation(
                 scalars,

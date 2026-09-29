@@ -18,10 +18,11 @@ from iccl.analysis.probe_config import (
     configure_runtime,
     resolved_config,
     stream_seed,
+    task_count,
     validate_probe_config,
 )
 from iccl.analysis.probe_dataset import DatasetWriter, array_schema, file_digest, write_json
-from iccl.analysis.probe_targets import PROTOCOL, episode_targets
+from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT, episode_targets
 from iccl.checkpoints import (
     WANDB_SCHEME,
     checkpoint_model_config,
@@ -40,10 +41,13 @@ from iccl.training.trainer import resolve_autocast_dtype
 
 def append_terminal_boundary(sample: SequenceSample) -> tuple[np.ndarray, np.ndarray]:
     """Append one ordinary boundary without mutating production sequence serialization."""
-    if len(sample.tokens) != 520 or sample.token_type[-1] != TOKEN_Y:
-        raise ValueError("expected eight 32-demo tasks ending with a y-token")
-    if np.count_nonzero(sample.token_type == TOKEN_BOUNDARY) != 8:
-        raise ValueError("expected exactly eight task-start boundaries")
+    tasks = len(sample.info["latents"])
+    if tasks < 3 or len(sample.tokens) != tasks * 65 or sample.token_type[-1] != TOKEN_Y:
+        raise ValueError("expected T >= 3 complete 32-demo tasks ending with a y-token")
+    if not np.array_equal(
+        np.flatnonzero(sample.token_type == TOKEN_BOUNDARY), np.arange(tasks) * 65
+    ):
+        raise ValueError("expected one boundary at the start of every task")
     tokens = np.concatenate((sample.tokens, np.zeros_like(sample.tokens[:1])), axis=0)
     types = np.concatenate(
         (sample.token_type, np.asarray([TOKEN_BOUNDARY], sample.token_type.dtype))
@@ -145,6 +149,7 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
     model.load_state_dict(checkpoint["model"])
     model = model.to(device).eval().requires_grad_(False)
     layout = state_layout(model)
+    tasks = task_count(cfg.data)
     dtype = resolve_autocast_dtype(p.capture.precision, device)
     source = source_from_checkpoint(checkpoint)
     model_digest = checkpoint_model_digest(checkpoint)
@@ -178,7 +183,9 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
         "split_seeds": seeds,
         "state_layout": layout,
         "input_features": layout["input_features"],
-        "token_count": 521,
+        "task_count": tasks,
+        "token_count": tasks * 65 + 1,
+        "target_layout": TARGET_LAYOUT,
         "storage_dtype": "float32",
         "state_compute_dtype": "float32",
         "canonicalization": "unit-readout-row-norm-f64-to-f32-v1",
@@ -204,14 +211,16 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
     }
     load_seconds = time.perf_counter() - started
     counts = {split: int(p.dataset.counts[split]) for split in SPLITS}
-    schema = array_schema(layout["input_features"])
+    schema = array_schema(layout["input_features"], tasks)
     bytes_per_episode = sum(
         int(np.prod(value["shape"])) * np.dtype(value["dtype"]).itemsize
         for value in schema.values()
     )
     estimated_gib = sum(counts.values()) * bytes_per_episode / 2**30
     print(
-        f"capture: {layout['input_features']:,} features; estimated arrays {estimated_gib:.3f} GiB"
+        f"capture: {tasks} tasks; {layout['input_features']:,} features; "
+        f"estimated disk arrays {estimated_gib:.3f} GiB "
+        "(excludes file headers, temporary writes, checkpoints and caches; not a RAM estimate)"
     )
     logger = RunLogger(cfg, out_dir, job_type="probe-capture", source=source, protocol=PROTOCOL)
     generated, forward_seconds = 0, 0.0

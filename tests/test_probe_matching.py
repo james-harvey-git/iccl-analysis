@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from iccl.analysis.probe_matching import AssignmentSolver
-from iccl.analysis.probe_targets import MODULE_FEATURES, OUTPUT_FEATURES
+from iccl.analysis.probe_targets import MODULE_SHAPE, MODULES, OUTPUT_FEATURES, READOUT_FEATURES
 
 
 def subset_dp(cost: np.ndarray) -> float:
@@ -24,8 +24,8 @@ def subset_dp(cost: np.ndarray) -> float:
     return float(dp[-1])
 
 
-def joint_matrix(cost: np.ndarray, mask: int) -> np.ndarray:
-    return cost[0] + sum(cost[1 + 2 * t + ((mask >> t) & 1)] for t in range(8))
+def joint_matrix(cost: np.ndarray, modules: tuple[int, ...] | np.ndarray) -> np.ndarray:
+    return cost[0] + sum(cost[1 + MODULES * a + b] for a, b in enumerate(modules))
 
 
 @pytest.fixture(scope="module")
@@ -58,36 +58,43 @@ def test_joint_against_all_patterns_with_independent_dp(solver: AssignmentSolver
     costs[0, n:, :] = 1e6
     costs[0, :, n:] = 1e6
     costs[0, np.arange(n, 16), np.arange(n, 16)] = 0
-    truth = min(subset_dp(joint_matrix(costs, mask)[:n, :n]) for mask in range(256))
+    truth = min(
+        subset_dp(joint_matrix(costs, q)[:n, :n]) for q in itertools.permutations(range(MODULES))
+    )
+    if n <= 3:
+        brute = min(
+            sum(joint_matrix(costs, q)[i, p[i]] for i in range(n))
+            for q in itertools.permutations(range(MODULES))
+            for p in itertools.permutations(range(n))
+        )
+        np.testing.assert_allclose(truth, brute, atol=1e-12)
     actual = solver.match_costs(costs[None])
     np.testing.assert_allclose(actual.scores[0], truth, atol=1e-10)
-    matrix = joint_matrix(costs, int(actual.masks[0]))
+    matrix = joint_matrix(costs, actual.module_permutations[0])
     np.testing.assert_allclose(
-        matrix[np.arange(16), actual.permutations[0]].sum(), truth, atol=1e-10
+        matrix[np.arange(16), actual.hidden_permutations[0]].sum(), truth, atol=1e-10
     )
 
 
 def numpy_costs(prediction: np.ndarray, target: np.ndarray, weight: float) -> np.ndarray:
     p, y = prediction.astype(np.float64), target.astype(np.float64)
-    pb, yb = (
-        p[:, :MODULE_FEATURES].reshape(-1, 8, 2, 17, 16),
-        y[:, :MODULE_FEATURES].reshape(-1, 8, 2, 17, 16),
-    )
-    pr, yr = p[:, MODULE_FEATURES:].reshape(-1, 16, 16), y[:, MODULE_FEATURES:].reshape(-1, 16, 16)
-    costs = np.empty((len(p), 17, 16, 16))
+    pb = p[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)
+    yb = y[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)
+    pr = p[:, :READOUT_FEATURES].reshape(-1, 16, 16)
+    yr = y[:, :READOUT_FEATURES].reshape(-1, 16, 16)
+    costs = np.empty((len(p), 1 + MODULES**2, 16, 16))
     costs[:, 0] = weight * ((pr[:, :, None] - yr[:, None]) ** 2).sum(-1)
-    for t in range(8):
-        for bit in range(2):
-            costs[:, 1 + 2 * t + bit] = sum(
-                ((pb[:, t, a, :, :, None] - yb[:, t, a ^ bit, :, None, :]) ** 2).sum(1)
-                for a in range(2)
-            )
+    for a in range(MODULES):
+        for b in range(MODULES):
+            costs[:, 1 + MODULES * a + b] = (
+                (pb[:, a, :, :, None] - yb[:, b, :, None, :]) ** 2
+            ).sum(1)
     return costs
 
 
 @pytest.mark.parametrize("weight", [1.0, 17.0])
 @pytest.mark.parametrize("scale", [1e-8, 1.0, 1e8])
-def test_native_costs_and_branch_warm_against_exhaustive(
+def test_native_costs_and_warm_enumeration_against_exhaustive(
     solver: AssignmentSolver, weight: float, scale: float
 ) -> None:
     rng = np.random.default_rng(44)
@@ -102,47 +109,95 @@ def test_native_costs_and_branch_warm_against_exhaustive(
     actual = solver.match(prediction, target, weight, profile=True)
     truth = solver.match_costs(costs, exhaustive=True)
     np.testing.assert_allclose(actual.scores, truth.scores, rtol=2e-12, atol=scale**2 * 1e-10)
-    assert (actual.counters[:, 1] <= 511).all()
+    assert (actual.counters[:, 0] == 24).all()
+    assert (actual.counters[:, 1] + actual.counters[:, 2] == 24).all()
     assert (actual.timings >= 0).all()
     for e in range(len(target)):
-        matrix = joint_matrix(costs[e], int(actual.masks[e]))
+        matrix = joint_matrix(costs[e], actual.module_permutations[e])
         np.testing.assert_allclose(
-            actual.scores[e], matrix[np.arange(16), actual.permutations[e]].sum(), rtol=1e-12
+            actual.scores[e], matrix[np.arange(16), actual.hidden_permutations[e]].sum(), rtol=1e-12
         )
 
 
-def test_exact_symmetries_repeated_modules_and_threads(
-    solver: AssignmentSolver, tmp_path: Path
-) -> None:
+def test_exact_symmetries_and_threads(solver: AssignmentSolver, tmp_path: Path) -> None:
     rng = np.random.default_rng(73)
-    pool = rng.normal(size=(8, 17, 16)).astype(np.float32)
-    ids = np.array([[0, 1], [0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 7]])
-    modules = pool[ids]
+    modules = rng.normal(size=MODULE_SHAPE).astype(np.float32)
     readout = rng.normal(size=(16, 16)).astype(np.float32)
-    permutation, bits = rng.permutation(16), rng.integers(0, 2, 8)
-    predicted = modules[np.arange(8)[:, None], np.arange(2)[None] ^ bits[:, None]][..., permutation]
-    target = np.concatenate((modules.ravel(), readout.ravel()))[None]
-    prediction = np.concatenate((predicted.ravel(), readout[permutation].ravel()))[None]
+    p, q = rng.permutation(16), rng.permutation(MODULES)
+    predicted = modules[q][..., p]
+    target = np.concatenate((readout.ravel(), modules.ravel()))[None]
+    prediction = np.concatenate((readout[p].ravel(), predicted.ravel()))[None]
     result = solver.match(prediction, target)
     assert result.scores[0] == 0
-    np.testing.assert_array_equal(result.permutations[0], permutation)
-    assert result.masks[0] == sum(int(bits[t]) << t for t in range(8))
+    np.testing.assert_array_equal(result.hidden_permutations[0], p)
+    np.testing.assert_array_equal(result.module_permutations[0], q)
     with AssignmentSolver(1, tmp_path) as single:
         other = single.match(prediction, target)
-    np.testing.assert_array_equal(result.permutations, other.permutations)
-    np.testing.assert_array_equal(result.masks, other.masks)
+    np.testing.assert_array_equal(result.hidden_permutations, other.hidden_permutations)
+    np.testing.assert_array_equal(result.module_permutations, other.module_permutations)
     with ThreadPoolExecutor(3) as executor:
         results = list(executor.map(lambda _: solver.match(prediction, target), range(6)))
     assert all(r.scores[0] == 0 for r in results)
 
 
+def test_matching_requires_unique_modules_and_one_hidden_basis(solver: AssignmentSolver) -> None:
+    rng = np.random.default_rng(10)
+    target = rng.normal(size=(1, OUTPUT_FEATURES)).astype(np.float32)
+    modules = target[:, READOUT_FEATURES:].reshape(1, *MODULE_SHAPE)
+    duplicate = target.copy()
+    duplicate[:, READOUT_FEATURES:].reshape(1, *MODULE_SHAPE)[:, 1] = modules[:, 0]
+    assert solver.match(duplicate, target).scores[0] > 1
+    inconsistent = target.copy()
+    inconsistent[:, READOUT_FEATURES:].reshape(1, *MODULE_SHAPE)[:, 0] = modules[:, 0, :, ::-1]
+    assert solver.match(inconsistent, target).scores[0] > 1
+    # A fixed readout block cannot be reassigned as module content.
+    exchanged = target.copy()
+    exchanged[:, :256], exchanged[:, 256:512] = target[:, 256:512], target[:, :256]
+    assert solver.match(exchanged, target).scores[0] > 1
+
+
+@pytest.mark.parametrize("regime", ["independent", "small", "noisy", "bias_only", "collapsed"])
+def test_prediction_regimes_and_relabelling_invariance(solver: AssignmentSolver, regime: str):
+    rng = np.random.default_rng(155)
+    target = rng.normal(size=(12, OUTPUT_FEATURES)).astype(np.float32)
+    prediction = rng.normal(size=target.shape).astype(np.float32)
+    if regime == "small":
+        prediction *= 1e-3
+    elif regime == "noisy":
+        prediction = target + prediction * 0.1
+    elif regime == "bias_only":
+        prediction[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)[:, :, :16] = 0
+    elif regime == "collapsed":
+        modules = prediction[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)
+        modules[:] = modules[:, :1]
+    original = solver.match(prediction, target)
+    truth = solver.match_costs(solver.construct_costs(prediction, target), exhaustive=True)
+    np.testing.assert_allclose(original.scores, truth.scores, rtol=2e-12)
+    q, p = rng.permutation(MODULES), rng.permutation(16)
+    relabelled = target.copy()
+    relabelled[:, READOUT_FEATURES:] = (
+        target[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)[:, q].reshape(len(target), -1)
+    )
+    transformed = prediction.copy()
+    transformed[:, :READOUT_FEATURES] = (
+        prediction[:, :READOUT_FEATURES].reshape(-1, 16, 16)[:, p].reshape(len(target), -1)
+    )
+    transformed[:, READOUT_FEATURES:] = (
+        prediction[:, READOUT_FEATURES:]
+        .reshape(-1, *MODULE_SHAPE)[:, q][..., p]
+        .reshape(len(target), -1)
+    )
+    np.testing.assert_allclose(solver.match(transformed, relabelled).scores, original.scores)
+
+
 def test_empty_tied_and_invalid_inputs(solver: AssignmentSolver, tmp_path: Path) -> None:
     empty = np.empty((0, OUTPUT_FEATURES), np.float32)
-    assert solver.match(empty, empty).permutations.shape == (0, 16)
+    assert solver.match(empty, empty).hidden_permutations.shape == (0, 16)
     zero = np.zeros((1, OUTPUT_FEATURES), np.float32)
     result = solver.match(zero, zero)
-    assert result.scores[0] == result.masks[0] == 0
-    np.testing.assert_array_equal(result.permutations[0], np.arange(16))
+    assert result.scores[0] == 0
+    np.testing.assert_array_equal(result.module_permutations[0], np.arange(MODULES))
+    np.testing.assert_array_equal(result.hidden_permutations[0], np.arange(16))
     for invalid in (zero.astype(np.float64), zero[:, :-1], np.full_like(zero, np.nan)):
         with pytest.raises(ValueError):
             solver.match(invalid, zero)

@@ -1,4 +1,4 @@
-// Exact matching of eight unordered module pairs in one shared neuron coordinate system.
+// Exact matching of four modules and a fixed readout in one shared neuron basis.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -9,14 +9,15 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <thread>
 #include <vector>
 
 namespace {
-constexpr int H = 16, T = 8, K = 17, S = H * H;
-constexpr int MODULES = T * 2 * K * H, OUTPUTS = MODULES + S;
-constexpr int STRIDE = (1 + 2 * T) * S;
+constexpr int H = 16, M = 4, K = 17, S = H * H;
+constexpr int OUTPUTS = S + M * K * H, STRIDE = (1 + M * M) * S;
+constexpr int COUNTERS = 3;
 constexpr double INF = std::numeric_limits<double>::infinity();
 using Clock = std::chrono::steady_clock;
 thread_local char last_error[1024] = {};
@@ -170,147 +171,79 @@ struct WarmAssignment {
 struct Search {
     const double* costs;
     double best = INF;
-    int best_mask = 0;
-    int best_p[H] = {};
-    std::int64_t solves = 0, nodes = 0;
-    double delta[T][2][S];
+    int best_q[M] = {}, best_p[H] = {};
+    std::int64_t candidates = 0, solves = 0, skips = 0;
     double tolerance;
 
     explicit Search(const double* c) : costs(c) {
         double scale = 0;
         for (int i = 0; i < STRIDE; ++i) scale = std::max(scale, std::abs(c[i]));
-        tolerance = 64 * std::numeric_limits<double>::epsilon() * scale * H * (T + 1);
+        tolerance = 256 * std::numeric_limits<double>::epsilon() * scale * H * (M + 1);
     }
 
-    double actual_value(int mask, const int* p) const {
-        double value = select_sum(costs, p);
-        for (int t = 0; t < T; ++t)
-            value += select_sum(costs + (1 + 2 * t + ((mask >> t) & 1)) * S, p);
-        return value;
+    const double* edge(int a, int b) const { return costs + (1 + a * M + b) * S; }
+
+    double value(const int* q, const int* p) const {
+        double total = select_sum(costs, p);
+        for (int a = 0; a < M; ++a) total += select_sum(edge(a, q[a]), p);
+        return total;
     }
 
-    void save(int mask, const int* p) {
-        const double value = actual_value(mask, p);
-        if (value < best) {
-            best = value;
-            best_mask = mask;
-            std::copy(p, p + H, best_p);
-        }
-    }
-
-    void exhaustive() {
-        double matrix[S];
-        std::copy(costs, costs + S, matrix);
-        for (int t = 0; t < T; ++t)
-            for (int k = 0; k < S; ++k) matrix[k] += costs[(1 + 2 * t) * S + k];
-        int old = 0;
-        for (int step = 0; step < (1 << T); ++step) {
-            const int mask = step ^ (step >> 1);
-            if (step) {
-                const int t = __builtin_ctz(static_cast<unsigned>(old ^ mask));
-                const int bit = (mask >> t) & 1;
-                for (int k = 0; k < S; ++k)
-                    matrix[k] += costs[(1 + 2 * t + bit) * S + k]
-                               - costs[(1 + 2 * t + 1 - bit) * S + k];
+    void enumerate(bool reuse) {
+        int q[M], p[H];
+        std::iota(q, q + M, 0);
+        WarmAssignment previous;
+        do {
+            ++candidates;
+            double matrix[S];
+            std::copy(costs, costs + S, matrix);
+            for (int a = 0; a < M; ++a) {
+                const double* addition = edge(a, q[a]);
+                for (int x = 0; x < S; ++x) matrix[x] += addition[x];
             }
-            old = mask;
-            ++nodes;
-            int permutation[H];
-            hungarian(matrix, H, permutation);
+            if (reuse) {
+                const double lower = previous.prepare(matrix);
+                // Roundoff must make pruning more conservative, never skip a near improvement.
+                if (lower >= best + tolerance) { ++skips; continue; }
+                previous.finish(matrix, p);
+            } else {
+                hungarian(matrix, H, p);
+            }
             ++solves;
-            save(mask, permutation);
-        }
-    }
-
-    void visit(const double* matrix, unsigned remaining, int fixed_mask,
-               const WarmAssignment* previous_assignment = nullptr) {
-        ++nodes;
-        int permutation[H];
-        WarmAssignment current;
-        if (previous_assignment) current = *previous_assignment;
-        double lower = current.prepare(matrix);
-        if (lower >= best - tolerance) return;
-        current.finish(matrix, permutation);
-        lower = select_sum(matrix, permutation);
-        ++solves;
-        if (lower >= best - tolerance) return;
-
-        int candidate_mask = fixed_mask;
-        int branch_task = -1;
-        double largest_gap = -1;
-        unsigned tasks = remaining;
-        while (tasks) {
-            const int t = __builtin_ctz(tasks);
-            const double gap0 = select_sum(delta[t][0], permutation);
-            const double gap1 = select_sum(delta[t][1], permutation);
-            const int bit = gap1 < gap0;
-            candidate_mask |= bit << t;
-            const double gap = std::min(gap0, gap1);
-            if (gap > largest_gap) {
-                largest_gap = gap;
-                branch_task = t;
+            const double score = value(q, p);
+            if (score < best) {
+                best = score;
+                std::copy(q, q + M, best_q);
+                std::copy(p, p + H, best_p);
             }
-            tasks &= tasks - 1;
-        }
-        save(candidate_mask, permutation);
-        if (!remaining || lower >= best - tolerance) return;
-
-        // Fix the swap whose elementwise relaxation was most inconsistent.
-        const int preferred = (candidate_mask >> branch_task) & 1;
-        const unsigned next = remaining ^ (1u << branch_task);
-        for (int order = 0; order < 2; ++order) {
-            const int bit = preferred ^ order;
-            double child[S];
-            for (int k = 0; k < S; ++k)
-                child[k] = matrix[k] + delta[branch_task][bit][k];
-            visit(child, next, fixed_mask | (bit << branch_task), &current);
-        }
+        } while (std::next_permutation(q, q + M));
     }
-
-    void branch_and_bound() {
-        double matrix[S];
-        std::copy(costs, costs + S, matrix);
-        for (int t = 0; t < T; ++t) {
-            for (int k = 0; k < S; ++k) {
-                const double a = costs[(1 + 2 * t) * S + k];
-                const double b = costs[(2 + 2 * t) * S + k];
-                const double minimum = std::min(a, b);
-                matrix[k] += minimum;
-                delta[t][0][k] = a - minimum;
-                delta[t][1][k] = b - minimum;
-            }
-        }
-        visit(matrix, (1u << T) - 1, 0);
-    }
-
 };
 
 void construct_one(const float* prediction, const float* target,
-                   const float* pred_r, const float* target_r,
                    double readout_weight, double* costs) {
+    // Direct squared differences avoid cancellation for exactly reconstructed sets.
     std::fill(costs, costs + STRIDE, 0.0);
     for (int i = 0; i < H; ++i) {
         for (int j = 0; j < H; ++j) {
             double total = 0;
             for (int k = 0; k < H; ++k) {
-                const double d = static_cast<double>(pred_r[i * H + k]) - target_r[j * H + k];
+                const double d = static_cast<double>(prediction[i * H + k]) - target[j * H + k];
                 total += d * d;
             }
             costs[i * H + j] = readout_weight * total;
         }
     }
-    for (int t = 0; t < T; ++t) {
-        for (int bit = 0; bit < 2; ++bit) {
-            double* matrix = costs + (1 + 2 * t + bit) * S;
-            for (int a = 0; a < 2; ++a) {
-                for (int k = 0; k < K; ++k) {
-                    const float* predicted = prediction + ((t * 2 + a) * K + k) * H;
-                    const float* truth = target + ((t * 2 + (a ^ bit)) * K + k) * H;
-                    for (int i = 0; i < H; ++i) {
-                        for (int j = 0; j < H; ++j) {
-                            const double d = static_cast<double>(predicted[i]) - truth[j];
-                            matrix[i * H + j] += d * d;
-                        }
+    for (int a = 0; a < M; ++a) {
+        for (int b = 0; b < M; ++b) {
+            double* matrix = costs + (1 + a * M + b) * S;
+            for (int k = 0; k < K; ++k) {
+                const float* predicted = prediction + S + (a * K + k) * H;
+                const float* truth = target + S + (b * K + k) * H;
+                for (int i = 0; i < H; ++i) {
+                    for (int j = 0; j < H; ++j) {
+                        const double d = static_cast<double>(predicted[i]) - truth[j];
+                        matrix[i * H + j] += d * d;
                     }
                 }
             }
@@ -322,7 +255,7 @@ struct Job {
     const double* costs = nullptr;
     const float *prediction = nullptr, *target = nullptr;
     double *values = nullptr, *timings = nullptr;
-    int *masks = nullptr, *permutations = nullptr;
+    int *module_permutations = nullptr, *hidden_permutations = nullptr;
     std::int64_t* stats = nullptr;
     std::size_t batch = 0;
     double readout_weight = 1.0;
@@ -351,19 +284,18 @@ class Pool {
                 if (!job.costs) {
                     const float* pred = job.prediction + e * OUTPUTS;
                     const float* target = job.target + e * OUTPUTS;
-                    construct_one(pred, target, pred + MODULES, target + MODULES,
-                                  job.readout_weight, constructed);
+                    construct_one(pred, target, job.readout_weight, constructed);
                 }
                 check_costs(costs, STRIDE);
                 const auto middle = job.profile ? Clock::now() : Clock::time_point{};
                 Search search(costs);
-                if (job.exhaustive) search.exhaustive();
-                else search.branch_and_bound();
+                search.enumerate(!job.exhaustive);
                 job.values[e] = search.best;
-                job.masks[e] = search.best_mask;
-                std::copy(search.best_p, search.best_p + H, job.permutations + e * H);
-                job.stats[2 * e] = search.solves;
-                job.stats[2 * e + 1] = search.nodes;
+                std::copy(search.best_q, search.best_q + M, job.module_permutations + e * M);
+                std::copy(search.best_p, search.best_p + H, job.hidden_permutations + e * H);
+                job.stats[COUNTERS * e] = search.candidates;
+                job.stats[COUNTERS * e + 1] = search.solves;
+                job.stats[COUNTERS * e + 2] = search.skips;
                 job.timings[2 * e] = job.profile
                     ? std::chrono::duration<double>(middle - before).count() : 0;
                 job.timings[2 * e + 1] = job.profile
@@ -452,21 +384,21 @@ void probe_destroy_pool(void* pool) noexcept { delete static_cast<Pool*>(pool); 
 
 int probe_match(void* pool, const float* prediction, const float* target,
                 const double* costs, std::size_t batch, double readout_weight,
-                int exhaustive, int profile, double* values, int* masks,
-                int* permutations, std::int64_t* stats, double* timings) noexcept {
+                int exhaustive, int profile, double* values, int* module_permutations,
+                int* hidden_permutations, std::int64_t* stats, double* timings) noexcept {
     return guarded([&] {
         require(pool != nullptr, "null assignment pool");
         require(std::isfinite(readout_weight) && readout_weight > 0,
                 "readout_weight must be positive and finite");
         require(exhaustive == 0 || exhaustive == 1, "invalid matching mode");
         if (batch == 0) return;
-        require((costs || (prediction && target)) && values && masks && permutations
+        require((costs || (prediction && target)) && values && module_permutations && hidden_permutations
                 && stats && timings, "null assignment buffer");
         Job job;
         job.costs = costs; job.prediction = prediction; job.target = target;
         job.batch = batch; job.readout_weight = readout_weight;
         job.exhaustive = exhaustive; job.profile = profile;
-        job.values = values; job.masks = masks; job.permutations = permutations;
+        job.values = values; job.module_permutations = module_permutations; job.hidden_permutations = hidden_permutations;
         job.stats = stats; job.timings = timings;
         static_cast<Pool*>(pool)->run(job);
     });
@@ -489,7 +421,7 @@ int probe_construct(const float* prediction, const float* target, std::size_t ba
         for (std::size_t e = 0; e < batch; ++e) {
             const float* p = prediction + e * OUTPUTS;
             const float* t = target + e * OUTPUTS;
-            construct_one(p, t, p + MODULES, t + MODULES, weight, costs + e * STRIDE);
+            construct_one(p, t, weight, costs + e * STRIDE);
             check_costs(costs + e * STRIDE, STRIDE);
         }
     });

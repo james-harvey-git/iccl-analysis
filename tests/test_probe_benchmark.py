@@ -11,7 +11,7 @@ def test_benchmark_runs_real_updates_with_separate_windows(
 ) -> None:
     probe_cfg.probe.benchmark.capture_first = True
     report = benchmark_probe(probe_cfg, tmp_path / "benchmark")
-    assert report["parameters"] == 64 * 4608 + 4608
+    assert report["parameters"] == 64 * 1344 + 1344
     assert report["decoder"] == "full_affine"
     assert not report["reference_parameter_count"]
     assert report["capture"]["new_episodes"] == 8

@@ -135,7 +135,7 @@ def test_full_model_parity() -> None:
     torch.testing.assert_close(preds_fla, preds_ref, rtol=MODEL_RTOL, atol=MODEL_ATOL)
 
 
-@pytest.mark.parametrize("seq", [63, 64, 65, 521])
+@pytest.mark.parametrize("seq", [63, 64, 65, 456, 521])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @torch.inference_mode()
 def test_terminal_state_parity(seq: int, dtype: torch.dtype) -> None:
@@ -170,8 +170,8 @@ def test_terminal_state_parity(seq: int, dtype: torch.dtype) -> None:
 def test_full_model_terminal_state_parity(precision: torch.dtype) -> None:
     torch.manual_seed(17)
     model = GDNModel(d_in=16, d_out=16, d_model=64, n_layers=2, n_heads=2, d_ffw=128).cuda()
-    tokens = torch.randn(2, 521, 16, device="cuda")
-    types = torch.randint(0, 3, (2, 521), device="cuda")
+    tokens = torch.randn(2, 456, 16, device="cuda")
+    types = torch.randint(0, 3, (2, 456), device="cuda")
     tokens[:, -1] = 0
     types[:, -1] = 2
     with torch.autocast("cuda", dtype=precision, enabled=precision == torch.bfloat16):

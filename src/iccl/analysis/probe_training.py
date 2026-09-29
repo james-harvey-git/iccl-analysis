@@ -27,15 +27,14 @@ from iccl.analysis.probe_dataset import (
     write_json,
 )
 from iccl.analysis.probe_loss import aligned_targets, parameter_errors
-from iccl.analysis.probe_matching import Assignment, AssignmentSolver
+from iccl.analysis.probe_matching import COUNTER_NAMES, Assignment, AssignmentSolver
 from iccl.analysis.probe_results import (
     CHECKPOINT_VERSION,
-    TARGET_LAYOUT,
     load_checkpoint,
     save_checkpoint,
     source_run,
 )
-from iccl.analysis.probe_targets import PROTOCOL
+from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
 from iccl.analysis.probes import make_decoder
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import build_optimizer, build_scheduler, resolve_autocast_dtype
@@ -77,6 +76,7 @@ class UpdateResult:
     assignment: Assignment
     stages: dict[str, float]
     episode_indices: list[int]
+    components: dict[str, float]
 
 
 def optimizer_update(
@@ -118,9 +118,8 @@ def optimizer_update(
     mark("prediction_to_cpu")
     assignment = solver.match(detached, batch["target"].numpy(), readout_weight, profile=profile)
     mark("native_matching_wall")
-    loss = parameter_errors(
-        predictions, aligned_targets(targets, assignment), readout_weight
-    ).joint.mean()
+    errors = parameter_errors(predictions, aligned_targets(targets, assignment), readout_weight)
+    loss = errors.joint.mean()
     if not torch.isfinite(loss).item():
         raise FloatingPointError("nonfinite aligned probe loss")
     mark("assignment_return_and_loss")
@@ -136,6 +135,16 @@ def optimizer_update(
     optimizer.step()
     scheduler.step()
     mark("optimizer_and_scheduler")
+    components = (
+        torch.stack(
+            [
+                value.detach().mean()
+                for value in (errors.modules, errors.weights, errors.biases, errors.readout)
+            ]
+        )
+        .cpu()
+        .tolist()
+    )
     return UpdateResult(
         float(loss.detach()),
         float(norm),
@@ -143,6 +152,7 @@ def optimizer_update(
         assignment,
         stages,
         batch["episode_index"].tolist(),
+        dict(zip(("module_mse", "weight_mse", "bias_mse", "readout_mse"), components, strict=True)),
     )
 
 
@@ -318,7 +328,8 @@ class ProbeTrainer:
     @torch.inference_mode()
     def validate(self) -> float:
         self.model.eval()
-        total, count = 0.0, 0
+        names = ("joint_mse", "module_mse", "weight_mse", "bias_mse", "readout_mse")
+        totals, count = np.zeros(len(names), np.float64), 0
         for batch in self.val_loader:
             states = batch["states"].to(self.device, non_blocking=True)
             with torch.autocast(self.device.type, dtype=self.dtype, enabled=self.dtype is not None):
@@ -328,13 +339,29 @@ class ProbeTrainer:
                 predictions.cpu().numpy(), batch["target"].numpy(), self.p.loss.readout_weight
             )
             targets = aligned_targets(batch["target"].to(self.device), assignment)
-            errors = parameter_errors(predictions, targets, self.p.loss.readout_weight).joint
-            total += errors.double().sum().item()
-            count += len(errors)
-        value = total / count
-        if not np.isfinite(value):
-            raise FloatingPointError("nonfinite validation joint MSE")
-        return value
+            errors = parameter_errors(predictions, targets, self.p.loss.readout_weight)
+            totals += (
+                torch.stack(
+                    [
+                        value.double().sum()
+                        for value in (
+                            errors.joint,
+                            errors.modules,
+                            errors.weights,
+                            errors.biases,
+                            errors.readout,
+                        )
+                    ]
+                )
+                .cpu()
+                .numpy()
+            )
+            count += len(predictions)
+        means = totals / count
+        if not np.isfinite(means).all():
+            raise FloatingPointError("nonfinite validation parameter MSE")
+        self.validation_metrics = dict(zip(names, means.tolist(), strict=True))
+        return self.validation_metrics["joint_mse"]
 
     def checkpoint(self, *, weights_only: bool = False) -> dict[str, Any]:
         identity = self.train.manifest["identity"]
@@ -422,7 +449,11 @@ class ProbeTrainer:
                 "episodes": result.episodes,
                 "seconds": time.perf_counter() - tick,
                 "data_wait_seconds": data_wait,
-                "matching_nodes_mean": float(result.assignment.counters[:, 1].mean()),
+                **result.components,
+                **{
+                    f"{name}_mean": float(result.assignment.counters[:, index].mean())
+                    for index, name in enumerate(COUNTER_NAMES)
+                },
             }
             self.history.append(record)
             if (
@@ -438,6 +469,7 @@ class ProbeTrainer:
                         },
                         "probe/train/seconds_per_update": float(record["seconds"]),
                         "probe/train/data_wait_seconds": data_wait,
+                        **{f"probe/train/{k}": v for k, v in result.components.items()},
                     },
                     self.step,
                 )
@@ -446,8 +478,11 @@ class ProbeTrainer:
                 or self.step == self.p.training.num_steps
             ):
                 validation = self.validate()
-                self.validation_history.append({"step": self.step, "joint_mse": validation})
-                self.logger.log({"probe/validation/joint_mse": validation}, self.step)
+                self.validation_history.append({"step": self.step, **self.validation_metrics})
+                self.logger.log(
+                    {f"probe/validation/{k}": v for k, v in self.validation_metrics.items()},
+                    self.step,
+                )
                 if self.best_loss is None or validation < self.best_loss:
                     self.best_loss, self.best_step = validation, self.step
                     self.save("best")
@@ -457,20 +492,15 @@ class ProbeTrainer:
                 or self.step == self.p.training.num_steps
             ):
                 self.save("last")
-                write_json(
-                    self.out_dir / "history.json",
-                    {"training": self.history, "validation": self.validation_history},
-                )
+                self._write_history()
         if not (self.out_dir / "checkpoints/last.pt").exists():
             self.save("last")
-        write_json(
-            self.out_dir / "history.json",
-            {"training": self.history, "validation": self.validation_history},
-        )
+        self._write_history()
         from iccl.analysis.plotting import plot_probe_history
 
         plot_probe_history([self.out_dir / "history.json"], self.out_dir / "plots")
         summary = {
+            "protocol": PROTOCOL,
             "step": self.step,
             "samples_consumed": self.consumed,
             "best_step": self.best_step,
@@ -488,6 +518,24 @@ class ProbeTrainer:
             self.logger.upload_probe_artifact(path, kind="weights")
         self.logger.upload_probe_artifact(self.out_dir / "history.json", kind="results")
         return summary
+
+    def _write_history(self) -> None:
+        write_json(
+            self.out_dir / "history.json",
+            {
+                "protocol": PROTOCOL,
+                "dataset_id": self.train.manifest["dataset_id"],
+                "split_signatures": {
+                    "train": self.train.signature,
+                    "validation": self.validation.signature,
+                },
+                "target_layout": TARGET_LAYOUT,
+                "readout_weight": float(self.p.loss.readout_weight),
+                "control": self.control,
+                "training": self.history,
+                "validation": self.validation_history,
+            },
+        )
 
     def close(self) -> None:
         # Dropping the iterator joins its multiprocessing workers before native pool teardown.

@@ -17,6 +17,8 @@ from omegaconf import DictConfig
 from iccl.analysis.capture import capture_dataset
 from iccl.analysis.probe_config import resolved_config, validate_probe_config
 from iccl.analysis.probe_dataset import write_json
+from iccl.analysis.probe_matching import COUNTER_NAMES
+from iccl.analysis.probe_targets import OUTPUT_FEATURES, PROTOCOL, TARGET_LAYOUT
 from iccl.analysis.probe_training import ProbeTrainer, synchronize
 
 
@@ -105,9 +107,12 @@ def _window(trainer: ProbeTrainer, steps: int, *, profile: bool) -> dict[str, An
             "loss": result.loss,
             "gradient_norm": result.grad_norm,
             "loss_and_gradient_finite": True,
-            "matching_nodes_mean": float(result.assignment.counters[:, 1].mean()),
-            "matching_nodes_max": int(result.assignment.counters[:, 1].max()),
-            "hungarian_solves_mean": float(result.assignment.counters[:, 0].mean()),
+            **result.components,
+            **{
+                f"{name}_{stat}": float(reduce(result.assignment.counters[:, index]))
+                for index, name in enumerate(COUNTER_NAMES)
+                for stat, reduce in (("mean", np.mean), ("max", np.max))
+            },
         }
         if profile:
             record["stages_seconds"] = {"data_wait": data_wait, **result.stages}
@@ -155,7 +160,7 @@ def benchmark_probe(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
         profiled = _window(trainer, b.profile_steps, profile=True)
         parameters = sum(p.numel() for p in trainer.model.parameters())
         report = {
-            "protocol": "module-decoder-v1/benchmark-v1",
+            "protocol": f"{PROTOCOL}/benchmark-v1",
             "config": resolved_config(cfg),
             "dataset_id": trainer.train.manifest["dataset_id"],
             "train_split_signature": trainer.train.signature,
@@ -163,7 +168,8 @@ def benchmark_probe(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
             "state_layout": trainer.train.manifest["identity"]["state_layout"],
             "input_features": trainer.train.manifest["identity"]["input_features"],
             "parameters": parameters,
-            "reference_parameter_count": parameters == 603984384,
+            "reference_parameter_count": parameters == (131072 + 1) * OUTPUT_FEATURES,
+            "target_layout": TARGET_LAYOUT,
             "decoder": "full_affine",
             "batch_size": int(cfg.probe.training.batch_size),
             "precision": str(trainer.dtype or torch.float32),
