@@ -22,11 +22,13 @@ def test_reused_dataset_and_evaluation_record_actual_training_settings(
     training["seed"] = 7
     probe_cfg.probe.dataset.counts.train = 999
     probe_cfg.probe.dataset.shard_size = 888
+    probe_cfg.probe.loss.readout_weight = 17
     cfg = tracking_config(probe_cfg, manifest, "eval", training_config=training)
     assert cfg.probe.dataset.counts.train == 4
     assert cfg.probe.dataset.shard_size == 3
     assert cfg.probe.training.schedule == "cosine"
     assert cfg.seed == 7
+    assert cfg.probe.loss.readout_weight == 1
     assert cfg.wandb.name == "Cosine | full | seed 7 | eval"
     assert cfg.captured_dataset.dataset_id == manifest["dataset_id"]
     assert probe_cfg.probe.dataset.counts.train == 999

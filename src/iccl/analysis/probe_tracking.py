@@ -29,6 +29,7 @@ def tracking_config(
     )
     if training_config is not None:
         values["probe"]["training"] = training_config["probe"]["training"]
+        values["probe"]["loss"] = training_config["probe"]["loss"]
         values["seed"] = training_config["seed"]
     values["captured_dataset"] = {
         "dataset_id": manifest["dataset_id"],
