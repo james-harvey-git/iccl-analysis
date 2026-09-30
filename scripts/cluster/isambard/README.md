@@ -95,12 +95,14 @@ fresh M=4 dataset and new training. Existing M=8 states/checkpoints are rejected
 leave previous results intact. The [probe guide](../../../docs/module-decoder.md)
 describes the exact matching objective, controls, plots and storage contract.
 
-The following **Bash** block queues a complete pilot with distinct W&B names.
+The following **Bash** block queues a complete pilot with concise automatic W&B names.
 Replace the GDN reference with an immutable artifact version or a local path.
 Run it from the repository checkout. Datasets, Hydra outputs, Slurm logs,
 artifact downloads and the listed caches go directly to `$SCRATCHDIR`; no home
 directory symlink is needed. W&B is explicitly online and full checkpoint/data
-uploads stay disabled.
+uploads stay disabled. Capture logs to stdout/stderr without creating a W&B run.
+Training and evaluation share a dataset group and link through the probe checkpoint;
+their names describe schedule, control, seed and stage rather than filesystem paths.
 
 ```bash
 bash <<'BASH'
@@ -145,7 +147,7 @@ set_probe_capture_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
   "probe.dataset.counts.train=$set_probe_train_count" \
   probe.dataset.counts.validation=1000 probe.dataset.counts.test=1000 \
   "probe.dataset.shard_size=$set_probe_shard" \
-  "hydra.run.dir=$set_probe_runs/capture" "wandb.name=$set_probe_run-capture")
+  "hydra.run.dir=$set_probe_runs/capture")
 set_probe_capture_job=${set_probe_capture_job%%;*}
 
 set_probe_train_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
@@ -155,7 +157,7 @@ set_probe_train_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
   "${set_probe_common[@]}" "probe.training.num_steps=$set_probe_steps" \
   probe.training.batch_size=128 probe.training.control=none \
   probe.training.weight_decay=0.003 \
-  "hydra.run.dir=$set_probe_runs/train" "wandb.name=$set_probe_run-train")
+  "hydra.run.dir=$set_probe_runs/train")
 set_probe_train_job=${set_probe_train_job%%;*}
 
 set_probe_eval_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
@@ -165,7 +167,7 @@ set_probe_eval_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
   "${set_probe_common[@]}" \
   "probe.evaluation.checkpoint=$set_probe_runs/train/checkpoints/best.pt" \
   probe.evaluation.split=test \
-  "hydra.run.dir=$set_probe_runs/eval" "wandb.name=$set_probe_run-eval")
+  "hydra.run.dir=$set_probe_runs/eval")
 set_probe_eval_job=${set_probe_eval_job%%;*}
 
 printf 'Capture: %s\nTrain: %s\nEval: %s\nDataset: %s\nRuns: %s\n' \
@@ -236,7 +238,7 @@ sbatch --mem=64G --time=01:00:00 \
   probe.dataset.counts.test=64 \
   probe.benchmark.capture_first=true \
   "hydra.run.dir=$set_probe_root/module-decoder/runs/$set_probe_benchmark" \
-  "wandb.name=$set_probe_benchmark"
+  'wandb.name=Full decoder | benchmark'
 ```
 
 The default benchmark uses the full decoder and batch size 128. Its

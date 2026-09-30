@@ -139,6 +139,7 @@ class RunLogger:
             mode=self.cfg.wandb.mode,
             # None is W&B's "generate one", so an unset name needs no branch.
             name=self.cfg.wandb.get("name"),
+            group=self.cfg.wandb.get("group"),
             job_type=self.job_type,
             id=self.resume_run.run_id if self.resume_run is not None else None,
             resume="must" if self.resume_run is not None else "never",

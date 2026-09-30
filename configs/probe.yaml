@@ -24,7 +24,8 @@ wandb:
   mode: disabled             # disabled | offline | online
   project: iccl-analysis
   entity: jublett-university-of-oxford
-  name: null
+  name: null                 # null: concise schedule/control/seed/stage label.
+  group: null                # null: group probe jobs by the captured dataset identity.
   resume: false              # true: resume the checkpoint's W&B run; requires online training resume.
   upload_weights: false      # Opt-in final decoder weights; never automatic full-state uploads.
   upload_results: false      # Opt-in full results bundle; dashboard figures follow wandb.mode.

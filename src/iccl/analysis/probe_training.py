@@ -35,6 +35,7 @@ from iccl.analysis.probe_results import (
     source_run,
 )
 from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
+from iccl.analysis.probe_tracking import tracking_config
 from iccl.analysis.probes import make_decoder
 from iccl.checkpoints import SourceRun, source_from_checkpoint
 from iccl.reporting.logger import RunLogger
@@ -246,7 +247,7 @@ class ProbeTrainer:
             resume_run = self._resume(Path(self.p.training.resume))
             self.timings["checkpoint_load"] = time.perf_counter() - tick
         self.logger = RunLogger(
-            cfg,
+            tracking_config(cfg, self.train.manifest, stage, resume_run=resume_run),
             self.out_dir,
             job_type=f"probe-{stage}",
             source=source_run(self.train.manifest),

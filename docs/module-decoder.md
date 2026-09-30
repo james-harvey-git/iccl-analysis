@@ -105,6 +105,10 @@ uv run python scripts/capture_probe_dataset.py \
 Defaults are 10,000 train / 1,000 validation / 1,000 test episodes. Reference-width
 arrays need about **5.98 GiB** before filesystem overhead; capture prints an estimate.
 Only capture needs counts, dataset seed and source GDN. Consumers read the manifest.
+Capture reports progress to stdout and writes `capture.json`; it never creates a
+W&B run, including when resolving a `wandb://` source checkpoint. Training and
+evaluation record the actual dataset identity, counts and capture settings from
+the manifest in W&B, rather than capture defaults from the launch configuration.
 
 Worlds use independent, indexed CPU Philox streams in a stable uint64 namespace,
 separate from current production training/evaluation seed ranges. Worker count,
@@ -160,6 +164,14 @@ entity/project must match. W&B must find that existing run; a missing identity
 or deleted run is an error. The default `wandb.resume=false` creates a separate
 W&B run even when training resumes from a checkpoint. Evaluation uses its own
 run and must keep `wandb.resume=false`.
+
+Default W&B names describe schedule, control, seed and stage, for example
+`Cosine | full | seed 0 | train` and `Cosine | full | seed 0 | eval`.
+Dataset dimensions and identity define the default W&B group; hyperparameters
+remain in the run config. `wandb.name` and `wandb.group` override these labels.
+Resuming an existing W&B run preserves its name unless explicitly overridden.
+Evaluation links to the probe training run recorded in its checkpoint, with the
+GDN source retained separately as `gdn_source_run` in the config.
 
 When the checkpoint predates the last uploaded metrics, training replays those
 updates but does not upload their metrics again. W&B history is preserved, with

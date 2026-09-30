@@ -23,7 +23,6 @@ from iccl.analysis.probe_matching import Assignment, AssignmentSolver
 from iccl.analysis.probe_results import (
     load_checkpoint,
     probe_summary_rows,
-    source_run,
     write_results,
 )
 from iccl.analysis.probe_targets import (
@@ -33,8 +32,10 @@ from iccl.analysis.probe_targets import (
     READOUT_FEATURES,
     TARGET_LAYOUT,
 )
+from iccl.analysis.probe_tracking import tracking_config
 from iccl.analysis.probe_training import probe_loader
 from iccl.analysis.probes import make_decoder
+from iccl.checkpoints import source_from_checkpoint
 from iccl.data.dataset import sequence_rng
 from iccl.data.teacher import ModulePool, teacher_forward
 from iccl.evaluation.metrics import BASE_MSE_FLOOR
@@ -260,7 +261,11 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
     )
     bootstrap_seed = stream_seed(e.bootstrap_seed, "episode-bootstrap")
     logger = RunLogger(
-        cfg, out_dir, job_type="probe-eval", source=source_run(dataset.manifest), protocol=PROTOCOL
+        tracking_config(cfg, dataset.manifest, "eval", training_config=checkpoint["config"]),
+        out_dir,
+        job_type="probe-eval",
+        source=source_from_checkpoint(checkpoint),
+        protocol=PROTOCOL,
     )
     buffers: dict[str, list[np.ndarray]] = {}
     try:
@@ -309,6 +314,7 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                 "control": checkpoint["control"],
                 "source_model_digest": checkpoint["source_model_digest"],
                 "source_provenance": checkpoint["source_provenance"],
+                "probe_training_run": checkpoint.get("wandb_run"),
                 "state_layout": checkpoint["state_layout"],
                 "target_layout": TARGET_LAYOUT,
                 "module_count": MODULES,

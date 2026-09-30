@@ -24,7 +24,6 @@ from iccl.analysis.probe_config import (
 from iccl.analysis.probe_dataset import DatasetWriter, array_schema, file_digest, write_json
 from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT, episode_targets
 from iccl.checkpoints import (
-    WANDB_SCHEME,
     checkpoint_model_config,
     checkpoint_model_digest,
     resolve_checkpoint_path,
@@ -35,7 +34,6 @@ from iccl.data.sequences import TOKEN_BOUNDARY, TOKEN_Y, SequenceSample
 from iccl.models.blocks import GDNBlock
 from iccl.models.model import GDNModel, model_from_config
 from iccl.models.ops import Backend, resolve_backend
-from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import resolve_autocast_dtype
 
 
@@ -135,7 +133,7 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
     p = cfg.probe
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    source_path, artifact = resolve_checkpoint_path(str(p.capture.checkpoint))
+    source_path, _ = resolve_checkpoint_path(str(p.capture.checkpoint))
     checkpoint = torch.load(source_path, map_location="cpu", weights_only=False)
     architecture = checkpoint_model_config(checkpoint)
     if architecture["data"] != {"input_dim": 16, "output_dim": 16}:
@@ -222,80 +220,76 @@ def capture_dataset(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
         f"estimated disk arrays {estimated_gib:.3f} GiB "
         "(excludes file headers, temporary writes, checkpoints and caches; not a RAM estimate)"
     )
-    logger = RunLogger(cfg, out_dir, job_type="probe-capture", source=source, protocol=PROTOCOL)
     generated, forward_seconds = 0, 0.0
-    try:
-        with DatasetWriter(
-            p.dataset.path, identity, counts, p.dataset.shard_size, resume=p.capture.resume
-        ) as writer:
-            writer.record_provenance(provenance)
-            logger.start()
-            if artifact and cfg.wandb.mode == "online":
-                logger.use_artifact(str(p.capture.checkpoint).removeprefix(WANDB_SCHEME))
-            for split in SPLITS:
-                episodes = CaptureEpisodes(
-                    cfg.data, seeds[split], writer.completed(split), counts[split]
+    with DatasetWriter(
+        p.dataset.path, identity, counts, p.dataset.shard_size, resume=p.capture.resume
+    ) as writer:
+        writer.record_provenance(provenance)
+        for split in SPLITS:
+            episodes = CaptureEpisodes(
+                cfg.data, seeds[split], writer.completed(split), counts[split]
+            )
+            if len(episodes) == 0:
+                continue
+            loader = DataLoader(
+                episodes,
+                batch_size=p.capture.batch_size,
+                num_workers=p.capture.num_workers,
+                collate_fn=collate_capture,
+                multiprocessing_context="spawn" if p.capture.num_workers else None,
+            )
+            buffered = 0
+            buffers: dict[str, list[np.ndarray]] = {name: [] for name in schema}
+            for batch in loader:
+                tick = time.perf_counter()
+                tokens = torch.from_numpy(batch.pop("tokens")).to(device)
+                types = torch.from_numpy(batch.pop("token_type")).to(device)
+                with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
+                    output = model(tokens, types, capture_final=True)
+                assert output.final_states is not None
+                if any(value.dtype != torch.float32 for value in output.final_states):
+                    raise ValueError("unexpected recurrence-state compute dtype")
+                batch["states"] = flatten_final_states(output.final_states, layout).cpu().numpy()
+                forward_seconds += time.perf_counter() - tick
+                generated += len(tokens)
+                offset = 0
+                while offset < len(tokens):
+                    take = min(p.dataset.shard_size - buffered, len(tokens) - offset)
+                    for name in schema:
+                        buffers[name].append(batch[name][offset : offset + take])
+                    offset += take
+                    buffered += take
+                    if buffered == p.dataset.shard_size:
+                        writer.append(
+                            split,
+                            {name: np.concatenate(parts) for name, parts in buffers.items()},
+                        )
+                        buffers = {name: [] for name in schema}
+                        buffered = 0
+                        print(
+                            f"capture: {split} {writer.completed(split):,}/{counts[split]:,} "
+                            f"episodes committed; {generated:,} new episodes",
+                            flush=True,
+                        )
+            if buffered:
+                writer.append(
+                    split, {name: np.concatenate(parts) for name, parts in buffers.items()}
                 )
-                if len(episodes) == 0:
-                    continue
-                loader = DataLoader(
-                    episodes,
-                    batch_size=p.capture.batch_size,
-                    num_workers=p.capture.num_workers,
-                    collate_fn=collate_capture,
-                    multiprocessing_context="spawn" if p.capture.num_workers else None,
-                )
-                buffered = 0
-                buffers: dict[str, list[np.ndarray]] = {name: [] for name in schema}
-                for batch in loader:
-                    tick = time.perf_counter()
-                    tokens = torch.from_numpy(batch.pop("tokens")).to(device)
-                    types = torch.from_numpy(batch.pop("token_type")).to(device)
-                    with torch.autocast(device.type, dtype=dtype, enabled=dtype is not None):
-                        output = model(tokens, types, capture_final=True)
-                    assert output.final_states is not None
-                    if any(value.dtype != torch.float32 for value in output.final_states):
-                        raise ValueError("unexpected recurrence-state compute dtype")
-                    batch["states"] = (
-                        flatten_final_states(output.final_states, layout).cpu().numpy()
-                    )
-                    forward_seconds += time.perf_counter() - tick
-                    generated += len(tokens)
-                    offset = 0
-                    while offset < len(tokens):
-                        take = min(p.dataset.shard_size - buffered, len(tokens) - offset)
-                        for name in schema:
-                            buffers[name].append(batch[name][offset : offset + take])
-                        offset += take
-                        buffered += take
-                        if buffered == p.dataset.shard_size:
-                            writer.append(
-                                split,
-                                {name: np.concatenate(parts) for name, parts in buffers.items()},
-                            )
-                            buffers = {name: [] for name in schema}
-                            buffered = 0
-                            logger.log({"capture/new_episodes": float(generated)}, generated)
-                if buffered:
-                    writer.append(
-                        split, {name: np.concatenate(parts) for name, parts in buffers.items()}
-                    )
-            dataset_id = writer.manifest["dataset_id"]
-        elapsed = time.perf_counter() - started
-        report = {
-            "dataset_path": str(Path(p.dataset.path).resolve()),
-            "dataset_id": dataset_id,
-            "new_episodes": generated,
-            "checkpoint_load_seconds": load_seconds,
-            "forward_and_transfer_seconds": forward_seconds,
-            "total_seconds": elapsed,
-            "new_episodes_per_second": generated / elapsed,
-            "estimated_array_bytes": sum(counts.values()) * bytes_per_episode,
-            "timing_scope": (
-                "total includes checkpoint resolution, validation, generation, inference and writes"
-            ),
-        }
-        write_json(out_dir / "capture.json", report)
-        return report
-    finally:
-        logger.finish()
+            print(f"capture: {split} complete ({writer.completed(split):,} episodes)", flush=True)
+        dataset_id = writer.manifest["dataset_id"]
+    elapsed = time.perf_counter() - started
+    report = {
+        "dataset_path": str(Path(p.dataset.path).resolve()),
+        "dataset_id": dataset_id,
+        "new_episodes": generated,
+        "checkpoint_load_seconds": load_seconds,
+        "forward_and_transfer_seconds": forward_seconds,
+        "total_seconds": elapsed,
+        "new_episodes_per_second": generated / elapsed,
+        "estimated_array_bytes": sum(counts.values()) * bytes_per_episode,
+        "timing_scope": (
+            "total includes checkpoint resolution, validation, generation, inference and writes"
+        ),
+    }
+    write_json(out_dir / "capture.json", report)
+    return report

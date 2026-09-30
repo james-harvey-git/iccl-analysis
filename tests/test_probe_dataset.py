@@ -28,22 +28,25 @@ from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT
 from iccl.models.model import model_from_config
 
 
-def test_offline_artifact_capture_keeps_provenance_without_online_lineage(
-    probe_cfg: DictConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ["online", "offline", "disabled"])
+def test_capture_logs_locally_and_keeps_artifact_provenance_without_a_run(
+    probe_cfg: DictConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode: str,
 ) -> None:
     source = Path(probe_cfg.probe.capture.checkpoint)
     reference = "wandb://entity/project/source:v0"
     probe_cfg.probe.capture.checkpoint = reference
-    probe_cfg.wandb.mode = "offline"
-    lineage: list[str] = []
+    probe_cfg.wandb.mode = mode
     monkeypatch.setattr("iccl.analysis.capture.resolve_checkpoint_path", lambda _: (source, True))
-    monkeypatch.setattr("iccl.analysis.capture.RunLogger.start", lambda self: None)
-    monkeypatch.setattr(
-        "iccl.analysis.capture.RunLogger.use_artifact", lambda self, ref: lineage.append(ref)
-    )
+    start = Mock(side_effect=AssertionError("capture must not create a W&B run"))
+    monkeypatch.setattr("iccl.reporting.logger.RunLogger.start", start)
     report = capture_dataset(probe_cfg, tmp_path / "capture")
     assert report["new_episodes_per_second"] > 0
-    assert not lineage
+    start.assert_not_called()
+    assert "capture: train complete (4 episodes)" in capsys.readouterr().out
     manifest = read_manifest(probe_cfg.probe.dataset.path)
     assert manifest["source_provenance"]["checkpoint_reference"] == reference
 
