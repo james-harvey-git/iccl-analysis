@@ -22,7 +22,7 @@ _PREDICTION_NAMES = {
     "constant": "Constant control",
     "shuffled_targets": "Shuffled targets",
 }
-_COLORS = {"decoder": "#2563eb", "zero": "#64748b"}
+_COLORS = {"decoder": "#2563eb", "zero": "#64748b", "gdn": "#d97706"}
 
 
 def _estimate_trace(
@@ -35,6 +35,7 @@ def _estimate_trace(
     col: int = 1,
     lines: bool = True,
     coordinate_labels: list[str] | None = None,
+    showlegend: bool | None = None,
 ) -> None:
     """Plot saved means and exact interval endpoints, including absent or asymmetric CIs."""
     color = _COLORS[prediction]
@@ -84,7 +85,7 @@ def _estimate_trace(
             y=[row["mean"] for row in rows],
             name=name,
             legendgroup=prediction,
-            showlegend=col == 1,
+            showlegend=col == 1 if showlegend is None else showlegend,
             mode="lines+markers" if lines else "markers",
             line={"color": color, "dash": "dash" if prediction == "zero" else "solid"},
             marker={
@@ -115,6 +116,9 @@ def probe_evaluation_figures(
     """Interactive dashboard panels derived solely from the saved evaluation measurements."""
     rows = probe_summary_rows(summary)
     labels = {"decoder": _PREDICTION_NAMES[metadata["control"]], "zero": "Zero output"}
+    functional_labels = dict(labels)
+    if "gdn" in summary:
+        functional_labels["gdn"] = "GDN after 32 demos/task"
     figures: dict[str, go.Figure] = {}
     count = summary["decoder"]["all"]["n_episodes"]
     confidence = metadata["confidence"] * 100
@@ -123,8 +127,13 @@ def probe_evaluation_figures(
     )
     floor_count = summary["decoder"]["all"]["variance_floored_tasks"]
     functional_note = (
-        "Oracle task coefficients; predicted readout. "
-        f"{floor_count:,}/{metadata['task_count'] * count:,} task variances "
+        "Probe: final episode state + oracle task coefficients. "
+        + (
+            "GDN: original prefix through each task's 32 demos; independent queries.<br>"
+            if "gdn" in summary
+            else ""
+        )
+        + f"{floor_count:,}/{metadata['task_count'] * count:,} task variances "
         f"floored at {metadata['variance_floor']:g}."
     )
 
@@ -194,7 +203,7 @@ def probe_evaluation_figures(
     module.update_yaxes(title_text="Aligned module weight and bias MSE")
     functional = panel(
         "functional_by_task",
-        "Oracle-coefficient functional reconstruction",
+        "Functional performance on matched fresh inputs",
         ("Raw error", "Variance-normalized error"),
         note=f"{functional_note}<br>{ci_note}",
     )
@@ -202,7 +211,7 @@ def probe_evaluation_figures(
         (functional, "functional_mse_by_task", "Output MSE", 1),
         (functional, "functional_nmse_by_task", "Output nMSE", 2),
     ):
-        for prediction, name in labels.items():
+        for prediction, name in functional_labels.items():
             selected = [
                 row
                 for row in rows
@@ -267,15 +276,18 @@ def probe_evaluation_figures(
             f"over its {metadata['task_count']} tasks."
         ),
     )
-    for prediction, name in labels.items():
-        for col, values, x_title in (
-            (1, arrays[f"{prediction}_joint_mse"], "Joint aligned MSE"),
+    for prediction, name in functional_labels.items():
+        for col, key, x_title in (
+            (1, f"{prediction}_joint_mse", "Joint aligned MSE"),
             (
                 2,
-                arrays[f"{prediction}_functional_nmse_by_task"].mean(axis=1),
-                "Oracle-coefficient nMSE",
+                f"{prediction}_functional_nmse_by_task",
+                "Output nMSE",
             ),
         ):
+            if key not in arrays:
+                continue
+            values = arrays[key] if col == 1 else arrays[key].mean(axis=1)
             order = np.argsort(values, kind="stable")
             distributions.add_trace(
                 go.Scatter(
@@ -285,7 +297,7 @@ def probe_evaluation_figures(
                     marker={"size": 4},
                     name=name,
                     legendgroup=prediction,
-                    showlegend=col == 1,
+                    showlegend=col == 1 or prediction == "gdn",
                     line={
                         "color": _COLORS[prediction],
                         "shape": "hv",
@@ -316,11 +328,13 @@ def probe_evaluation_figures(
     rank_values = sorted(
         int(group.removeprefix("rank_")) for group in summary["decoder"] if group != "all"
     )
-    for prediction, name in labels.items():
+    for prediction, name in functional_labels.items():
         for col, metric, y_title in (
             (1, "joint_mse", "Joint aligned MSE"),
-            (2, "functional_nmse", "Oracle-coefficient nMSE"),
+            (2, "functional_nmse", "Output nMSE"),
         ):
+            if prediction == "gdn" and col == 1:
+                continue
             selected = [
                 next(
                     row
@@ -331,7 +345,15 @@ def probe_evaluation_figures(
                 )
                 for rank in rank_values
             ]
-            _estimate_trace(ranks, rank_values, selected, prediction=prediction, name=name, col=col)
+            _estimate_trace(
+                ranks,
+                rank_values,
+                selected,
+                prediction=prediction,
+                name=name,
+                col=col,
+                showlegend=col == 1 or prediction == "gdn",
+            )
             ranks.update_yaxes(title_text=y_title, row=1, col=col)
     ranks.update_xaxes(
         title_text="Observed task-latent rank",
@@ -366,24 +388,29 @@ def plot_probe_results(
         (label, report[2]["decoder"]["all"]) for label, report in zip(labels, reports, strict=True)
     ]
     populations.append(("Zero output", reports[0][2]["zero"]["all"]))
+    if "gdn" in reports[0][2]:
+        populations.append(("GDN after 32 demos/task", reports[0][2]["gdn"]["all"]))
     for label, report in populations:
         exposures = sorted(map(int, report["exposure"]))
         module = [report["exposure"][str(n)] for n in exposures]
         function = report["metrics"]["functional_nmse_by_task"]
         positions = np.arange(1, len(function["mean"]) + 1)
         style = {"linestyle": "--", "color": "0.4"} if label == "Zero output" else {}
-        (line,) = axes[0].plot(
-            exposures, [value["mean"] for value in module], marker="o", label=label, **style
-        )
+        color = _COLORS["gdn"]
+        if module:
+            (line,) = axes[0].plot(
+                exposures, [value["mean"] for value in module], marker="o", label=label, **style
+            )
+            color = line.get_color()
         for exposure, value in zip(exposures, module, strict=True):
             if value["ci_low"] is not None:
-                axes[0].vlines(exposure, value["ci_low"], value["ci_high"], color=line.get_color())
+                axes[0].vlines(exposure, value["ci_low"], value["ci_high"], color=color)
         axes[1].plot(
             positions,
             function["mean"],
             marker="o",
             label=label,
-            color=line.get_color(),
+            color=color,
             linestyle=style.get("linestyle", "-"),
         )
         if function["ci_low"] is not None:
@@ -392,7 +419,7 @@ def plot_probe_results(
                 function["ci_low"],
                 function["ci_high"],
                 alpha=0.15,
-                color=line.get_color(),
+                color=color,
             )
     axes[0].set(
         xlabel="Tasks containing the module",
@@ -401,12 +428,14 @@ def plot_probe_results(
     )
     axes[1].set(
         xlabel="Task position",
-        ylabel="Oracle-coefficient function (nMSE)",
+        ylabel="Output nMSE (matched fresh inputs)",
         xticks=np.arange(1, reports[0][0]["task_count"] + 1),
     )
     for ax in axes:
         ax.grid(alpha=0.2)
     axes[0].legend(fontsize=7)
+    if "gdn" in reports[0][2]:
+        axes[1].legend(fontsize=7)
     path = out_dir / "reconstruction-by-exposure.png"
     fig.savefig(path, dpi=180)
     plt.close(fig)

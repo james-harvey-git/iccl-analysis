@@ -123,6 +123,17 @@ def validate_probe_config(cfg: DictConfig, stage: str) -> None:
         raise ValueError("standalone evaluation must select validation or test")
     _integer(p.evaluation.functional_inputs_per_task, "evaluation.functional_inputs_per_task")
     _integer(p.evaluation.bootstrap_replicates, "evaluation.bootstrap_replicates", 0)
+    gdn = p.evaluation.gdn
+    if type(gdn.enabled) is not bool:
+        raise ValueError("evaluation.gdn.enabled must be true or false")
+    if gdn.backend not in {"auto", "fla", "reference"} or gdn.precision not in {
+        "auto",
+        "fp32",
+        "bf16",
+    }:
+        raise ValueError("invalid GDN evaluation backend or precision")
+    for name in ("batch_size", "query_batch_size"):
+        _integer(gdn[name], f"evaluation.gdn.{name}")
     for name in ("functional_seed", "bootstrap_seed"):
         _integer(p.evaluation[name], f"evaluation.{name}", 0)
         stream_seed(p.evaluation[name], name)

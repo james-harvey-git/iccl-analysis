@@ -50,6 +50,13 @@ evaluation:
   bootstrap_replicates: 1000 # Resample whole episodes for 95% confidence intervals.
   bootstrap_seed: 0
   results_dir: null          # null writes <Hydra run dir>/probe-results.
+  gdn:
+    enabled: true            # Include source GDN after each task's 32 demonstrations.
+    checkpoint: null         # null resolves the GDN checkpoint from captured provenance.
+    backend: auto            # auto | reference | fla; preserve full recurrent + conv state.
+    precision: auto          # auto | fp32 | bf16; recorded separately from probe precision.
+    batch_size: 16           # Episodes processed together; independent of probe batching.
+    query_batch_size: 128    # Independent fresh queries branched from the same task-end state.
 
 benchmark:
   capture_first: false       # true calls the production capture stage before timing training.

@@ -18,6 +18,8 @@ from iccl.analysis.probe_config import (
     validate_probe_config,
 )
 from iccl.analysis.probe_dataset import CapturedDataset, file_digest
+from iccl.analysis.probe_functional import functional_errors, functional_inputs, functional_targets
+from iccl.analysis.probe_gdn import GDNFunctionalEvaluator
 from iccl.analysis.probe_loss import aligned_targets, parameter_errors
 from iccl.analysis.probe_matching import Assignment, AssignmentSolver
 from iccl.analysis.probe_results import (
@@ -37,7 +39,6 @@ from iccl.analysis.probe_training import probe_loader
 from iccl.analysis.probes import make_decoder
 from iccl.checkpoints import source_from_checkpoint
 from iccl.data.dataset import sequence_rng
-from iccl.data.teacher import ModulePool, teacher_forward
 from iccl.evaluation.metrics import BASE_MSE_FLOOR
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import resolve_autocast_dtype
@@ -59,37 +60,21 @@ def functional_reconstruction(
     modules = predictions[:, READOUT_FEATURES:].reshape(-1, *MODULE_SHAPE)
     composed = np.einsum("bmih,btm->btih", modules, coefficients)
     readout = predictions[:, :READOUT_FEATURES].reshape(-1, 16, 16)
-    mse = np.empty((len(predictions), tasks), np.float64)
-    variance = np.empty_like(mse)
-    for episode, index in enumerate(batch["episode_index"]):
-        inputs = (
-            sequence_rng(seed, int(index))
-            .uniform(-1, 1, size=(tasks, inputs_per_task, 16))
-            .astype(np.float32)
-        )
-        pool = ModulePool(
-            [batch["world_modules"][episode]],
-            [batch["world_biases"][episode]],
-            batch["world_readout"][episode],
-        )
+    inputs = np.stack(
+        [
+            functional_inputs(int(index), tasks, inputs_per_task, seed)
+            for index in batch["episode_index"]
+        ]
+    )
+    decoded = np.empty_like(inputs)
+    for episode in range(len(predictions)):
         for task in range(tasks):
-            original = teacher_forward(pool, batch["latents"][episode, task], inputs[task]).astype(
-                np.float64
-            )
             hidden = np.maximum(
-                inputs[task] @ composed[episode, task, :16] + composed[episode, task, 16], 0
+                inputs[episode, task] @ composed[episode, task, :16] + composed[episode, task, 16],
+                0,
             )
-            decoded = (hidden @ readout[episode]).astype(np.float64)
-            if not np.isfinite(decoded).all():
-                raise FloatingPointError("nonfinite oracle-coefficient functional reconstruction")
-            mse[episode, task] = ((decoded - original) ** 2).mean()
-            variance[episode, task] = ((original - original.mean(axis=0)) ** 2).mean()
-    return {
-        "functional_mse_by_task": mse,
-        "functional_nmse_by_task": mse / np.maximum(variance, BASE_MSE_FLOOR),
-        "functional_output_variance": variance,
-        "functional_variance_floored": variance < BASE_MSE_FLOOR,
-    }
+            decoded[episode, task] = hidden @ readout[episode]
+    return functional_errors(decoded, functional_targets(batch, inputs))
 
 
 def score_predictions(
@@ -202,10 +187,14 @@ def summarize_scores(
         **{f"rank_{rank}": ranks == rank for rank in np.unique(ranks)},
     }
     result: dict[str, Any] = {}
-    for label in ("decoder", "zero"):
+    for label in ("decoder", "zero", *(("gdn",) if "gdn_functional_mse_by_task" in arrays else ())):
         report = {}
         for group, selected in groups.items():
-            measurements = {name: arrays[f"{label}_{name}"][selected] for name in metrics}
+            measurements = {
+                name: arrays[f"{label}_{name}"][selected]
+                for name in metrics
+                if f"{label}_{name}" in arrays
+            }
             for name in ("functional_mse", "functional_nmse"):
                 measurements[name] = measurements[f"{name}_by_task"].mean(axis=1)
             report[group] = {
@@ -223,6 +212,7 @@ def summarize_scores(
                         replicates=replicates,
                     )
                     for exposure in np.unique(arrays["occurrence_count"][selected])
+                    if f"{label}_module_mse_by_module" in arrays
                 },
                 "variance_floored_tasks": int(
                     arrays[f"{label}_functional_variance_floored"][selected].sum()
@@ -260,8 +250,16 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
         e.functional_seed, f"functional/{dataset.manifest['dataset_id']}/{e.split}"
     )
     bootstrap_seed = stream_seed(e.bootstrap_seed, "episode-bootstrap")
+    log_config = tracking_config(
+        cfg, dataset.manifest, "eval", training_config=checkpoint["config"]
+    )
+    log_config.functional_evaluation = {
+        "stream_seed": functional_seed,
+        "inputs_per_task": int(e.functional_inputs_per_task),
+        "split_signature": dataset.signature,
+    }
     logger = RunLogger(
-        tracking_config(cfg, dataset.manifest, "eval", training_config=checkpoint["config"]),
+        log_config,
         out_dir,
         job_type="probe-eval",
         source=source_from_checkpoint(checkpoint),
@@ -269,6 +267,13 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
     )
     buffers: dict[str, list[np.ndarray]] = {}
     try:
+        gdn = (
+            GDNFunctionalEvaluator(dataset.manifest, e.split, e.gdn, device)
+            if e.gdn.enabled
+            else None
+        )
+        if gdn is not None:
+            log_config.gdn_functional_evaluation = gdn.metadata
         with AssignmentSolver(p.solver.num_threads, p.solver.cache_dir) as solver:
             logger.start()
             loader = probe_loader(
@@ -295,8 +300,18 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                         functional_seed=functional_seed,
                     )
                     measured.update({f"{label}_{key}": value for key, value in scores.items()})
+                if gdn is not None:
+                    scores = gdn.score(
+                        cpu, inputs_per_task=e.functional_inputs_per_task, seed=functional_seed
+                    )
+                    measured.update({f"gdn_{key}": value for key, value in scores.items()})
                 for key, value in measured.items():
                     buffers.setdefault(key, []).append(value)
+                print(
+                    f"probe evaluation: {int(cpu['episode_index'][-1]) + 1:,}"
+                    f"/{len(dataset):,} episodes",
+                    flush=True,
+                )
             arrays = {key: np.concatenate(values) for key, values in buffers.items()}
             summary = summarize_scores(
                 arrays, seed=bootstrap_seed, replicates=e.bootstrap_replicates
@@ -325,6 +340,7 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
                 "solver": solver.identity,
                 "training_solver": checkpoint["solver"],
                 "functional_diagnostic": "oracle-coefficient functional reconstruction",
+                "gdn_functional_evaluation": None if gdn is None else gdn.metadata,
                 "functional_inputs_per_task": int(e.functional_inputs_per_task),
                 "functional_seed": int(e.functional_seed),
                 "functional_stream_seed": functional_seed,

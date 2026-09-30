@@ -61,11 +61,24 @@ def test_capture_train_interrupted_resume_and_evaluate(
         torch.testing.assert_close(trainer.next_batch()["episode_index"], next_indices)
     probe_cfg.probe.training.num_workers = 0
     probe_cfg.probe.evaluation.checkpoint = str(tmp_path / "interrupted/checkpoints/best.pt")
+    best = torch.load(probe_cfg.probe.evaluation.checkpoint, weights_only=False)
+    best["wandb_run"] = {
+        "entity": "lab",
+        "project": "probes",
+        "run_id": "probe123",
+        "name": "Cosine",
+    }
+    torch.save(best, probe_cfg.probe.evaluation.checkpoint)
+    started = []
+    monkeypatch.setattr(RunLogger, "start", lambda self: started.append(self))
     dashboard = Mock()
     monkeypatch.setattr(RunLogger, "log_probe_evaluation", dashboard)
     result = evaluate_probe(probe_cfg, tmp_path / "evaluation")
     metadata, arrays, summary = read_results(result)
     assert metadata["split"] == "test"
+    assert started[0].source.run_id == "probe123"
+    assert metadata["probe_training_run"]["run_id"] == "probe123"
+    assert started[0].cfg.functional_evaluation.stream_seed == metadata["functional_stream_seed"]
     assert arrays["decoder_module_mse_by_module"].shape == (2, 4)
     assert summary["decoder"]["all"]["n_episodes"] == 2
     assert (result / "plots/reconstruction-by-exposure.png").is_file()
@@ -75,7 +88,12 @@ def test_capture_train_interrupted_resume_and_evaluate(
     metrics, rows, figures, step = dashboard.call_args.args
     assert step == metadata["step"] == expected["best_step"]
     assert dashboard.call_args.kwargs == {"namespace": "probe/test"}
-    assert len(metrics) == 14 and len(figures) == 5
+    assert len(metrics) == 16 and len(figures) == 5
+    assert arrays["gdn_functional_nmse_by_task"].shape == (2, 7)
+    assert metadata["gdn_functional_evaluation"]["queries_independent"]
+    np.testing.assert_array_equal(
+        arrays["gdn_functional_output_variance"], arrays["decoder_functional_output_variance"]
+    )
 
     def row_key(row: dict) -> tuple:
         return (

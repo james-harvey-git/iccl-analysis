@@ -104,7 +104,7 @@ uv run python scripts/capture_probe_dataset.py \
 
 Defaults are 10,000 train / 1,000 validation / 1,000 test episodes. Reference-width
 arrays need about **5.98 GiB** before filesystem overhead; capture prints an estimate.
-Only capture needs counts, dataset seed and source GDN. Consumers read the manifest.
+Only capture needs counts and dataset seed. Consumers read the manifest.
 Capture reports progress to stdout and writes `capture.json`; it never creates a
 W&B run, including when resolving a `wandb://` source checkpoint. Training and
 evaluation record the actual dataset identity, counts and capture settings from
@@ -242,7 +242,11 @@ uv run python scripts/plotting/plot_probe.py \
 ```
 
 Evaluation restores decoder kind and loss weight from the probe checkpoint. It
-needs no source GDN or capability bundle. Use a fresh results directory. The
+resolves the source GDN from the captured provenance to score matched functional
+queries; no capability bundle is needed. Override `probe.evaluation.gdn.checkpoint`
+with a local checkpoint or `wandb://` reference when the captured path is unavailable.
+Its model digest must match the captured GDN. Set `probe.evaluation.gdn.enabled=false`
+to score only the decoder. Use a fresh results directory. The
 saved plotting path checks checksums and comparison identities. Evaluation
 precision defaults to auto (BF16 CUDA, FP32 otherwise).
 
@@ -270,11 +274,14 @@ Plotly panels under `probe/test/figures/` (or `probe/validation/figures/`):
 - Cumulative distributions of episode parameter and functional errors.
 - Reconstruction errors by observed latent rank, with group sizes and confidence intervals.
 
+Functional panels also include the source GDN when enabled, including the task,
+episode-distribution and latent-rank plots. Parameter panels contain no GDN
+parameter error: the GDN predicts outputs rather than teacher parameters.
 Each panel includes the zero-output baseline and identifies the evaluated decoder
 or control. Hover labels expose exact estimates, intervals or episode IDs as
 appropriate. The matching `probe/<split>/summary` table includes all position and
 rank/exposure estimates, interval bounds, module/episode counts and floored-variance counts.
-All-population scalar means are logged under `probe/<split>/{decoder,zero}/`
+All-population scalar means are logged under `probe/<split>/{decoder,zero,gdn}/`
 at the evaluated checkpoint's training step. These dashboard outputs use the
 saved measurements and intervals; they do not refit or realign predictions.
 The same five panels are also saved as interactive HTML, including when W&B is
@@ -294,6 +301,22 @@ change the alignment or enter training. This does not measure coefficient recove
 or task membership prediction. Its task-position curve is a diagnostic of the
 reconstructed functions, not a positional decoding objective. Compare separately
 trained constant and shuffled-target controls, not only zero output.
+
+**Matched GDN functional evaluation** regenerates the same indexed episodes and
+checks their raw teachers and task coefficients against the captured metadata.
+After each task's 32 demonstrations, it branches independent fresh input queries
+from the complete GDN state, including short-convolution history. Each query uses
+the exact same input and output-variance denominator as the probe diagnostic.
+No query labels are revealed, queries cannot update one another, and the original
+episode continues from its untouched task-end state. The final boundary remains
+part of probe state capture; these GDN queries occur before the next boundary.
+
+The curve measures GDN acquisition after each task, whereas the probe reconstructs
+from final-episode matrices and receives oracle coefficients. The curves provide
+behavioral context, not a strict bound on decodability or a matched retention test.
+Precision, backend, checkpoint digest and this timing/cueing protocol are recorded
+in the result metadata and W&B config. Separate episode/query batch sizes bound
+memory, without changing which examples the GDN observes.
 
 ## Full-decoder cluster benchmark
 

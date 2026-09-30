@@ -28,7 +28,10 @@ from iccl.analysis.probe_targets import PROTOCOL, TARGET_LAYOUT, flat_targets
 
 
 @pytest.mark.parametrize("control", ["none", "constant", "shuffled_targets"])
-def test_dashboard_figures_use_saved_episode_statistics_and_baselines(control: str) -> None:
+@pytest.mark.parametrize("include_gdn", [False, True])
+def test_dashboard_figures_use_saved_episode_statistics_and_baselines(
+    control: str, include_gdn: bool
+) -> None:
     metadata = {
         "control": control,
         "split": "validation",
@@ -50,6 +53,10 @@ def test_dashboard_figures_use_saved_episode_statistics_and_baselines(control: s
         for metric in ("functional_mse_by_task", "functional_nmse_by_task"):
             arrays[f"{label}_{metric}"] = base[:, None] * np.arange(1, 8)[None, :]
         arrays[f"{label}_functional_variance_floored"] = np.zeros((4, 7), dtype=bool)
+    if include_gdn:
+        for metric in ("functional_mse_by_task", "functional_nmse_by_task"):
+            arrays[f"gdn_{metric}"] = arrays[f"decoder_{metric}"] * 0.4
+        arrays["gdn_functional_variance_floored"] = np.zeros((4, 7), dtype=bool)
     summary = summarize_scores(arrays, seed=42, replicates=100)
     figures = probe_evaluation_figures(metadata, arrays, summary)
     prefix = "probe/validation/figures/"
@@ -78,6 +85,14 @@ def test_dashboard_figures_use_saved_episode_statistics_and_baselines(control: s
     )
     assert module[1]["customdata"][0][0] == 4
     assert module[1]["customdata"][0][3] == 4
+    if include_gdn:
+        traces = figures[prefix + "functional_by_task"].to_plotly_json()["data"]
+        gdn_means = [t for t in traces if t.get("name") == "GDN after 32 demos/task"]
+        assert len(gdn_means) == 2
+        np.testing.assert_allclose(gdn_means[1]["y"], arrays["gdn_functional_nmse_by_task"].mean(0))
+        assert sum(bool(t.get("showlegend")) for t in gdn_means) == 1
+        assert "joint_mse" not in summary["gdn"]["all"]["metrics"]
+        assert summary["gdn"]["all"]["exposure"] == {}
     rows = probe_summary_rows(summary)
     singleton = next(
         row for row in rows if row["population"] == "rank_3" and row["metric"] == "joint_mse"

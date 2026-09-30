@@ -52,6 +52,7 @@ def gated_delta_rule(
     backend: Backend = "auto",
     return_states: bool = False,
     return_final_state: bool = False,
+    initial_state: Float[torch.Tensor, "batch heads value_dim key_dim"] | None = None,
 ) -> tuple[
     Float[torch.Tensor, "batch seq heads value_dim"],
     Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
@@ -63,9 +64,15 @@ def gated_delta_rule(
     and, when ``return_states`` (reference backend only), the per-step state
     trajectory. ``return_final_state`` instead returns the terminal matrix on
     either backend, in ``[batch, heads, value_dim, key_dim]`` order.
+    ``initial_state`` resumes from that layout instead of an empty memory.
     """
     if return_states and return_final_state:
         raise ValueError("request either a state trajectory or a final state, not both")
+    if initial_state is not None and (
+        initial_state.shape != (q.shape[0], q.shape[2], v.shape[-1], q.shape[-1])
+        or initial_state.device != q.device
+    ):
+        raise ValueError("initial_state must match the batch, head dimensions and device")
     match resolve_backend(backend, q.device):
         case "fla":
             if return_states:
@@ -91,6 +98,7 @@ def gated_delta_rule(
                 allow_neg_eigval=allow_neg_eigval,
                 state_v_first=True,
                 output_final_state=return_final_state,
+                initial_state=initial_state,
             )
             return output, final_state if return_final_state else None
         case "reference":
@@ -107,4 +115,5 @@ def gated_delta_rule(
                 allow_neg_eigval=allow_neg_eigval,
                 return_states=return_states,
                 return_final_state=return_final_state,
+                initial_state=initial_state,
             )

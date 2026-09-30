@@ -19,6 +19,7 @@ agrees with.
 import pytest
 import torch
 
+from iccl.analysis.gdn_inference import continue_gdn
 from iccl.models.model import GDNModel
 from iccl.models.ops import Backend, gated_delta_rule
 
@@ -181,4 +182,27 @@ def test_full_model_terminal_state_parity(precision: torch.dtype) -> None:
     cap = 0.04 if precision == torch.bfloat16 else 0.01
     assert rms_ratio(actual.preds, ref.preds) <= cap
     for state, truth in zip(actual.final_states, ref.final_states, strict=True):
+        assert rms_ratio(state, truth) <= cap
+
+
+@pytest.mark.parametrize("precision", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_full_model_continuation_and_branched_query_parity(precision: torch.dtype) -> None:
+    """Incomplete kernel chunks must not write padding after the prefix or query."""
+    torch.manual_seed(21)
+    model = GDNModel(d_in=16, d_out=16, d_model=64, n_layers=2, n_heads=2, d_ffw=128).cuda()
+    tokens = torch.randn(2, 131, 16, device="cuda")
+    types = torch.randint(0, 3, (2, 131), device="cuda")
+    with torch.autocast("cuda", dtype=precision, enabled=precision == torch.bfloat16):
+        reference = model(tokens, types, backend="reference", capture_final=True)
+        cache, pieces = None, []
+        for start, stop in ((0, 65), (65, 130), (130, 131)):
+            output, cache = continue_gdn(
+                model, tokens[:, start:stop], types[:, start:stop], cache, backend="fla"
+            )
+            pieces.append(output)
+    assert cache is not None and reference.final_states is not None
+    cap = 0.04 if precision == torch.bfloat16 else 0.01
+    assert rms_ratio(torch.cat(pieces, dim=1), reference.preds) <= cap
+    for state, truth in zip(cache.states, reference.final_states, strict=True):
         assert rms_ratio(state, truth) <= cap

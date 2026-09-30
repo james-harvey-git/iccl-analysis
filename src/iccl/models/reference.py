@@ -46,6 +46,7 @@ def gated_delta_rule_reference(
     allow_neg_eigval: bool = False,
     return_states: bool = False,
     return_final_state: bool = False,
+    initial_state: Float[torch.Tensor, "batch heads value_dim key_dim"] | None = None,
 ) -> tuple[
     Float[torch.Tensor, "batch seq heads value_dim"],
     Float[torch.Tensor, "batch ... heads value_dim key_dim"] | None,
@@ -78,7 +79,11 @@ def gated_delta_rule_reference(
     batch, seq, heads, key_dim = k.shape
     value_dim = v.shape[-1]
     scale = key_dim**-0.5
-    state = k.new_zeros(batch, heads, value_dim, key_dim)
+    state = (
+        k.new_zeros(batch, heads, value_dim, key_dim)
+        if initial_state is None
+        else initial_state.to(compute_dtype)
+    )
     outputs: list[torch.Tensor] = []
     states: list[torch.Tensor] | None = [] if return_states else None
     for t in range(seq):
