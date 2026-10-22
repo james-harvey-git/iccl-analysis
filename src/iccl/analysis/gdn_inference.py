@@ -34,8 +34,13 @@ def continue_gdn(
     cache: GDNCache | None = None,
     *,
     backend: Backend = "auto",
+    capture: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, GDNCache]:
     """Resume before the first supplied token, leaving the input cache untouched.
+
+    ``capture`` receives each representation at the final supplied token,
+    with a layer axis after the batch axis. Native head reads precede output
+    normalization/gating; MLP hidden values follow SwiGLU gating.
 
     Mirrors the model's frozen forward path; convolution histories accompany
     the matrices because the matrices alone are not a sufficient continuation
@@ -49,6 +54,9 @@ def continue_gdn(
         raise ValueError("cache must contain every model layer")
     h = model.embed(tokens, token_type)
     states, convolutions = [], []
+    features: dict[str, list[torch.Tensor]] = {
+        key: [] for key in ("residual_after_mixer", "residual_after_mlp", "mlp_hidden", "head_read")
+    }
     for layer, block in enumerate(cast(list[GDNBlock], list(model.blocks))):
         mixer = block.mixer
         x = block.mixer_norm(h)
@@ -83,13 +91,26 @@ def continue_gdn(
             return_final_state=True,
         )
         assert state is not None
+        if capture is not None:
+            features["head_read"].append(mixed[:, -1].clone())
         if mixer.use_gate:
             gate = mixer.g_proj(x).reshape(*x.shape[:2], mixer.n_heads, mixer.head_v_dim)
             mixed = mixer.o_norm(mixed, gate)
         else:
             mixed = mixer.o_norm(mixed)
         h = h + mixer.o_proj(mixed.flatten(-2))
-        h = h + block.mlp(block.mlp_norm(h))
+        if capture is None:
+            h = h + block.mlp(block.mlp_norm(h))
+        else:
+            features["residual_after_mixer"].append(h[:, -1].clone())
+            normalized = block.mlp_norm(h)
+            hidden = F.silu(block.mlp.gate_proj(normalized)) * block.mlp.up_proj(normalized)
+            features["mlp_hidden"].append(hidden[:, -1].clone())
+            h = h + block.mlp.down_proj(hidden)
+            features["residual_after_mlp"].append(h[:, -1].clone())
         states.append(state)
         convolutions.append(tails)
+    if capture is not None:
+        capture.update({key: torch.stack(values, dim=1) for key, values in features.items()})
+        capture["state"] = torch.stack(states, dim=1)
     return model.head(model.final_norm(h)), GDNCache(states, convolutions)
