@@ -41,8 +41,9 @@ are the median of those two repetitions.
 Both solvers converged to the configured relative residual tolerance of 1e−6.
 The direct and CG objectives agreed to better than 1e−12 in these checks.
 Small-n direct-solve timings do not predict the cost of larger-n streaming CG.
-The full default capture is approximately 191 GiB at this checkpoint's dimensions;
-select confirmation budgets after measuring a representative larger training set.
+The 1,024/512/512/512 capture plan at this pilot was approximately 191 GiB at this
+checkpoint's dimensions. The subsequent [scale calibration](task-vector-calibration.md)
+sets the development budgets and measures representative larger training sets.
 
 ## Validation and provenance
 

@@ -127,7 +127,10 @@ Useful settings:
 | `training.monitoring` | Fixed monitor subsets, metric cadence and CG checkpoint cadence |
 | `evaluation.exposure` | Predeclared bins and minimum trial/world coverage |
 
-The default capture can occupy hundreds of GiB for a full checkpoint. Capture
+The default 1,024/512/2,048/2,048 train/validation/familiar/unseen budgets use about
+421 GiB of raw captures for the source checkpoint across eight worlds and three
+positions, excluding fitted probes. These budgets and the 4 GiB direct-solver
+allowance follow the [scale calibration](task-vector-calibration.md). Capture
 prints a feature-storage estimate before processing trials. `probe=pilot` keeps
 the full checkpoint dimensions and D=32 but uses one world and 64/32/32/32 trials.
 `probe=smoke` uses D=4 and two worlds. Neither is a confirmation experiment.
@@ -185,8 +188,9 @@ See the [Isambard guide](../scripts/cluster/isambard/README.md). Workers own
 disjoint worlds, with one visible GPU each; there is no DDP. The submission helper
 limits the study to eight GPUs and queues capture → fit → evaluation with
 `afterok` dependencies. Explicit memory is **per node**, not per worker.
-The [development pilot record](task-vector-pilot.md) contains measured timings,
-memory use and validation outcomes for the source checkpoint.
+The [development pilot record](task-vector-pilot.md) contains the initial correctness
+and dispatch checks. The [scale calibration](task-vector-calibration.md) records
+1,024-trial solver costs, validation learning curves and exposure-cell coverage.
 
 The bounded benchmark refuses an existing dataset and limits worlds/trials.
 It measures all three stages and repeated direct/CG fits of full state and MLP

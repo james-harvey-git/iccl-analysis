@@ -1,4 +1,4 @@
-# Development starting values; confirmation budgets follow measured pilot costs.
+# Development budgets; freeze the protocol before fresh confirmation worlds.
 dataset:
   path: ${experiment.root}/${experiment.phase}/dataset
   checkpoint: null               # Required: immutable local checkpoint or wandb:// artifact.
@@ -11,7 +11,8 @@ dataset:
   target_positions: [1, 5, 9]
   constituent_pair_split: {train: 16, validation: 6, test_unseen: 6}
   # Per world AND target position; captures/representations share these trials.
-  trajectories: {train: 1024, validation: 512, test_familiar: 512, test_unseen: 512}
+  # Held-out counts support the exposure cells across the development worlds.
+  trajectories: {train: 1024, validation: 512, test_familiar: 2048, test_unseen: 2048}
   shard_size: 256
   capture:
     points: [final_input, final_answer, branch_input]
@@ -37,7 +38,8 @@ training:
   representations: all_captured  # Or a mapping using the capture representation syntax.
   fit_intercept: true
   standardize_features: true
-  l2_grid: [1.0e-5, 1.0e-3, 0.1, 1.0, 10.0]
+  # Strong penalties also let weak-feature and shuffled controls approach the mean.
+  l2_grid: [1.0e-5, 1.0e-3, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0]
   controls: [training_mean, shuffled_targets, untrained, observations]
   shuffled_seed: 0
   sample_sizes: []                # Development-only nested budgets; full budget always included.
@@ -45,7 +47,7 @@ training:
     method: auto                 # auto | direct | cg
     dtype: auto                  # auto: float64 on CPU/CUDA, float32 on MPS.
     direct_max_dimension: 2048
-    max_working_mb: 1024          # Dense designs + system matrices must fit this bound.
+    max_working_mb: 4096          # Dense designs + system matrices must fit this bound.
     max_iterations: 500
     relative_tolerance: 1.0e-6
     require_convergence: true
