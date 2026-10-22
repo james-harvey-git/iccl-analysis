@@ -123,8 +123,9 @@ def test_feature_groups_and_configuration_contract(probe_cfg):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA correctness check")
+@pytest.mark.parametrize("precision", [None, torch.bfloat16])
 @torch.inference_mode()
-def test_cuda_terminal_capture_matches_reference(probe_cfg):
+def test_cuda_terminal_capture_matches_reference(probe_cfg, precision):
     from iccl.analysis.capture import capture_trials
     from iccl.analysis.probe_worlds import make_trial, make_world
     from iccl.checkpoints import checkpoint_model_config
@@ -156,11 +157,11 @@ def test_cuda_terminal_capture_matches_reference(probe_cfg):
     ]
     families = ["state", "head_read", "mlp_hidden", "residual_after_mixer", "residual_after_mlp"]
     reference = capture_trials(
-        model,
+        model if precision is None else model.cuda(),
         trials,
         backend="reference",
-        device=torch.device("cpu"),
-        dtype=None,
+        device=torch.device("cpu" if precision is None else "cuda"),
+        dtype=precision,
         families=families,
     )
     accelerated = capture_trials(
@@ -168,7 +169,7 @@ def test_cuda_terminal_capture_matches_reference(probe_cfg):
         trials,
         backend="fla",
         device=torch.device("cuda"),
-        dtype=torch.bfloat16,
+        dtype=precision,
         families=families,
     )
     for key in reference:
