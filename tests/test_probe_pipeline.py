@@ -132,7 +132,9 @@ def test_cuda_terminal_capture_matches_reference(probe_cfg):
     from iccl.models.model import model_from_config
 
     checkpoint = torch.load(probe_cfg.probe.dataset.checkpoint, weights_only=False)
-    model = model_from_config(OmegaConf.create(checkpoint_model_config(checkpoint))).eval()
+    architecture = OmegaConf.create(checkpoint_model_config(checkpoint))
+    architecture.model.backend = "reference"
+    model = model_from_config(architecture).eval()
     model.load_state_dict(checkpoint["model"])
     world = make_world(
         TeacherConfig(
