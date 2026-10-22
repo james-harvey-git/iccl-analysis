@@ -67,7 +67,7 @@ the reference recurrence even when the host has CUDA available.
 
 The GDN backward workaround is separate from probe training: state capture runs
 the frozen GDN without gradients, and the linear decoder has an ordinary PyTorch
-backward pass. The decoder's native assignment solver requires a C++17 compiler.
+backward pass.
 
 ## Usage
 
@@ -78,17 +78,14 @@ uv run python scripts/make_eval_sets.py
 uv run python scripts/train.py
 ```
 
-## Linear module decoder
+## Fixed-world task-vector probes
 
-The [module-decoder guide](docs/module-decoder.md) covers final-memory capture,
-the full affine decoder with exact native symmetry matching, controls, resumable
-training, held-out reconstruction, saved-result plots and the cluster benchmark.
-The probe predicts an unordered set of four modules and a fixed first readout
-block (1,344 outputs), using M=4, T=7, D=32 and capture after a final boundary.
-The `module-set-decoder-v1` protocol requires fresh M=4 captures and new training;
-old occurrence-based captures and checkpoints cannot be reused.
-These analyses use `configs/probe.yaml` and separate captured datasets under
-`outputs/module-decoder/`.
+The [task-vector probe guide](docs/task-vector-probes.md) describes separate
+capture, ridge fitting and evaluation stages. Probes decode weighted constituent
+vectors within fixed teacher worlds at the final input, final answer and a
+discarded fresh query. Results average worlds equally and include prior-exposure
+heatmaps, paired controls and live fitting diagnostics in one W&B study run.
+Use `configs/probe.yaml`; start with `probe=smoke` or the bounded `probe=pilot`.
 
 ## Frozen evaluation data
 

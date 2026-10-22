@@ -1,7 +1,6 @@
 #!/bin/bash
 # Usage: sbatch scripts/cluster/probe.slurm capture|train|eval|benchmark [Hydra overrides]
 # Create logs/slurm before submitting. Resource settings can be overridden with sbatch.
-# The eight solver threads, two loader workers and one PyTorch thread fit twelve CPUs.
 #SBATCH --job-name=iccl-probe
 #SBATCH --partition=compute
 #SBATCH --time=12:00:00
@@ -31,4 +30,4 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 echo "Job ${SLURM_JOB_ID:-local}; commit $(git rev-parse --short HEAD); script ${probe_script}"
 nvidia-smi
-uv run python "scripts/${probe_script}" "wandb.mode=${WANDB_MODE:-online}" "$@"
+srun --kill-on-bad-exit=1 uv run --locked --no-sync python "scripts/${probe_script}" "wandb.mode=${WANDB_MODE:-online}" "$@"

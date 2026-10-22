@@ -1,38 +1,53 @@
-"""Captured data and checkpoint lineage take precedence over launch defaults."""
-
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
-from omegaconf import DictConfig
-
-from iccl.analysis.capture import capture_dataset
-from iccl.analysis.probe_config import resolved_config
-from iccl.analysis.probe_dataset import read_manifest
-from iccl.analysis.probe_tracking import tracking_config
-from iccl.checkpoints import SourceRun
+from iccl.analysis.probe_tracking import StudyReporter, WorkerEvents
 
 
-def test_reused_dataset_and_evaluation_record_actual_training_settings(
-    probe_cfg: DictConfig,
-    tmp_path: Path,
-) -> None:
-    capture_dataset(probe_cfg, tmp_path / "capture")
-    manifest = read_manifest(probe_cfg.probe.dataset.path)
-    training = resolved_config(probe_cfg)
-    training["probe"]["training"]["schedule"] = "cosine"
-    training["seed"] = 7
-    probe_cfg.probe.dataset.counts.train = 999
-    probe_cfg.probe.dataset.shard_size = 888
-    probe_cfg.probe.loss.readout_weight = 17
-    cfg = tracking_config(probe_cfg, manifest, "eval", training_config=training)
-    assert cfg.probe.dataset.counts.train == 4
-    assert cfg.probe.dataset.shard_size == 3
-    assert cfg.probe.training.schedule == "cosine"
-    assert cfg.seed == 7
-    assert cfg.probe.loss.readout_weight == 1
-    assert cfg.wandb.name == "Cosine | full | seed 7 | eval"
-    assert cfg.captured_dataset.dataset_id == manifest["dataset_id"]
-    assert probe_cfg.probe.dataset.counts.train == 999
-    assert probe_cfg.probe.training.schedule == "constant"
-    prior = SourceRun("entity", "project", "id", "existing run name", 50)
-    resumed = tracking_config(probe_cfg, manifest, "train", resume_run=prior)
-    assert resumed.wandb.name == prior.name
+def test_offline_replay_single_identity_and_deduplicated_restart(probe_cfg, monkeypatch):
+    cfg = probe_cfg
+    root = Path(cfg.experiment.root) / cfg.experiment.phase
+    events = WorkerEvents(root, "train", "first", 0)
+    events.emit("fit_complete", world=0, fit_id="example")
+    events.close()
+    offline = StudyReporter(cfg, root)
+    offline.flush()
+    offline.finish(success=True)
+    sent, identities = [], []
+
+    class Run:
+        step = 0
+        config = SimpleNamespace(update=lambda *a, **k: None)
+
+        def log(self, payload, *, step):
+            assert step >= self.step
+            sent.append(payload)
+            self.step = step + 1
+
+        def finish(self, **kwargs):
+            pass
+
+    run = Run()
+
+    def initialize(**kwargs):
+        identities.append(kwargs["id"])
+        return run
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=initialize))
+    cfg.wandb.mode = "online"
+    first = StudyReporter(cfg, root)
+    first.flush()
+    first.flush()
+    first.finish(success=True)
+    assert len(sent) == 1
+    events = WorkerEvents(root, "eval", "second", 0)
+    events.emit("world_complete", world=0)
+    events.close()
+    second = StudyReporter(cfg, root)
+    second.flush()
+    second.finish(success=True)
+    assert len(sent) == 2
+    assert len(set(identities)) == 1
+    assert sent[-1]["progress/completed_fits"] == 1
+    assert sent[0]["phase"] == "development"

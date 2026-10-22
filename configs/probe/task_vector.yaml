@@ -1,0 +1,83 @@
+# Development starting values; confirmation budgets follow measured pilot costs.
+dataset:
+  path: ${experiment.root}/${experiment.phase}/dataset
+  checkpoint: null               # Required: immutable local checkpoint or wandb:// artifact.
+  num_worlds: 8
+  modules_per_world: 8
+  active_modules_per_task: 2
+  tasks_per_episode: 9
+  demos_per_task: 32
+  weighting: discrete
+  target_positions: [1, 5, 9]
+  constituent_pair_split: {train: 16, validation: 6, test_unseen: 6}
+  # Per world AND target position; captures/representations share these trials.
+  trajectories: {train: 1024, validation: 512, test_familiar: 512, test_unseen: 512}
+  shard_size: 256
+  capture:
+    points: [final_input, final_answer, branch_input]
+    models: [trained, untrained]
+    untrained_seed: 1
+    representations:
+      residual_after_mixer: [each_layer, all_layers]
+      residual_after_mlp: [each_layer, all_layers]
+      mlp_hidden: [each_layer, all_layers]
+      state: [each_head, each_layer, all_layers]
+      head_read: [each_head, each_layer, all_layers]
+    head_groups: {}               # Named groups of [layer, head] pairs, both one-based.
+    store_observations: true
+    batch_size: 32
+    backend: auto                 # auto | reference | fla
+    precision: auto               # auto | fp32 | bf16; captured arrays are float32.
+    storage_dtype: float32
+    resume: true
+
+training:
+  dataset: ${probe.dataset.path}
+  output: ${experiment.root}/${experiment.phase}/probes
+  representations: all_captured  # Or a mapping using the capture representation syntax.
+  fit_intercept: true
+  standardize_features: true
+  l2_grid: [1.0e-5, 1.0e-3, 0.1, 1.0, 10.0]
+  controls: [training_mean, shuffled_targets, untrained, observations]
+  shuffled_seed: 0
+  sample_sizes: []                # Development-only nested budgets; full budget always included.
+  solver:
+    method: auto                 # auto | direct | cg
+    dtype: auto                  # auto: float64 on CPU/CUDA, float32 on MPS.
+    direct_max_dimension: 2048
+    max_working_mb: 1024          # Dense designs + system matrices must fit this bound.
+    max_iterations: 500
+    relative_tolerance: 1.0e-6
+    require_convergence: true
+    row_batch_size: 256
+  selection: {metric: r2_macro, mode: max, split: validation}
+  monitoring:
+    log_every_iterations: 10
+    validation_every_iterations: 25
+    train_subset_size: 256
+    validation_subset_size: 256
+    checkpoint_every_iterations: 100
+  resume: true
+
+evaluation:
+  dataset: ${probe.dataset.path}
+  probes: ${probe.training.output}
+  output: ${experiment.root}/${experiment.phase}/results
+  splits: [test_familiar, test_unseen]
+  metrics: [r2_macro, active_pair_accuracy, active_coefficient_rmse]
+  bootstrap_unit: world
+  bootstrap_replicates: 2000
+  confidence_level: 0.95
+  exposure:
+    enabled: true
+    count_bins: [0, 1, 2, 3]      # Lower edges: 0 / 1 / 2 / 3+; or exact.
+    min_trials_per_world_cell: 20 # Development starting thresholds; freeze before confirmation.
+    min_worlds_per_cell: 4
+    metrics: [r2_macro, fixed_scale_vector_mse, active_pair_accuracy]
+
+benchmark:
+  max_worlds: 2
+  max_trials_per_split: 128
+  warmup_repeats: 1
+  measured_repeats: 2
+

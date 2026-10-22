@@ -1,4 +1,4 @@
-"""Capture independent teacher episodes and terminal GDN memory for module decoding."""
+"""Capture fixed-world trials at the three end-of-task points."""
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
@@ -10,7 +10,7 @@ from iccl.analysis.capture import capture_dataset
 @hydra.main(version_base=None, config_path="../configs", config_name="probe")
 def main(cfg: DictConfig) -> None:
     report = capture_dataset(cfg, HydraConfig.get().runtime.output_dir)
-    print(f"captured {report['new_episodes']} new episodes at {report['dataset_path']}")
+    print(f"capture complete: {report}")
 
 
 if __name__ == "__main__":

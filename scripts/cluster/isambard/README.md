@@ -1,7 +1,7 @@
 # Isambard GPU jobs
 
-Submit these scripts from the repository root. Each job requests one GPU on one
-node, runs one Python process, and uses the site's default partition and account.
+Submit these scripts from the repository root. Each launcher defaults to one GPU on one
+node and uses the site's default partition and account.
 The scripts explicitly request host memory per node and CPU counts for their
 worker/thread budgets. See
 [Isambard's batch-job guide](https://docs.isambard.ac.uk/user-documentation/guides/slurm/#running-a-single-batch-job).
@@ -22,9 +22,9 @@ or serialization. Explicit requests avoid inheriting an oversized site default.
 Override them with `sbatch --mem=...` before the script name when a workload
 needs a different budget.
 
-The 15-minute capture default targets the reference 12,000-episode dataset.
-For larger datasets, override `--time` before the script name using timings from
-the capture run's `capture.json`; short captures can be dominated by startup.
+The capture default is a bounded starting allocation, not a measured completion
+estimate. Set walltime from the pilot before requesting a larger dataset; cold
+kernel compilation can dominate a short capture.
 
 Slurm records resource requests when a job is submitted; editing a script does
 not change queued jobs. For a pending job, set its per-node memory request in
@@ -87,160 +87,71 @@ sbatch scripts/cluster/isambard/eval.slurm \
   evaluation.suites=all
 ```
 
-## Probe dataset, training and evaluation
+## Fixed-world task-vector probes
 
-The set decoder uses **M=4, T=7, D=32**, with state capture after the final
-boundary and a 1,344-output affine decoder. `module-set-decoder-v1` requires a
-fresh M=4 dataset and new training. Existing M=8 states/checkpoints are rejected;
-leave previous results intact. The [probe guide](../../../docs/module-decoder.md)
-describes the exact matching objective, controls, plots and storage contract.
+The [probe guide](../../../docs/task-vector-probes.md) defines the sampling,
+three independent stages, controls, monitoring and world-averaged reports.
+The scheduler exposes four GPUs per node. The submission helper requests one
+worker per GPU, using a second node for five to eight GPUs. It refuses more than
+eight GPUs, idle workers beyond the world count, or another queued/running probe
+chain for this account. The initial pilot uses **one GPU**.
 
-The following **Bash** block queues a complete pilot with concise automatic W&B names.
-Replace the GDN reference with an immutable artifact version or a local path.
-Run it from the repository checkout. Datasets, Hydra outputs, Slurm logs,
-artifact downloads and the listed caches go directly to `$SCRATCHDIR`; no home
-directory symlink is needed. W&B is explicitly online and full checkpoint/data
-uploads stay disabled. Capture logs to stdout/stderr without creating a W&B run.
-Training and evaluation share a dataset group and link through the probe checkpoint;
-their names describe schedule, control, seed and stage rather than filesystem paths.
+Use scratch for data, results, logs and caches. Keep the existing immutable GDN
+checkpoint reference. From the repository root, this submits three separate
+jobs whose dependencies permit only one stage to run at a time:
 
 ```bash
-bash <<'BASH'
-set -euo pipefail
-: "${SCRATCHDIR:?SCRATCHDIR must point to your Isambard scratch directory}"
-set_probe_gdn='wandb://ENTITY/PROJECT/ARTIFACT:VERSION'  # Or /absolute/path/to/gdn.pt.
-set_probe_root="$SCRATCHDIR/iccl-analysis"
-set_probe_train_count=10000
-set_probe_steps=10000
-set_probe_shard=512
-set_probe_capture_time=00:15:00
-set_probe_capture_mem=32G
-set_probe_train_time=02:00:00
-set_probe_eval_time=01:00:00
-set_probe_run="set-m4t7d32-n${set_probe_train_count}-b128-u${set_probe_steps}-s0-$(date +%Y%m%d-%H%M%S)"
-set_probe_dataset="$set_probe_root/module-decoder/datasets/$set_probe_run"
-set_probe_runs="$set_probe_root/module-decoder/runs/$set_probe_run"
-set_probe_logs="$set_probe_root/logs/slurm"
-
+: "${SCRATCHDIR:?Set the Isambard scratch directory}"
+task_probe_root="$SCRATCHDIR/iccl-analysis/task-vector/pilot-unique"
+task_probe_checkpoint="$PWD/artifacts/weights-variable-surplus-s0-4-400k:v14/step_2900000.pt"
 export WANDB_MODE=online
-export WANDB_CACHE_DIR="$set_probe_root/cache/wandb"
-export WANDB_DATA_DIR="$set_probe_root/cache/wandb-staging"
-export WANDB_ARTIFACT_DIR="$set_probe_root/artifacts"
-export UV_CACHE_DIR="$set_probe_root/cache/uv"
-mkdir -p "$set_probe_logs" "$set_probe_runs" "$WANDB_CACHE_DIR" \
-  "$WANDB_DATA_DIR" "$WANDB_ARTIFACT_DIR" "$UV_CACHE_DIR"
+export WANDB_CACHE_DIR="$SCRATCHDIR/iccl-analysis/cache/wandb"
+export WANDB_DATA_DIR="$SCRATCHDIR/iccl-analysis/cache/wandb-staging"
+export WANDB_ARTIFACT_DIR="$SCRATCHDIR/iccl-analysis/artifacts"
+export UV_CACHE_DIR="$SCRATCHDIR/iccl-analysis/cache/uv"
+export MPLCONFIGDIR="$SCRATCHDIR/iccl-analysis/cache/matplotlib"
+mkdir -p "$WANDB_CACHE_DIR" "$WANDB_DATA_DIR" "$WANDB_ARTIFACT_DIR" \
+  "$UV_CACHE_DIR" "$MPLCONFIGDIR"
 
-set_probe_common=(
-  "probe.dataset.path=$set_probe_dataset"
-  "probe.solver.cache_dir=$set_probe_root/cache/probe-assignment"
-  seed=0
-)
-set_probe_log_args=(
-  "--output=$set_probe_logs/%x_%j.out"
-  "--error=$set_probe_logs/%x_%j.err"
-)
-
-set_probe_capture_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
-  --cpus-per-task=4 "--mem=$set_probe_capture_mem" "--time=$set_probe_capture_time" \
-  scripts/cluster/isambard/capture_probe.slurm \
-  "${set_probe_common[@]}" "probe.capture.checkpoint=$set_probe_gdn" \
-  "probe.dataset.counts.train=$set_probe_train_count" \
-  probe.dataset.counts.validation=1000 probe.dataset.counts.test=1000 \
-  "probe.dataset.shard_size=$set_probe_shard" \
-  "hydra.run.dir=$set_probe_runs/capture")
-set_probe_capture_job=${set_probe_capture_job%%;*}
-
-set_probe_train_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
-  "--dependency=afterok:$set_probe_capture_job" \
-  --cpus-per-task=12 --mem=64G "--time=$set_probe_train_time" \
-  scripts/cluster/isambard/train_probe.slurm \
-  "${set_probe_common[@]}" "probe.training.num_steps=$set_probe_steps" \
-  probe.training.batch_size=128 probe.training.control=none \
-  probe.training.weight_decay=0.003 \
-  "hydra.run.dir=$set_probe_runs/train")
-set_probe_train_job=${set_probe_train_job%%;*}
-
-set_probe_eval_job=$(sbatch --parsable "${set_probe_log_args[@]}" \
-  "--dependency=afterok:$set_probe_train_job" \
-  --cpus-per-task=12 --mem=32G "--time=$set_probe_eval_time" \
-  scripts/cluster/isambard/eval_probe.slurm \
-  "${set_probe_common[@]}" \
-  "probe.evaluation.checkpoint=$set_probe_runs/train/checkpoints/best.pt" \
-  probe.evaluation.split=test \
-  "hydra.run.dir=$set_probe_runs/eval")
-set_probe_eval_job=${set_probe_eval_job%%;*}
-
-printf 'Capture: %s\nTrain: %s\nEval: %s\nDataset: %s\nRuns: %s\n' \
-  "$set_probe_capture_job" "$set_probe_train_job" "$set_probe_eval_job" \
-  "$set_probe_dataset" "$set_probe_runs"
-BASH
+uv run --locked --no-sync python scripts/cluster/isambard/submit_probe.py \
+  --root "$task_probe_root" --checkpoint "$task_probe_checkpoint" --preset pilot \
+  --gpus 1 --cpus-per-task 4 --memory-per-node 32G \
+  --capture-time 00:15:00 --train-time 00:15:00 --eval-time 00:10:00 \
+  experiment.name=task-vector-pilot
 ```
 
-For **500,000 training / 1,000 validation / 1,000 test episodes and 100,000
-updates**, change these values near the top of the same block before submitting:
+The explicit times are pilot bounds, not throughput estimates. The helper saves
+accepted job IDs immediately in `submission.json`; if submission is interrupted,
+inspect that file and `squeue` before resubmitting. Failed dependencies are cancelled.
+The shared study lock also prevents competing W&B writers. Resume uses the same
+study path and scientific settings; rerun the chain only after earlier jobs have
+finished or been deliberately cancelled.
+
+For a bounded end-to-end timing run, submit the benchmark as a single job:
 
 ```bash
-set_probe_train_count=500000
-set_probe_steps=100000
-set_probe_shard=16384
-set_probe_capture_time=02:00:00
-set_probe_capture_mem=64G
-set_probe_train_time=04:00:00
-set_probe_eval_time=01:00:00
+mkdir -p "$SCRATCHDIR/iccl-analysis/logs/slurm"
+sbatch --gpus=1 --ntasks=1 --cpus-per-task=4 --mem=32G --time=00:20:00 \
+  --output="$SCRATCHDIR/iccl-analysis/logs/slurm/%x_%j.out" \
+  --error="$SCRATCHDIR/iccl-analysis/logs/slurm/%x_%j.err" \
+  scripts/cluster/isambard/benchmark_probe.slurm probe=pilot \
+  "experiment.root=$SCRATCHDIR/iccl-analysis/task-vector/timing-unique" \
+  "probe.dataset.checkpoint=$PWD/artifacts/weights-variable-surplus-s0-4-400k:v14/step_2900000.pt" \
+  device=cuda
 ```
 
-These are initial resource allocations, **not measured completion estimates**.
-Rebenchmark this decoder before tightening them. A 16,384-episode shard holds
-about 8.17 GiB of arrays at reference width; capture needs room for buffers and
-write copies. The entire 502,000-episode dataset holds about **250.28 GiB of
-arrays on disk**, plus file overhead. Keep separate room for rolling
-`best.pt`/`last.pt`, atomic checkpoint writes, artifact downloads and caches.
-Scratch quota and host RAM are different limits. Training reads mmap batches;
-it does not allocate 250 GiB of RAM.
+This measures capture, fitting, evaluation/rendering and warmed direct/CG solves.
+The benchmark requires a fresh path so it cannot mistake a resumed stage for
+throughput. Full-dimensional state features are retained. Choose larger
+development and confirmation budgets only after inspecting these measurements.
 
-Capture resume reuses compatible completed shards. To recover an interrupted
-chain, resubmit capture with the **same dataset path and capture settings**, then
-submit new `afterok` dependencies on the new job IDs. For an interrupted training
-run, also pass `probe.training.resume=<train-dir>/checkpoints/last.pt` with the
-same training settings and update budget. Add `wandb.resume=true` to continue the
-online W&B run recorded in that checkpoint; keep it false for the evaluation job,
-which receives its own run. Replayed updates at or before the last uploaded W&B step
-are retained locally, and W&B receives only new steps.
-A dependency on a failed job does not
-become successful when a different job resumes its work. Use a fresh evaluation
-directory if an earlier evaluation already wrote results.
+For multiple workers, request enough worlds and use the helper's `--gpus` flag.
+The `srun` launchers bind exactly one visible GPU per process and shard by world;
+they do not use DDP. Memory requests are total **per node** and must account for
+all workers on that node. Shared numerical artifacts and event streams stay on
+scratch; one coordinator resumes the same W&B run across stages and phases.
 
-The probe checkpoint belongs to the decoder; `probe.capture.checkpoint` refers
-to the frozen GDN used to generate the dataset. To fit the constant or shuffled
-control, submit another training/evaluation pair on the same captured dataset,
-changing `probe.training.control` to `constant` or `shuffled_targets` and giving
-both jobs distinct run directories and W&B names. Evaluation restores the
-control kind from its checkpoint. Test episodes are never used for selection.
-
-## Full-decoder benchmark
-
-Capture a bounded dataset and measure complete decoder updates in one job:
-
-```bash
-: "${SCRATCHDIR:?SCRATCHDIR must be set}"
-set_probe_root="$SCRATCHDIR/iccl-analysis"
-set_probe_benchmark="set-m4t7d32-benchmark-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$set_probe_root/logs/slurm"
-sbatch --mem=64G --time=01:00:00 \
-  "--output=$set_probe_root/logs/slurm/%x_%j.out" \
-  "--error=$set_probe_root/logs/slurm/%x_%j.err" \
-  scripts/cluster/isambard/benchmark_probe.slurm \
-  probe.capture.checkpoint=/path/to/reference-gdn/checkpoint.pt \
-  "probe.dataset.path=$set_probe_root/module-decoder/datasets/$set_probe_benchmark" \
-  "probe.solver.cache_dir=$set_probe_root/cache/probe-assignment" \
-  probe.dataset.counts.train=512 \
-  probe.dataset.counts.validation=64 \
-  probe.dataset.counts.test=64 \
-  probe.benchmark.capture_first=true \
-  "hydra.run.dir=$set_probe_root/module-decoder/runs/$set_probe_benchmark" \
-  'wandb.name=Full decoder | benchmark'
-```
-
-The default benchmark uses the full decoder and batch size 128. Its
-`benchmark.json` records capture time and end-to-end update timings, including
-the exact assignment solver, backward pass and optimizer.
+Keep login-node work to editing, Git, lightweight metadata checks and submission.
+Run model capture, probe fitting, numerical tests and benchmark/render workloads
+inside allocations. Do not update the shared checkout or synchronize its
+environment while a job is using it.

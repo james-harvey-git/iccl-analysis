@@ -1,4 +1,4 @@
-"""Small explicit checkpoint fixtures for the module-decoder integration tests."""
+"""Small explicit checkpoint fixtures for fixed-world task-vector integration checks."""
 
 from pathlib import Path
 
@@ -16,29 +16,26 @@ def probe_cfg(tmp_path: Path) -> DictConfig:
     with initialize_config_dir(config_dir=str(configs), version_base=None):
         cfg = compose(config_name="probe", overrides=["probe=smoke"])
     cfg.device = "cpu"
-    cfg.probe.dataset.path = str(tmp_path / "dataset")
-    cfg.probe.dataset.counts = {"train": 4, "validation": 2, "test": 2}
-    cfg.probe.dataset.shard_size = 3
-    cfg.probe.capture.batch_size = 2
-    cfg.probe.training.batch_size = 3
-    cfg.probe.training.num_steps = 4
-    cfg.probe.training.warmup_steps = 0
-    cfg.probe.training.validation_every = 2
-    cfg.probe.training.checkpoint_every = 2
-    cfg.probe.training.log_every = 1
-    cfg.probe.solver.cache_dir = str(configs.parent / "outputs/.cache/probe-assignment-tests")
-    cfg.probe.evaluation.functional_inputs_per_task = 8
+    cfg.experiment.root = str(tmp_path / "study")
+    cfg.probe.dataset.num_worlds = 1
+    cfg.probe.dataset.demos_per_task = 2
+    cfg.probe.dataset.target_positions = [1, 5, 9]
+    cfg.probe.dataset.capture.batch_size = 8
+    cfg.probe.dataset.capture.precision = "fp32"
+    cfg.probe.training.l2_grid = [0.1, 1.0]
     cfg.probe.evaluation.bootstrap_replicates = 20
-    cfg.probe.benchmark.warmup_steps = 1
-    cfg.probe.benchmark.measured_steps = 2
-    cfg.probe.benchmark.profile_steps = 1
+    cfg.probe.evaluation.exposure.min_worlds_per_cell = 1
     architecture = OmegaConf.load(configs / "model/gdn.yaml")
     architecture.d_model = 8
     architecture.n_heads = 2
-    architecture.n_layers = 1
+    architecture.n_layers = 2
     architecture.d_ffw = 16
     architecture.backend = "reference"
-    source = OmegaConf.create({"seed": 11, "data": cfg.data, "model": architecture})
+    data = OmegaConf.load(configs / "data/hyperteacher.yaml")
+    data.input_dim = 4
+    data.output_dim = 3
+    data.hidden_dims = [4]
+    source = OmegaConf.create({"seed": 11, "data": data, "model": architecture})
     torch.manual_seed(11)
     model = model_from_config(source)
     checkpoint = tmp_path / "gdn.pt"
@@ -50,5 +47,5 @@ def probe_cfg(tmp_path: Path) -> DictConfig:
         },
         checkpoint,
     )
-    cfg.probe.capture.checkpoint = str(checkpoint)
+    cfg.probe.dataset.checkpoint = str(checkpoint)
     return cfg

@@ -1,506 +1,492 @@
-"""Saved-result plots for module reconstruction and independently fitted controls."""
+"""World-averaged scientific figures regenerated solely from saved numerical results."""
 
 from __future__ import annotations
 
-import json
+import html
 from pathlib import Path
 from typing import Any
 
 import matplotlib
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import plotly.graph_objects as go
+from matplotlib.patches import Rectangle
+from plotly.subplots import make_subplots
 
-from iccl.analysis.probe_results import probe_summary_rows, read_results, require_comparable
-from iccl.analysis.probe_targets import PROTOCOL
+from iccl.analysis.probe_storage import read_json
+from iccl.analysis.probe_worlds import CAPTURES
 
-_PREDICTION_NAMES = {
-    "none": "Full decoder",
-    "constant": "Constant control",
+LABELS = {
+    "residual_after_mixer": "Residual after mixer",
+    "residual_after_mlp": "Residual after MLP",
+    "mlp_hidden": "MLP hidden",
+    "state": "Fast-weight state",
+    "head_read": "Native head read",
+    "observations": "Raw observations",
+    "training_mean": "Training mean",
     "shuffled_targets": "Shuffled targets",
+    "untrained": "Untrained GDN",
+    "final_input": "Final input",
+    "final_answer": "Final answer",
+    "branch_input": "Discarded query",
+    "test_familiar": "Fresh streams · familiar pairs",
+    "test_unseen": "Fresh streams · unseen pairs",
+    "r2_macro": "Macro constituent R²",
+    "active_pair_accuracy": "Exact-pair accuracy",
+    "active_coefficient_rmse": "Active-coefficient RMSE",
+    "fixed_scale_vector_mse": "Fixed-scale vector MSE",
 }
-_COLORS = {"decoder": "#2563eb", "zero": "#64748b", "gdn": "#d97706"}
+COLORS = ["#2166ac", "#ef8a62", "#1b9e77", "#7b3294", "#c99b19", "#737373", "#222222"]
 
 
-def _estimate_trace(
+def _curve(
     figure: go.Figure,
-    x: list[Any],
     rows: list[dict[str, Any]],
-    *,
-    prediction: str,
     name: str,
-    col: int = 1,
-    lines: bool = True,
-    coordinate_labels: list[str] | None = None,
-    showlegend: bool | None = None,
+    color: str,
+    *,
+    column: int,
+    row: int = 1,
+    x: str = "position",
+    legend: bool = True,
+    dashed: bool = False,
 ) -> None:
-    """Plot saved means and exact interval endpoints, including absent or asymmetric CIs."""
-    color = _COLORS[prediction]
-    selected = [
-        (coordinate, row)
-        for coordinate, row in zip(x, rows, strict=True)
-        if row["ci_low"] is not None and row["ci_high"] is not None
-    ]
-    if selected:
-        # Centre the interval independently of the mean: a small bootstrap sample
-        # need not produce an interval that contains the observed mean.
-        figure.add_trace(
-            go.Scatter(
-                x=[coordinate for coordinate, _ in selected],
-                y=[(row["ci_low"] + row["ci_high"]) / 2 for _, row in selected],
-                error_y={
-                    "type": "data",
-                    "array": [(row["ci_high"] - row["ci_low"]) / 2 for _, row in selected],
-                    "color": color,
-                    "thickness": 1.5,
-                    "width": 4,
-                },
-                mode="markers",
-                marker={"size": 0},
-                hoverinfo="skip",
-                showlegend=False,
-                legendgroup=prediction,
-            ),
-            row=1,
-            col=col,
-        )
-    coordinate_labels = coordinate_labels or [str(coordinate) for coordinate in x]
-    custom = [
-        [
-            row["n_episodes"],
-            "unavailable"
-            if row["ci_low"] is None
-            else f"[{row['ci_low']:.5g}, {row['ci_high']:.5g}]",
-            label,
-            row.get("n_modules"),
-        ]
-        for row, label in zip(rows, coordinate_labels, strict=True)
-    ]
+    rows = sorted(rows, key=lambda r: r[x])
+    ys = [r["mean"] for r in rows]
+    plus = [None if r["upper"] is None else r["upper"] - r["mean"] for r in rows]
+    minus = [None if r["lower"] is None else r["mean"] - r["lower"] for r in rows]
     figure.add_trace(
         go.Scatter(
-            x=x,
-            y=[row["mean"] for row in rows],
+            x=[r[x] for r in rows],
+            y=ys,
             name=name,
-            legendgroup=prediction,
-            showlegend=col == 1 if showlegend is None else showlegend,
-            mode="lines+markers" if lines else "markers",
-            line={"color": color, "dash": "dash" if prediction == "zero" else "solid"},
-            marker={
-                "color": color,
-                "size": 8,
-                "symbol": "diamond" if prediction == "zero" else "circle",
-            },
-            customdata=custom,
-            hovertemplate=(
-                "%{customdata[2]}<br>Mean: %{y:.5g}<br>Episodes: %{customdata[0]}"
-                "<br>CI: %{customdata[1]}"
-                + (
-                    "<br>Modules: %{customdata[3]}"
-                    if any(row.get("n_modules") is not None for row in rows)
-                    else ""
-                )
-                + "<extra>%{fullData.name}</extra>"
-            ),
+            legendgroup=name,
+            showlegend=legend,
+            mode="lines+markers",
+            line={"color": color, "dash": "dash" if dashed else "solid"},
+            error_y={"type": "data", "array": plus, "arrayminus": minus, "symmetric": False},
+            customdata=[r["world_count"] for r in rows],
+            hovertemplate="%{x}: %{y:.3f}<br>worlds=%{customdata}<extra>%{fullData.name}</extra>",
         ),
-        row=1,
-        col=col,
+        row=row,
+        col=column,
     )
 
 
-def probe_evaluation_figures(
-    metadata: dict[str, Any], arrays: dict[str, np.ndarray], summary: dict[str, Any]
-) -> dict[str, go.Figure]:
-    """Interactive dashboard panels derived solely from the saved evaluation measurements."""
-    rows = probe_summary_rows(summary)
-    labels = {"decoder": _PREDICTION_NAMES[metadata["control"]], "zero": "Zero output"}
-    functional_labels = dict(labels)
-    if "gdn" in summary:
-        functional_labels["gdn"] = "GDN after 32 demos/task"
-    figures: dict[str, go.Figure] = {}
-    count = summary["decoder"]["all"]["n_episodes"]
-    confidence = metadata["confidence"] * 100
-    ci_note = (
-        f"Intervals: {confidence:g}% whole-episode bootstrap. Unavailable intervals are omitted."
-    )
-    floor_count = summary["decoder"]["all"]["variance_floored_tasks"]
-    functional_note = (
-        "Probe: final episode state + oracle task coefficients. "
-        + (
-            "GDN: original prefix through each task's 32 demos; independent queries.<br>"
-            if "gdn" in summary
-            else ""
-        )
-        + f"{floor_count:,}/{metadata['task_count'] * count:,} task variances "
-        f"floored at {metadata['variance_floor']:g}."
-    )
-
-    def panel(
-        key: str, title: str, subtitles: tuple[str, ...] = (), note: str = ci_note
-    ) -> go.Figure:
-        figure = make_subplots(
-            rows=1, cols=len(subtitles) or 1, subplot_titles=subtitles, horizontal_spacing=0.14
-        )
-        figure.update_layout(
-            title={
-                "text": (
-                    f"{title}<br><sup>{metadata['split'].title()} · {labels['decoder']} · "
-                    f"step {metadata['step']:,} · {count:,} episodes</sup>"
-                ),
-                "font": {"size": 19},
-                "x": 0.04,
-            },
-            template="plotly_white",
-            height=510,
-            margin={"l": 75, "r": 25, "t": 120, "b": 125},
-            legend={"orientation": "h", "y": -0.26, "x": 0},
-            hovermode="closest",
-        )
-        figure.add_annotation(
-            text=note,
-            xref="paper",
-            yref="paper",
-            x=0,
-            y=-0.47,
-            xanchor="left",
-            align="left",
-            showarrow=False,
-            font={"size": 11, "color": "#475569"},
-        )
-        figure.update_yaxes(rangemode="tozero")
-        figure.update_xaxes(automargin=True)
-        figures[f"probe/{metadata['split']}/figures/{key}"] = figure
-        return figure
-
-    module = panel(
-        "module_by_exposure",
-        "Module reconstruction by exposure count",
-        note=f"Each distinct module contributes once within its exposure group.<br>{ci_note}",
-    )
-    for prediction, name in labels.items():
-        selected = sorted(
-            (
-                row
-                for row in rows
-                if row["prediction"] == prediction
-                and row["population"] == "all"
-                and row["exposure_count"] is not None
-            ),
-            key=lambda row: row["exposure_count"],
-        )
-        _estimate_trace(
-            module,
-            [row["exposure_count"] for row in selected],
-            selected,
-            prediction=prediction,
-            name=name,
-        )
-    module.update_xaxes(
-        title_text="Tasks containing the module", tickmode="linear", tick0=1, dtick=1
-    )
-    module.update_yaxes(title_text="Aligned module weight and bias MSE")
-    functional = panel(
-        "functional_by_task",
-        "Functional performance on matched fresh inputs",
-        ("Raw error", "Variance-normalized error"),
-        note=f"{functional_note}<br>{ci_note}",
-    )
-    for figure, metric, y_title, col in (
-        (functional, "functional_mse_by_task", "Output MSE", 1),
-        (functional, "functional_nmse_by_task", "Output nMSE", 2),
-    ):
-        for prediction, name in functional_labels.items():
-            selected = [
-                row
-                for row in rows
-                if row["prediction"] == prediction
-                and row["population"] == "all"
-                and row["metric"] == metric
-            ]
-            _estimate_trace(
-                figure,
-                [row["task_position"] for row in selected],
-                selected,
-                prediction=prediction,
-                name=name,
-                col=col,
-            )
-        figure.update_xaxes(
-            title_text="Task position", tickmode="linear", tick0=1, dtick=1, row=1, col=col
-        )
-        figure.update_yaxes(title_text=y_title, row=1, col=col)
-
-    components = panel(
-        "parameter_components",
-        "Parameter reconstruction by component",
-        note=f"Each component is averaged over its own scalars.<br>{ci_note}",
-    )
-    component_keys = ("weight_mse", "bias_mse", "readout_mse")
-    component_labels = ["Module weights", "Module biases", "Shared readout"]
-    for prediction, name in labels.items():
-        selected = [
-            next(
-                row
-                for row in rows
-                if row["prediction"] == prediction
-                and row["population"] == "all"
-                and row["metric"] == metric
-            )
-            for metric in component_keys
+def exposure_grid(
+    summary: dict[str, Any], population: str, family: str, metric: str
+) -> dict[str, Any]:
+    positions = summary["dataset"]["target_positions"]
+    task_count = summary["dataset"]["tasks_per_episode"]
+    bins = summary["settings"]["exposure"]["count_bins"]
+    count = max(positions) if bins == "exact" else len(bins)
+    labels = (
+        [str(i) for i in range(count)]
+        if bins == "exact"
+        else [
+            str(edge)
+            if i + 1 < len(bins) and bins[i + 1] == edge + 1
+            else f"{edge}–{bins[i + 1] - 1}"
+            if i + 1 < len(bins)
+            else f"{edge}+"
+            for i, edge in enumerate(bins)
         ]
-        offset = -0.08 if prediction == "decoder" else 0.08
-        _estimate_trace(
-            components,
-            [i + offset for i in range(3)],
-            selected,
-            prediction=prediction,
-            name=name,
-            lines=False,
-            coordinate_labels=component_labels,
-        )
-    components.update_xaxes(
-        tickvals=[0, 1, 2],
-        ticktext=component_labels,
-        range=[-0.5, 2.5],
     )
-    components.update_yaxes(title_text="Aligned MSE per scalar")
-
-    distributions = panel(
-        "episode_error_distribution",
-        "Distribution of episode errors",
-        ("Joint parameter error", "Functional error"),
-        note=(
-            "Each point is one whole episode; functional errors are averaged "
-            f"over its {metadata['task_count']} tasks."
-        ),
-    )
-    for prediction, name in functional_labels.items():
-        for col, key, x_title in (
-            (1, f"{prediction}_joint_mse", "Joint aligned MSE"),
-            (
-                2,
-                f"{prediction}_functional_nmse_by_task",
-                "Output nMSE",
-            ),
-        ):
-            if key not in arrays:
-                continue
-            values = arrays[key] if col == 1 else arrays[key].mean(axis=1)
-            order = np.argsort(values, kind="stable")
-            distributions.add_trace(
-                go.Scatter(
-                    x=values[order].tolist(),
-                    y=(np.arange(1, count + 1) / count).tolist(),
-                    mode="lines+markers",
-                    marker={"size": 4},
-                    name=name,
-                    legendgroup=prediction,
-                    showlegend=col == 1 or prediction == "gdn",
-                    line={
-                        "color": _COLORS[prediction],
-                        "shape": "hv",
-                        "dash": "dash" if prediction == "zero" else "solid",
-                    },
-                    customdata=np.stack(
-                        (arrays["episode_index"][order], arrays["latent_rank"][order]), axis=1
-                    ).tolist(),
-                    hovertemplate=(
-                        "Error: %{x:.5g}<br>Cumulative fraction: %{y:.1%}"
-                        "<br>Episode: %{customdata[0]}<br>Latent rank: %{customdata[1]}"
-                        "<extra>%{fullData.name}</extra>"
-                    ),
-                ),
-                row=1,
-                col=col,
-            )
-            distributions.update_xaxes(title_text=x_title, row=1, col=col)
-    distributions.update_yaxes(
-        title_text="Fraction of episodes ≤ error", range=[0, 1.02], tickformat=".0%"
-    )
-
-    ranks = panel(
-        "latent_rank",
-        "Reconstruction by observed latent rank",
-        ("Joint parameter error", "Functional error"),
-    )
-    rank_values = sorted(
-        int(group.removeprefix("rank_")) for group in summary["decoder"] if group != "all"
-    )
-    for prediction, name in functional_labels.items():
-        for col, metric, y_title in (
-            (1, "joint_mse", "Joint aligned MSE"),
-            (2, "functional_nmse", "Output nMSE"),
-        ):
-            if prediction == "gdn" and col == 1:
-                continue
-            selected = [
-                next(
-                    row
-                    for row in rows
-                    if row["prediction"] == prediction
-                    and row["population"] == f"rank_{rank}"
-                    and row["metric"] == metric
+    rows = [
+        r
+        for r in summary["exposure"]
+        if r["population"] == population
+        and r["family"] == family
+        and r["selection"] == "all"
+        and r["control"] == "trained"
+        and r["metric"] == metric
+    ]
+    values = [r["mean"] for r in rows if r["mean"] is not None]
+    limits = (min([0.0, *values]), max([1.0, *values]))
+    panels = []
+    for position in positions:
+        for capture in CAPTURES:
+            z, possible = np.full((count, count), np.nan), np.zeros((count, count), dtype=bool)
+            hover = np.full((count, count), "Insufficient coverage", dtype=object)
+            for a in range(count):
+                for b in range(count):
+                    a_values = (
+                        [a]
+                        if bins == "exact"
+                        else range(bins[a], bins[a + 1] if a + 1 < count else position)
+                    )
+                    b_values = (
+                        [b]
+                        if bins == "exact"
+                        else range(bins[b], bins[b + 1] if b + 1 < count else position)
+                    )
+                    possible[b, a] = any(
+                        x <= y and x + y <= position - 1 and (position != task_count or x > 0)
+                        for x in a_values
+                        for y in b_values
+                    )
+                    if not possible[b, a]:
+                        hover[b, a] = "Structurally impossible"
+            for item in rows:
+                if item["position"] != position or item["capture"] != capture:
+                    continue
+                a, b = item["e_min"], item["e_max"]
+                if item["mean"] is not None:
+                    z[b, a] = item["mean"]
+                interval = (
+                    f"[{item['lower']:.3f}, {item['upper']:.3f}]"
+                    if item["lower"] is not None
+                    else "unavailable"
                 )
-                for rank in rank_values
-            ]
-            _estimate_trace(
-                ranks,
-                rank_values,
-                selected,
-                prediction=prediction,
-                name=name,
-                col=col,
-                showlegend=col == 1 or prediction == "gdn",
+                hover[b, a] = (
+                    f"{item['status']}<br>worlds={item['world_count']}<br>"
+                    f"world-bootstrap CI={interval}<br>trials/world={item['trial_counts']}"
+                )
+            panels.append(
+                {
+                    "position": position,
+                    "capture": capture,
+                    "z": z,
+                    "possible": possible,
+                    "hover": hover,
+                }
             )
-            ranks.update_yaxes(title_text=y_title, row=1, col=col)
-    ranks.update_xaxes(
-        title_text="Observed task-latent rank",
-        tickvals=rank_values,
-        ticktext=[
-            f"{rank}<br>n={summary['decoder'][f'rank_{rank}']['n_episodes']:,}"
-            for rank in rank_values
-        ],
-        range=[min(rank_values) - 0.5, max(rank_values) + 0.5],
-    )
+    return {"labels": labels, "limits": limits, "panels": panels, "positions": positions}
 
+
+def exposure_figure(
+    summary: dict[str, Any], population: str, family: str, metric: str
+) -> go.Figure:
+    data = exposure_grid(summary, population, family, metric)
+    labels = data["labels"]
+    figure = make_subplots(
+        rows=len(data["positions"]),
+        cols=3,
+        subplot_titles=[f"Task {p} · {LABELS[c]}" for p in data["positions"] for c in CAPTURES],
+        horizontal_spacing=0.09,
+        vertical_spacing=0.12,
+    )
+    for i, panel in enumerate(data["panels"]):
+        row, col = i // 3 + 1, i % 3 + 1
+        figure.add_trace(
+            go.Heatmap(
+                x=labels,
+                y=labels,
+                z=np.where(panel["possible"], 1, 0),
+                colorscale=[[0, "#ffffff"], [1, "#dddddd"]],
+                zmin=0,
+                zmax=1,
+                showscale=False,
+                customdata=panel["hover"],
+                hovertemplate="e_min=%{x}, e_max=%{y}<br>%{customdata}<extra></extra>",
+            ),
+            row=row,
+            col=col,
+        )
+        figure.add_trace(
+            go.Heatmap(
+                x=labels,
+                y=labels,
+                z=panel["z"],
+                coloraxis="coloraxis",
+                text=panel["z"],
+                texttemplate="%{text:.2f}",
+                customdata=panel["hover"],
+                hoverongaps=False,
+                hovertemplate=(
+                    "e_min=%{x}, e_max=%{y}<br>score=%{z:.3f}<br>%{customdata}<extra></extra>"
+                ),
+            ),
+            row=row,
+            col=col,
+        )
+        ys, xs = np.where(~panel["possible"])
+        figure.add_trace(
+            go.Scatter(
+                x=[labels[x] for x in xs],
+                y=[labels[y] for y in ys],
+                mode="text",
+                text=["×"] * len(xs),
+                textfont={"color": "#aaaaaa"},
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
+        figure.update_xaxes(title_text="Prior exposure · e_min", row=row, col=col)
+        figure.update_yaxes(title_text="Prior exposure · e_max", row=row, col=col)
+    figure.update_layout(
+        title=(
+            f"{LABELS[family]} · {LABELS[population]}<br>"
+            "<sup>Equal-world mean; gray: insufficient coverage; ×: impossible</sup>"
+        ),
+        coloraxis={
+            "colorscale": "RdBu" if metric == "r2_macro" else "Viridis",
+            "cmin": data["limits"][0],
+            "cmax": data["limits"][1],
+            "colorbar": {"title": LABELS[metric]},
+        },
+        height=300 * len(data["positions"]) + 100,
+        width=1250,
+        template="plotly_white",
+    )
+    return figure
+
+
+def probe_evaluation_figures(summary: dict[str, Any]) -> dict[str, go.Figure]:
+    figures = {}
+    families = list(summary["capture"]["shapes"])
+    for population in summary["settings"]["splits"]:
+        for metric in summary["settings"]["metrics"]:
+            figure = make_subplots(rows=1, cols=3, subplot_titles=[LABELS[c] for c in CAPTURES])
+            for column, capture in enumerate(CAPTURES, 1):
+                for index, family in enumerate([*families, "observations", "training_mean"]):
+                    baseline = family in {"observations", "training_mean"}
+                    rows = [
+                        r
+                        for r in summary["aggregate"]
+                        if r["population"] == population
+                        and r["metric"] == metric
+                        and r["capture"] == capture
+                        and r["family"] == ("baseline" if baseline else family)
+                        and r["selection"] == (family if baseline else "all")
+                        and r["control"] == (family if baseline else "trained")
+                    ]
+                    if rows:
+                        _curve(
+                            figure,
+                            rows,
+                            LABELS[family],
+                            COLORS[index % len(COLORS)],
+                            column=column,
+                            legend=column == 1,
+                            dashed=baseline,
+                        )
+                figure.update_xaxes(title_text="Target task position", dtick=1, row=1, col=column)
+                figure.update_yaxes(title_text=LABELS[metric], row=1, col=column)
+            figure.update_layout(
+                title=(f"{LABELS[population]} · {LABELS[metric]} · equal-world mean and CI"),
+                template="plotly_white",
+                height=440,
+                width=1250,
+            )
+            figures[f"{population}/{metric}"] = figure
+        # One matrix per family includes all three capture points.
+        for family in families:
+            rows = [
+                r
+                for r in summary["aggregate"]
+                if r["population"] == population
+                and r["family"] == family
+                and r["control"] == "trained"
+                and r["metric"] == "r2_macro"
+            ]
+            selections = list(dict.fromkeys(r["selection"] for r in rows))
+            if len(selections) > 1:
+                columns = [(p, c) for p in summary["dataset"]["target_positions"] for c in CAPTURES]
+                lookup = {(r["selection"], r["position"], r["capture"]): r for r in rows}
+                z = [[lookup[(s, p, c)]["mean"] for p, c in columns] for s in selections]
+                figure = go.Figure(
+                    go.Heatmap(
+                        z=z,
+                        x=[f"p{p} · {LABELS[c]}" for p, c in columns],
+                        y=selections,
+                        colorscale="RdBu",
+                        colorbar={"title": "Mean R²"},
+                    )
+                )
+                figure.update_layout(
+                    title=f"{LABELS[family]} · {LABELS[population]} · layer/head views",
+                    template="plotly_white",
+                    height=max(400, 28 * len(selections)),
+                    width=1100,
+                )
+                figures[f"{population}/detail-{family}"] = figure
+            if summary["exposure"] and any(r["selection"] == "all" for r in rows):
+                for metric in summary["settings"]["exposure"]["metrics"]:
+                    figures[f"{population}/exposure-{family}-{metric}"] = exposure_figure(
+                        summary, population, family, metric
+                    )
+        for family in families:
+            rows = [
+                r
+                for r in summary["paired_controls"]
+                if r["population"] == population
+                and r["family"] == family
+                and r["selection"] == "all"
+                and r["metric"] == "r2_macro"
+            ]
+            if not rows:
+                continue
+            figure = make_subplots(rows=1, cols=3, subplot_titles=[LABELS[c] for c in CAPTURES])
+            for col, capture in enumerate(CAPTURES, 1):
+                for index, control in enumerate(
+                    ("training_mean", "shuffled_targets", "untrained", "observations")
+                ):
+                    subset = [
+                        r for r in rows if r["capture"] == capture and r["comparison"] == control
+                    ]
+                    _curve(
+                        figure, subset, LABELS[control], COLORS[index], column=col, legend=col == 1
+                    )
+            figure.update_layout(
+                title=f"{LABELS[family]} · trained minus control R² · paired worlds",
+                template="plotly_white",
+                height=420,
+                width=1200,
+            )
+            figure.update_xaxes(title_text="Target task position")
+            figure.update_yaxes(title_text="ΔR²")
+            figures[f"{population}/control-gaps-{family}"] = figure
+    if len({row["train_count"] for row in summary["validation"]}) > 1:
+        figure = make_subplots(rows=1, cols=3, subplot_titles=[LABELS[c] for c in CAPTURES])
+        for col, capture in enumerate(CAPTURES, 1):
+            for index, family in enumerate(families):
+                for position in summary["dataset"]["target_positions"]:
+                    rows = [
+                        r
+                        for r in summary["validation"]
+                        if r["capture"] == capture
+                        and r["family"] == family
+                        and r["control"] == "trained"
+                        and r["selection"] == "all"
+                        and r["metric"] == "r2_macro"
+                        and r["position"] == position
+                    ]
+                    _curve(
+                        figure,
+                        rows,
+                        f"{LABELS[family]} · p{position}",
+                        COLORS[index % len(COLORS)],
+                        column=col,
+                        x="train_count",
+                        legend=col == 1,
+                    )
+        figure.update_layout(
+            title="Development data budgets · validation R²",
+            template="plotly_white",
+            height=500,
+            width=1200,
+        )
+        figure.update_xaxes(title_text="Training trials per world and position", type="log")
+        figure.update_yaxes(title_text="Validation R²")
+        figures["development/learning-curves"] = figure
+    figure = make_subplots(rows=1, cols=2, subplot_titles=["Final input", "Discarded query"])
+    for col, capture in enumerate(("final_input", "branch_input"), 1):
+        for index, (population, model) in enumerate(
+            (p, m) for p in summary["settings"]["splits"] for m in summary["capture"]["models"]
+        ):
+            rows = [
+                r
+                for r in summary["behavior"]
+                if r["capture"] == capture
+                and r["population"] == population
+                and r["model"] == model
+                and r["metric"] == "nmse"
+            ]
+            _curve(
+                figure, rows, f"{population} · {model}", COLORS[index], column=col, legend=col == 1
+            )
+    figure.update_layout(
+        title="GDN query prediction error · equal-world mean and CI",
+        template="plotly_white",
+        height=420,
+        width=1100,
+    )
+    figure.update_xaxes(title_text="Target task position")
+    figure.update_yaxes(title_text="Query nMSE")
+    figures["behavior"] = figure
     return figures
 
 
-def plot_probe_results(
-    results: list[Path | str], out_dir: Path | str, *, histories: list[Path | str] | None = None
-) -> list[Path]:
-    """Draw exposure, functional and control comparisons from checked numerical artifacts."""
-    if not results:
-        raise ValueError("provide at least one probe results directory")
-    reports = [read_results(path) for path in results]
-    require_comparable([report[0] for report in reports])
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    labels = [
-        f"{_PREDICTION_NAMES[meta['control']]} · step {meta['step']} · {Path(path).name}"
-        for (meta, _, _), path in zip(reports, results, strict=True)
-    ]
-    saved = []
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2), constrained_layout=True)
-    populations = [
-        (label, report[2]["decoder"]["all"]) for label, report in zip(labels, reports, strict=True)
-    ]
-    populations.append(("Zero output", reports[0][2]["zero"]["all"]))
-    if "gdn" in reports[0][2]:
-        populations.append(("GDN after 32 demos/task", reports[0][2]["gdn"]["all"]))
-    for label, report in populations:
-        exposures = sorted(map(int, report["exposure"]))
-        module = [report["exposure"][str(n)] for n in exposures]
-        function = report["metrics"]["functional_nmse_by_task"]
-        positions = np.arange(1, len(function["mean"]) + 1)
-        style = {"linestyle": "--", "color": "0.4"} if label == "Zero output" else {}
-        color = _COLORS["gdn"]
-        if module:
-            (line,) = axes[0].plot(
-                exposures, [value["mean"] for value in module], marker="o", label=label, **style
-            )
-            color = line.get_color()
-        for exposure, value in zip(exposures, module, strict=True):
-            if value["ci_low"] is not None:
-                axes[0].vlines(exposure, value["ci_low"], value["ci_high"], color=color)
-        axes[1].plot(
-            positions,
-            function["mean"],
-            marker="o",
-            label=label,
-            color=color,
-            linestyle=style.get("linestyle", "-"),
+def _save_exposure_static(
+    summary: dict[str, Any], population: str, family: str, metric: str, path: Path
+) -> None:
+    data = exposure_grid(summary, population, family, metric)
+    fig, axes = plt.subplots(
+        len(data["positions"]),
+        3,
+        figsize=(12, 3.1 * len(data["positions"])),
+        squeeze=False,
+        layout="constrained",
+    )
+    cmap = plt.get_cmap("RdBu" if metric == "r2_macro" else "viridis").with_extremes(bad="#dddddd")
+    plot = None
+    for axis, panel in zip(axes.flat, data["panels"], strict=True):
+        plot = axis.imshow(
+            panel["z"], origin="lower", cmap=cmap, vmin=data["limits"][0], vmax=data["limits"][1]
         )
-        if function["ci_low"] is not None:
-            axes[1].fill_between(
-                positions,
-                function["ci_low"],
-                function["ci_high"],
-                alpha=0.15,
-                color=color,
-            )
-    axes[0].set(
-        xlabel="Tasks containing the module",
-        ylabel="Module parameters (MSE)",
-        xticks=np.unique(reports[0][1]["occurrence_count"]),
+        for y, x in np.ndindex(panel["z"].shape):
+            if not panel["possible"][y, x]:
+                axis.add_patch(
+                    Rectangle(
+                        (x - 0.5, y - 0.5),
+                        1,
+                        1,
+                        facecolor="white",
+                        hatch="///",
+                        edgecolor="#bbbbbb",
+                        linewidth=0.2,
+                    )
+                )
+            elif np.isfinite(panel["z"][y, x]):
+                axis.text(
+                    x,
+                    y,
+                    f"{panel['z'][y, x]:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    bbox={"facecolor": "white", "alpha": 0.65, "edgecolor": "none", "pad": 1},
+                )
+        axis.set(
+            xticks=range(len(data["labels"])),
+            xticklabels=data["labels"],
+            yticks=range(len(data["labels"])),
+            yticklabels=data["labels"],
+            xlabel="Prior exposure · e_min",
+            ylabel="Prior exposure · e_max",
+            title=f"Task {panel['position']} · {LABELS[panel['capture']]}",
+        )
+    if plot is not None:
+        fig.colorbar(plot, ax=list(axes.flat), label=LABELS[metric], shrink=0.8)
+    fig.suptitle(
+        f"{LABELS[family]} · {LABELS[population]}\n"
+        "Equal-world mean · gray: insufficient coverage · hatch: impossible",
+        fontsize=13,
     )
-    axes[1].set(
-        xlabel="Task position",
-        ylabel="Output nMSE (matched fresh inputs)",
-        xticks=np.arange(1, reports[0][0]["task_count"] + 1),
-    )
-    for ax in axes:
-        ax.grid(alpha=0.2)
-    axes[0].legend(fontsize=7)
-    if "gdn" in reports[0][2]:
-        axes[1].legend(fontsize=7)
-    path = out_dir / "reconstruction-by-exposure.png"
-    fig.savefig(path, dpi=180)
+    fig.savefig(path.with_suffix(".png"), dpi=170)
+    fig.savefig(path.with_suffix(".pdf"))
     plt.close(fig)
-    saved.append(path)
-
-    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
-    estimates = [report[2]["decoder"]["all"]["metrics"]["joint_mse"] for report in reports]
-    estimates.append(reports[0][2]["zero"]["all"]["metrics"]["joint_mse"])
-    for i, value in enumerate(estimates):
-        ax.scatter(i, value["mean"])
-        if value["ci_low"] is not None:
-            ax.vlines(i, value["ci_low"], value["ci_high"])
-    ax.set(
-        xticks=np.arange(len(estimates)),
-        xticklabels=[*labels, "zero output"],
-        ylabel="Joint aligned parameter MSE",
-    )
-    ax.tick_params(axis="x", labelrotation=15, labelsize=8)
-    ax.grid(axis="y", alpha=0.2)
-    path = out_dir / "control-comparison.png"
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-    saved.append(path)
-    for index, (metadata, arrays, summary) in enumerate(reports):
-        directory = out_dir if len(reports) == 1 else out_dir / f"report-{index + 1}"
-        directory.mkdir(exist_ok=True)
-        for key, figure in probe_evaluation_figures(metadata, arrays, summary).items():
-            path = directory / f"{key.rsplit('/', 1)[-1]}.html"
-            figure.write_html(path, include_plotlyjs="directory")
-            saved.append(path)
-    if histories:
-        saved.append(plot_probe_history(histories, out_dir))
-    return saved
 
 
-def plot_probe_history(histories: list[Path | str], out_dir: Path | str) -> Path:
-    loaded = [json.loads(Path(source).read_text()) for source in histories]
-    if not loaded or any(history.get("protocol") != PROTOCOL for history in loaded):
-        raise ValueError("learning curves require module-set-decoder histories; recapture/retrain")
-    keys = ("dataset_id", "split_signatures", "target_layout", "readout_weight")
-    if any(any(history[key] != loaded[0][key] for key in keys) for history in loaded[1:]):
-        raise ValueError("learning curves require identical captured populations and objectives")
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 4.5), constrained_layout=True)
-    for source, history in zip(histories, loaded, strict=True):
-        source = Path(source)
-        training, validation = history["training"], history["validation"]
-        (line,) = ax.plot(
-            [r["step"] for r in training],
-            [r["loss"] for r in training],
-            alpha=0.5,
-            label=f"{source.parent.name}: training",
-        )
-        ax.plot(
-            [r["step"] for r in validation],
-            [r["joint_mse"] for r in validation],
-            marker="o",
-            color=line.get_color(),
-            label=f"{source.parent.name}: validation",
-        )
-    ax.set(xlabel="Optimizer update", ylabel="Joint aligned parameter MSE")
-    ax.grid(alpha=0.2)
-    ax.legend(fontsize=8)
-    path = out_dir / "learning-curves.png"
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-    return path
+def plot_probe_results(results: Path | str, out_dir: Path | str) -> list[Path]:
+    summary, root = read_json(Path(results)), Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    figures = probe_evaluation_figures(summary)
+    paths, links = [], []
+    for name, figure in figures.items():
+        path = root / (name.replace("/", "--") + ".html")
+        # A shared local JS bundle keeps the whole directory usable offline.
+        figure.write_html(path, include_plotlyjs="directory")
+        paths.append(path)
+        links.append(f'<li><a href="{html.escape(path.name)}">{html.escape(name)}</a></li>')
+    for population in summary["settings"]["splits"]:
+        for family in summary["capture"]["shapes"]:
+            if f"{population}/exposure-{family}-r2_macro" in figures:
+                for metric in summary["settings"]["exposure"]["metrics"]:
+                    path = root / f"{population}--exposure-{family}-{metric}"
+                    _save_exposure_static(summary, population, family, metric, path)
+                    paths.extend([path.with_suffix(".png"), path.with_suffix(".pdf")])
+    (root / "index.html").write_text(
+        '<!doctype html><meta charset="utf-8"><title>Task-vector decoding</title>'
+        "<style>body{font:16px system-ui;max-width:1000px;margin:40px auto}li{margin:8px 0}</style>"
+        f"<h1>{html.escape(summary['phase'].title())} · task-vector decoding</h1>"
+        "<p>Equal-world means with world-bootstrap intervals. See ../report.md for metric"
+        " definitions and scientific limits.</p>"
+        "<ul>" + "".join(links) + "</ul>"
+    )
+    return paths

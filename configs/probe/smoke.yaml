@@ -1,36 +1,34 @@
 defaults:
-  - module_decoder
+  - task_vector
   - _self_
 
-# Reduce workload only; retain the complete decoder for the selected GDN checkpoint.
 dataset:
-  counts:
-    train: 256
-    validation: 32
-    test: 32
-  shard_size: 64
-
-capture:
-  batch_size: 1
-  num_workers: 0
-
-solver:
-  num_threads: 2
+  num_worlds: 2
+  demos_per_task: 4
+  trajectories: {train: 32, validation: 12, test_familiar: 16, test_unseen: 12}
+  shard_size: 16
+  capture:
+    batch_size: 2
+    representations:
+      residual_after_mixer: [all_layers]
+      residual_after_mlp: [all_layers]
+      mlp_hidden: [all_layers]
+      state: [all_layers]
+      head_read: [all_layers]
 
 training:
-  batch_size: 8
-  num_steps: 20
-  warmup_steps: 2
-  num_workers: 0
-  log_every: 5
-  validation_every: 10
-  checkpoint_every: 20
+  l2_grid: [0.1, 1.0]
+  solver:
+    row_batch_size: 16
+  monitoring:
+    log_every_iterations: 2
+    validation_every_iterations: 2
+    checkpoint_every_iterations: 4
+    train_subset_size: 16
+    validation_subset_size: 12
 
 evaluation:
-  functional_inputs_per_task: 8
   bootstrap_replicates: 100
-
-benchmark:
-  warmup_steps: 2
-  measured_steps: 10
-  profile_steps: 3
+  exposure:
+    min_trials_per_world_cell: 4
+    min_worlds_per_cell: 2

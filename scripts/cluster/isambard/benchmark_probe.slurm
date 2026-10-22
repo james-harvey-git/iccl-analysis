@@ -13,4 +13,5 @@
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-${PWD}}"
-exec bash scripts/cluster/isambard/run.sh scripts/benchmark_probe.py "$@"
+exec srun --kill-on-bad-exit=1 --gpus-per-task=1 --gpu-bind=single:1 \
+  bash scripts/cluster/isambard/run.sh scripts/benchmark_probe.py "$@"

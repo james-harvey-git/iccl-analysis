@@ -26,6 +26,7 @@ class FeatureSelection:
 def feature_selections(
     shapes: dict[str, list[int]],
     specification: dict[str, Any],
+    head_groups: dict[str, list[list[int]]] | None = None,
 ) -> list[FeatureSelection]:
     """Flatten layer/head axes in C order without duplicating stored tensors."""
     result = []
@@ -57,6 +58,30 @@ def feature_selections(
                 )
             else:
                 raise ValueError(f"unsupported {family} selection: {mode}")
+    for name, members in (head_groups or {}).items():
+        if not name or not name.replace("_", "").replace("-", "").isalnum():
+            raise ValueError(
+                "head group names must contain letters, digits, underscores or hyphens"
+            )
+        if not members or len({tuple(member) for member in members}) != len(members):
+            raise ValueError(
+                "head groups must be nonempty and contain distinct [layer, head] pairs"
+            )
+        for family in ("state", "head_read"):
+            if family not in specification:
+                continue
+            layers, heads, *rest = shapes[family]
+            width = int(np.prod(rest))
+            ranges = []
+            for member in members:
+                if len(member) != 2 or any(type(x) is not int for x in member):
+                    raise ValueError("head group members must be integer [layer, head] pairs")
+                layer, head = member
+                if not 1 <= layer <= layers or not 1 <= head <= heads:
+                    raise ValueError("head group member is outside the captured architecture")
+                start = ((layer - 1) * heads + head - 1) * width
+                ranges.append((start, start + width))
+            result.append(FeatureSelection(family, name, tuple(ranges)))
     if len({(item.family, item.name) for item in result}) != len(result):
         raise ValueError("duplicate feature selections")
     return result

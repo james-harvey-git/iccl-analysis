@@ -1,4 +1,4 @@
-"""Benchmark complete full-decoder updates after optional bounded dataset capture."""
+"""Measure a bounded one-worker capture, fitting and reporting pilot."""
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
@@ -11,8 +11,7 @@ from iccl.analysis.probe_benchmark import benchmark_probe
 def main(cfg: DictConfig) -> None:
     out_dir = HydraConfig.get().runtime.output_dir
     report = benchmark_probe(cfg, out_dir)
-    rate = report["measured"]["episodes_per_second"]
-    print(f"full decoder: {rate:.2f} episodes/s; report: {out_dir}/benchmark.json")
+    print(f"stage seconds: {report['stage_seconds']}; report: {out_dir}/benchmark.json")
 
 
 if __name__ == "__main__":

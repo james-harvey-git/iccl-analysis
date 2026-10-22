@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submit from the repository root; create logs/slurm before sbatch.
-# Usage: sbatch scripts/cluster/isambard/capture_probe.slurm probe.capture.checkpoint=... [overrides]
+# Usage: sbatch scripts/cluster/isambard/capture_probe.slurm probe.dataset.checkpoint=... [overrides]
 #SBATCH --job-name=iccl-probe-capture
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -13,4 +13,5 @@
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-${PWD}}"
-exec bash scripts/cluster/isambard/run.sh scripts/capture_probe_dataset.py "$@"
+exec srun --kill-on-bad-exit=1 --gpus-per-task=1 --gpu-bind=single:1 \
+  bash scripts/cluster/isambard/run.sh scripts/capture_probe_dataset.py "$@"

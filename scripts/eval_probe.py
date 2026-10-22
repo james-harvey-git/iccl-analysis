@@ -1,4 +1,4 @@
-"""Evaluate a probe checkpoint on correctly paired held-out captured episodes."""
+"""Score selected task-vector probes on held-out streams and report equal-world means."""
 
 import hydra
 from hydra.core.hydra_config import HydraConfig

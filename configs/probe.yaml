@@ -1,39 +1,35 @@
 defaults:
-  - data: hyperteacher
-  - probe: module_decoder
+  - probe: task_vector
   - _self_
 
-seed: 0                      # Decoder initialization and training sample order.
-device: auto                 # cuda > mps > cpu; explicit devices remain supported.
-torch_num_threads: 1         # PyTorch CPU intra-op threads, separate from the solver.
-float32_matmul_precision: highest  # highest | high | medium; record actual settings.
+experiment:
+  name: task-vector-study
+  phase: development              # development | confirmation; RNG worlds are disjoint.
+  root: outputs/task-vector/${experiment.name}
+  seed: 0
+  protocol_frozen: false          # Required for confirmation, after development choices.
 
-# Reuse the production teacher and fix this experiment's episode distribution.
-data:
-  num_modules: 4
-  sequence:
-    curriculum_sampler: constructive
-    hotness: 2
-    surplus_tasks: 4          # Fixed integer S >= 0; T = 3 + S, reference T = 7.
-    demos_per_task: 32
-    signal_boundaries: true
-    require_identifiable: true
-    require_full_rank: false
+device: auto                     # cuda > mps > cpu
+torch_num_threads: 1
+float32_matmul_precision: highest
+
+execution:
+  max_gpus: 8                     # Hard upper limit; Slurm tasks each use one GPU.
+  stage_timeout_seconds: 3600     # Maximum wait for other workers at stage completion.
 
 wandb:
-  mode: disabled             # disabled | offline | online
+  mode: disabled                 # disabled | offline | online
   project: iccl-analysis
   entity: jublett-university-of-oxford
-  name: null                 # null: concise schedule/control/seed/stage label.
-  group: null                # null: group probe jobs by the captured dataset identity.
-  resume: false              # true: resume the checkpoint's W&B run; requires online training resume.
-  upload_weights: false      # Opt-in final decoder weights; never automatic full-state uploads.
-  upload_results: false      # Opt-in full results bundle; dashboard figures follow wandb.mode.
+  name: ${experiment.name}
+  run_id_file: ${experiment.root}/wandb-run.json
+  upload_results: true            # Compact tables/figures/configuration only.
+  upload_activations: false       # Bulk arrays remain on scratch.
 
 hydra:
   job:
     chdir: false
   run:
-    dir: outputs/module-decoder/runs/${hydra:job.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${experiment.root}/${experiment.phase}/logs/${hydra:job.name}/${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: multirun/module-decoder/${now:%Y-%m-%d_%H-%M-%S}
+    dir: multirun/task-vector/${now:%Y-%m-%d_%H-%M-%S}

@@ -1,0 +1,35 @@
+defaults:
+  - task_vector
+  - _self_
+
+# Full checkpoint dimensions and task lengths; bounded one-GPU throughput pilot.
+dataset:
+  num_worlds: 1
+  trajectories: {train: 64, validation: 32, test_familiar: 32, test_unseen: 32}
+  shard_size: 32
+  capture:
+    batch_size: 8
+    representations:
+      residual_after_mixer: [all_layers]
+      residual_after_mlp: [all_layers]
+      mlp_hidden: [all_layers]
+      state: [all_layers]
+      head_read: [all_layers]
+
+training:
+  l2_grid: [0.1, 1.0]
+  solver:
+    max_working_mb: 512
+    row_batch_size: 32
+  monitoring:
+    log_every_iterations: 5
+    validation_every_iterations: 5
+    checkpoint_every_iterations: 10
+    train_subset_size: 32
+    validation_subset_size: 32
+
+evaluation:
+  bootstrap_replicates: 100
+  exposure:
+    min_trials_per_world_cell: 4
+    min_worlds_per_cell: 1

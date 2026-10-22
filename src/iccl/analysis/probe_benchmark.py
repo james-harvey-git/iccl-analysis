@@ -1,9 +1,8 @@
-"""Bounded resource measurements around real production decoder optimizer updates."""
+"""Explicitly bounded end-to-end pilot and repeated full-feature ridge timing."""
 
 from __future__ import annotations
 
 import os
-import platform
 import resource
 import sys
 import time
@@ -15,207 +14,97 @@ import torch
 from omegaconf import DictConfig
 
 from iccl.analysis.capture import capture_dataset
-from iccl.analysis.probe_config import resolved_config, validate_probe_config
-from iccl.analysis.probe_dataset import write_json
-from iccl.analysis.probe_matching import COUNTER_NAMES
-from iccl.analysis.probe_targets import OUTPUT_FEATURES, PROTOCOL, TARGET_LAYOUT
-from iccl.analysis.probe_training import ProbeTrainer, synchronize
-
-
-def _distribution(values: list[float]) -> dict[str, float] | None:
-    if not values:
-        return None
-    return {
-        "mean": float(np.mean(values)),
-        "median": float(np.median(values)),
-        "p95": float(np.quantile(values, 0.95)),
-        "p99": float(np.quantile(values, 0.99)),
-        "max": max(values),
-    }
-
-
-def resource_report(trainer: ProbeTrainer) -> dict[str, Any]:
-    device = trainer.device
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    root = trainer.train.root
-    storage = os.statvfs(root)
-    affinity_reader = getattr(os, "sched_getaffinity", None)
-    gpu: dict[str, Any] = {"peak_allocated_bytes": None, "peak_reserved_bytes": None}
-    if device.type == "cuda":
-        gpu.update(
-            name=torch.cuda.get_device_name(device),
-            total_bytes=torch.cuda.get_device_properties(device).total_memory,
-            peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
-            peak_reserved_bytes=torch.cuda.max_memory_reserved(device),
-        )
-    elif device.type == "mps":
-        gpu.update(
-            name="Apple MPS",
-            current_allocated_bytes=torch.mps.current_allocated_memory(),
-            current_driver_allocated_bytes=torch.mps.driver_allocated_memory(),
-        )
-    return {
-        "device": str(device),
-        "gpu": gpu,
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "cpu": platform.processor(),
-        "cpu_count": os.cpu_count(),
-        "cpu_affinity": sorted(affinity_reader(0)) if affinity_reader is not None else None,
-        "slurm_cpus_per_task": os.environ.get("SLURM_CPUS_PER_TASK"),
-        "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
-        "torch_threads": torch.get_num_threads(),
-        "torch_interop_threads": torch.get_num_interop_threads(),
-        "solver_threads": trainer.solver.num_threads,
-        "loader_workers": int(trainer.p.training.num_workers),
-        "host_peak_rss_bytes": int(usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)),
-        "host_memory_scope": "parent-process high-water RSS; excludes separate loader workers",
-        "torch": torch.__version__,
-        "numpy": np.__version__,
-        "python": platform.python_version(),
-        "cuda_runtime": torch.version.cuda,
-        "matmul_precision": torch.get_float32_matmul_precision(),
-        "dataset_path": str(root),
-        "storage_cache": (
-            "shards were checksum-verified before timing; OS page cache is not evicted"
-        ),
-        "dataset_device_id": root.stat().st_dev,
-        "filesystem_block_bytes": storage.f_frsize,
-        "filesystem_free_bytes": storage.f_bavail * storage.f_frsize,
-        "dataset_file_bytes": sum(
-            file.stat().st_size for file in root.rglob("*") if file.is_file()
-        ),
-    }
-
-
-def _window(trainer: ProbeTrainer, steps: int, *, profile: bool) -> dict[str, Any]:
-    start_step = trainer.step
-    records = []
-    synchronize(trainer.device)
-    started = time.perf_counter()
-    for _ in range(steps):
-        tick = time.perf_counter()
-        batch = trainer.next_batch()
-        data_wait = time.perf_counter() - tick
-        result = trainer.update(batch, profile=profile)
-        synchronize(trainer.device)
-        seconds = time.perf_counter() - tick
-        record = {
-            "step": trainer.step,
-            "episodes": result.episodes,
-            "seconds": seconds,
-            "loss": result.loss,
-            "gradient_norm": result.grad_norm,
-            "loss_and_gradient_finite": True,
-            **result.components,
-            **{
-                f"{name}_{stat}": float(reduce(result.assignment.counters[:, index]))
-                for index, name in enumerate(COUNTER_NAMES)
-                for stat, reduce in (("mean", np.mean), ("max", np.max))
-            },
-        }
-        if profile:
-            record["stages_seconds"] = {"data_wait": data_wait, **result.stages}
-            record["native_worker_seconds"] = {
-                "cost_construction_sum": float(result.assignment.timings[:, 0].sum()),
-                "search_sum": float(result.assignment.timings[:, 1].sum()),
-            }
-        records.append(record)
-    synchronize(trainer.device)
-    elapsed = time.perf_counter() - started
-    episodes = sum(record["episodes"] for record in records)
-    stage_names = records[0]["stages_seconds"].keys() if records and profile else []
-    return {
-        "start_step_exclusive": start_step,
-        "end_step_inclusive": trainer.step,
-        "updates": steps,
-        "episodes": episodes,
-        "wall_seconds": elapsed,
-        "episodes_per_second": episodes / elapsed if steps else None,
-        "seconds_per_update": elapsed / steps if steps else None,
-        "update_seconds_distribution": _distribution([row["seconds"] for row in records]),
-        "stage_seconds_distributions": {
-            name: _distribution([row["stages_seconds"][name] for row in records])
-            for name in stage_names
-        },
-        "records": records,
-    }
+from iccl.analysis.probe_config import configure_runtime, resolved_config, validate_probe_config
+from iccl.analysis.probe_evaluation import evaluate_probe
+from iccl.analysis.probe_storage import CapturedSplit, read_manifest, write_json
+from iccl.analysis.probe_training import selected_features, train_probe
+from iccl.analysis.probes import fit_ridge
 
 
 def benchmark_probe(cfg: DictConfig, out_dir: Path | str) -> dict[str, Any]:
     validate_probe_config(cfg, "benchmark")
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    captured = (
-        capture_dataset(cfg, out_dir / "capture") if cfg.probe.benchmark.capture_first else None
-    )
-    with ProbeTrainer(cfg, out_dir, stage="benchmark") as trainer:
-        trainer.logger.start()
-        b = cfg.probe.benchmark
-        warmup = _window(trainer, b.warmup_steps, profile=False)
-        if trainer.device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(trainer.device)
-        measured = _window(trainer, b.measured_steps, profile=False)
-        measured_resources = resource_report(trainer)
-        profiled = _window(trainer, b.profile_steps, profile=True)
-        parameters = sum(p.numel() for p in trainer.model.parameters())
-        report = {
-            "protocol": f"{PROTOCOL}/benchmark-v1",
-            "config": resolved_config(cfg),
-            "dataset_id": trainer.train.manifest["dataset_id"],
-            "train_split_signature": trainer.train.signature,
-            "source_model_digest": trainer.train.manifest["identity"]["source_model_digest"],
-            "state_layout": trainer.train.manifest["identity"]["state_layout"],
-            "input_features": trainer.train.manifest["identity"]["input_features"],
-            "parameters": parameters,
-            "reference_parameter_count": parameters == (131072 + 1) * OUTPUT_FEATURES,
-            "target_layout": TARGET_LAYOUT,
-            "decoder": "full_affine",
-            "batch_size": int(cfg.probe.training.batch_size),
-            "precision": str(trainer.dtype or torch.float32),
-            "solver_build": trainer.solver.build,
-            "capture": captured,
-            "setup_seconds": trainer.timings,
-            "warmup": warmup,
-            "measured": measured,
-            "profiled": profiled,
-            "resources_after_measured": measured_resources,
-            "resources_after_profiled": resource_report(trainer),
-            "timing_scope": {
-                "measured": (
-                    "complete optimizer updates, including data wait, transfers, matching "
-                    "and finite-gradient checks"
-                ),
-                "update_boundary": "device synchronized at each completed update",
-                "profiled": (
-                    "separate later updates with per-stage synchronization; "
-                    "instrumentation changes throughput"
-                ),
-                "native_worker_times": (
-                    "summed CPU worker times overlap; do not add them to wall-time stages"
-                ),
-                "excluded": [
-                    "capture",
-                    "compiler/build/load",
-                    "checkpoint loading",
-                    "validation",
-                    "checkpoint writes",
-                    "control fitting",
-                ],
-                "checkpoint_write_seconds": 0,
-            },
-            "planning_bytes": {
-                "fp32_weights": parameters * 4,
-                "weights_gradients_adam_moments": parameters * 16,
-            },
-        }
-        write_json(out_dir / "benchmark.json", report)
-        trainer.logger.log(
-            {
-                "probe/benchmark/episodes_per_second": measured["episodes_per_second"],
-                "probe/benchmark/seconds_per_update": measured["seconds_per_update"],
-            },
-            trainer.step,
+    if int(os.environ.get("SLURM_NTASKS", 1)) != 1:
+        raise ValueError("the throughput pilot is bounded to one GPU worker")
+    d, b = cfg.probe.dataset, cfg.probe.benchmark
+    if d.num_worlds > b.max_worlds or max(d.trajectories.values()) > b.max_trials_per_split:
+        raise ValueError(
+            "pilot budget exceeds benchmark bounds; use probe=pilot or a smaller configuration"
         )
-        trainer.logger.upload_probe_artifact(out_dir / "benchmark.json", kind="results")
-        return report
+    if Path(d.path, "manifest.json").exists():
+        raise ValueError("timing requires a fresh pilot root; existing shards would measure resume")
+    device = configure_runtime(cfg)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    times = {}
+    for stage, action in (
+        ("capture", capture_dataset),
+        ("train", train_probe),
+        ("eval", evaluate_probe),
+    ):
+        start = time.perf_counter()
+        action(cfg, root / stage)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        times[stage] = time.perf_counter() - start
+    manifest = read_manifest(d.path)
+    split = CapturedSplit(d.path, 0, d.target_positions[-1], "train")
+    options = resolved_config(cfg)["probe"]["training"]["solver"]
+    timings = []
+    try:
+        for feature in selected_features(cfg, manifest):
+            if feature.name != "all" or feature.family not in {"state", "mlp_hidden"}:
+                continue
+            matrix = split.matrix(f"trained__final_answer__{feature.family}", feature)
+            for method in ("direct", "cg"):
+                measurements = []
+                diagnostic: dict[str, Any] = {}
+                for repeat in range(b.warmup_repeats + b.measured_repeats):
+                    start = time.perf_counter()
+                    _, diagnostic = fit_ridge(
+                        matrix,
+                        split.targets,
+                        cfg.probe.training.l2_grid[-1],
+                        device=device,
+                        options=options | {"method": method},
+                    )
+                    if device.type == "cuda":
+                        torch.cuda.synchronize(device)
+                    elapsed = time.perf_counter() - start
+                    if not diagnostic["converged"]:
+                        raise RuntimeError(
+                            "pilot ridge solve failed its numerical convergence check"
+                        )
+                    if repeat >= b.warmup_repeats:
+                        measurements.append(elapsed)
+                timings.append(
+                    {
+                        "family": feature.family,
+                        "features": matrix.shape[1],
+                        "trials": matrix.shape[0],
+                        "method": method,
+                        "median_seconds": float(np.median(measurements)),
+                        "measured_seconds": measurements,
+                        "diagnostics": diagnostic,
+                    }
+                )
+    finally:
+        split.close()
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    report = {
+        "stage_seconds": times,
+        "warmed_solves": timings,
+        "host_peak_bytes": int(usage.ru_maxrss * (1 if sys.platform == "darwin" else 1024)),
+        "gpu_peak_allocated_bytes": torch.cuda.max_memory_allocated(device)
+        if device.type == "cuda"
+        else None,
+        "feature_bytes": manifest["estimated_feature_bytes"],
+        "device": str(device),
+        "config": resolved_config(cfg),
+        "interpretation": "Pipeline timings include cold kernel compilation, I/O and reporting. "
+        "Repeated solves exclude capture and report rendering. "
+        "Small-n timings do not establish convergence costs at larger training budgets.",
+    }
+    write_json(root / "benchmark.json", report)
+    return report
