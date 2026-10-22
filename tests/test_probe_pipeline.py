@@ -57,10 +57,26 @@ def test_three_stages_resume_split_isolation_and_saved_reports(probe_cfg, tmp_pa
         lambda *a, **k: pytest.fail("resume refitted a completed candidate"),
     )
     train_probe(cfg, tmp_path / "logs")
+    from iccl.analysis.plotting import plot_probe_results
+
+    def interrupt_render(*args, **kwargs):
+        raise RuntimeError("simulated rendering interruption")
+
+    monkeypatch.setattr("iccl.analysis.plotting.plot_probe_results", interrupt_render)
+    with pytest.raises(RuntimeError, match="rendering interruption"):
+        evaluate_probe(cfg, tmp_path / "logs")
+    partial = read_artifact(Path(cfg.probe.evaluation.output), "results", complete=False)
+    assert not partial["complete"]
+    monkeypatch.setattr("iccl.analysis.plotting.plot_probe_results", plot_probe_results)
+    monkeypatch.setattr(
+        "iccl.analysis.probe_evaluation.predict_ridge",
+        lambda *a, **k: pytest.fail("resume recomputed saved held-out predictions"),
+    )
     path = evaluate_probe(cfg, tmp_path / "logs")
     summary = read_json(path)
-    assert summary["per_world"] and summary["exposure"]
-    assert {r["population"] for r in summary["per_world"]} == {"test_familiar", "test_unseen"}
+    assert summary["world_files"] and summary["exposure"]
+    scores = read_json(path.parent / summary["world_files"][0]["path"])["scores"]
+    assert {r["population"] for r in scores} == {"test_familiar", "test_unseen"}
     assert all(r["upper"] is None for r in summary["aggregate"])
     root = Path(cfg.probe.evaluation.output)
     assert (root / "report.md").exists()

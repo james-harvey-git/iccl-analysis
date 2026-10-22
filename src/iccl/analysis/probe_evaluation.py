@@ -328,7 +328,12 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
             )
 
     def finalize() -> dict[str, Any]:
-        completed = complete_artifact(root, "results", cfg.probe.dataset.num_worlds)
+        completed = artifact | {
+            "worlds": {
+                str(world): file_digest(root / f"world-{world:04d}" / "complete.json")
+                for world in range(cfg.probe.dataset.num_worlds)
+            }
+        }
         worlds = [
             read_world_artifact(root, completed, world)
             for world in range(cfg.probe.dataset.num_worlds)
@@ -364,15 +369,21 @@ def evaluate_probe(cfg: DictConfig, out_dir: Path | str) -> Path:
             else [],
             "behavior": aggregate_behavior(behavior, **uncertainty),
             "validation": aggregate_scores(validation_rows, worlds=world_count, **uncertainty),
-            "per_world": rows,
-            "exposure_per_world": exposure_rows,
-            "behavior_per_world": behavior,
+            "world_files": [
+                {
+                    "world": int(world),
+                    "path": f"world-{int(world):04d}/complete.json",
+                    "sha256": checksum,
+                }
+                for world, checksum in completed["worlds"].items()
+            ],
         }
         write_json(root / "summary.json", summary)
         write_report(root, summary)
         from iccl.analysis.plotting import plot_probe_results
 
         plot_probe_results(root / "summary.json", root / "plots")
+        complete_artifact(root, "results", cfg.probe.dataset.num_worlds)
         return {"results_path": str(root.resolve()), "results_id": completed["artifact_id"]}
 
     run_stage(cfg, "eval", worker, finalize)

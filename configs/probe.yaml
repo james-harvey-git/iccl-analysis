@@ -30,6 +30,6 @@ hydra:
   job:
     chdir: false
   run:
-    dir: ${experiment.root}/${experiment.phase}/logs/${hydra:job.name}/${now:%Y-%m-%d_%H-%M-%S}
+    dir: ${experiment.root}/${experiment.phase}/logs/${hydra:job.name}/${now:%Y-%m-%d_%H-%M-%S}/rank-${oc.env:SLURM_PROCID,0}
   sweep:
     dir: multirun/task-vector/${now:%Y-%m-%d_%H-%M-%S}
