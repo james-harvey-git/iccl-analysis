@@ -185,6 +185,8 @@ See the [Isambard guide](../scripts/cluster/isambard/README.md). Workers own
 disjoint worlds, with one visible GPU each; there is no DDP. The submission helper
 limits the study to eight GPUs and queues capture → fit → evaluation with
 `afterok` dependencies. Explicit memory is **per node**, not per worker.
+The [development pilot record](task-vector-pilot.md) contains measured timings,
+memory use and validation outcomes for the source checkpoint.
 
 The bounded benchmark refuses an existing dataset and limits worlds/trials.
 It measures all three stages and repeated direct/CG fits of full state and MLP
