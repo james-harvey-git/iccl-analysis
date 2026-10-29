@@ -19,6 +19,7 @@ from typing import Any
 import hydra
 import torch
 import torch.nn.functional as F
+from einops import rearrange
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
@@ -41,9 +42,9 @@ from iccl.utils import resolve_device, seed_everything
 
 VARIANTS = (
     "baseline",
-    "optimized",
-    "group2",
-    "group4",
+    "typed_features",
+    "typed_features_group2",
+    "typed_features_group4",
     "bias",
     "all_types",
     "bias_group2",
@@ -57,9 +58,12 @@ def baseline_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.
     return torch.einsum("btoi,bti->bto", self.weight[kinds], tokens) + self.bias[kinds]
 
 
-def bias_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
+def typed_features_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
     kinds = kinds.long()
-    return torch.einsum("btoi,bti->bto", self.weight[kinds], tokens) + F.embedding(kinds, self.bias)
+    type_mask = F.one_hot(kinds, num_classes=self.weight.shape[0]).to(tokens.dtype)
+    features = rearrange(tokens.unsqueeze(-2) * type_mask.unsqueeze(-1), "b t k i -> b t (k i)")
+    weight = rearrange(self.weight, "k o i -> o (k i)")
+    return F.linear(features, weight) + F.embedding(kinds, self.bias)
 
 
 def all_types_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
@@ -75,11 +79,16 @@ def install_variant(model: GDNModel, variant: str) -> None:
         raise ValueError(f"unknown performance variant: {variant}")
     if variant == "baseline":
         model.embed.forward = MethodType(baseline_embedding, model.embed)
-    if variant in {"bias", "bias_group2"}:
-        model.embed.forward = MethodType(bias_embedding, model.embed)
+    if variant.startswith("typed_features"):
+        model.embed.forward = MethodType(typed_features_embedding, model.embed)
     if variant in {"all_types", "all_types_group2"}:
         model.embed.forward = MethodType(all_types_embedding, model.embed)
-    groups = {"group2": 2, "group4": 4, "bias_group2": 2, "all_types_group2": 2}.get(variant)
+    groups = {
+        "typed_features_group2": 2,
+        "typed_features_group4": 4,
+        "bias_group2": 2,
+        "all_types_group2": 2,
+    }.get(variant)
     if groups is None:
         return
     ordinary_forward = model.forward
@@ -310,7 +319,7 @@ def precision_probe(cfg: DictConfig, out_dir: Path, device: torch.device) -> Non
         for flag in (True, False):
             torch.backends.cudnn.allow_tf32 = flag
             reference = None
-            for variant in ("baseline", "optimized", "bias", "all_types"):
+            for variant in ("baseline", "typed_features", "bias", "all_types"):
                 model = model_from_config(cfg).to(device)
                 model.load_state_dict(state)
                 install_variant(model, variant)

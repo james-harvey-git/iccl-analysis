@@ -144,7 +144,7 @@ def capability_pair(paths: dict[str, Path], destination: Path, label: str) -> di
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("--candidate", default="optimized")
+    parser.add_argument("--candidate", default="bias")
     args = parser.parse_args()
     destination = args.root / "analysis"
     destination.mkdir(exist_ok=True)

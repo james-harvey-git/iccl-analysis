@@ -17,7 +17,15 @@ install_variant = runpy.run_path(str(Path(__file__).parents[1] / "scripts/benchm
 
 @pytest.mark.parametrize(
     "variant",
-    ["optimized", "group2", "group4", "bias", "all_types", "bias_group2", "all_types_group2"],
+    [
+        "typed_features",
+        "typed_features_group2",
+        "typed_features_group4",
+        "bias",
+        "all_types",
+        "bias_group2",
+        "all_types_group2",
+    ],
 )
 def test_variant_matches_model_predictions_loss_and_gradients(variant: str) -> None:
     torch.manual_seed(7)

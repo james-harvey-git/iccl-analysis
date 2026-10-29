@@ -4,7 +4,7 @@ defaults:
 
 performance:
   mode: numerical  # preflight | numerical | precision_probe | benchmark | trajectory
-  variant: optimized  # variant from scripts/benchmark_training.py; trajectory only
+  variant: bias  # variant from scripts/benchmark_training.py; trajectory only
   initialization_seed: 0  # model initialization; the indexed data seed remains seed
   checkpoint: null  # optional full-state checkpoint for numerical/benchmark comparisons
   batches: 8  # fixed, identical batches shared by every benchmark variant

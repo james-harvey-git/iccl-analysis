@@ -4,9 +4,12 @@ This study asks whether the token embedding and reduced padding can accelerate t
 existing GDN training calculation without changing the data, objective, parameters,
 checkpoint schema, or optimizer updates beyond floating-point accumulation error.
 
-The production candidate is the per-type affine embedding in `model.py`. The indexed
+The production candidate uses `F.embedding` for the per-type bias lookup in `model.py`,
+preserving the projection's indexed einsum and its floating-point accumulation order. The indexed
 implementation at main revision `4f49da4` is retained only as an experimental control
-in `scripts/benchmark_training.py`. `group2` and `group4` are experimental wrappers:
+in `scripts/benchmark_training.py`. The `typed_features` and `all_types` experiments
+reassociate the weight projection; they are experimental controls, not runtime paths.
+Names ending in `group2` or `group4` are experimental wrappers:
 they sort complete episodes within the original batch, trim each group's right
 padding, and restore prediction order before the ordinary pooled masked loss. They
 perform one backward pass and one optimizer update per original batch. They do not

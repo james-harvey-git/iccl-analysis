@@ -20,7 +20,7 @@ cd "${SLURM_SUBMIT_DIR:-${PWD}}"
 : "${ICCL_PERF_EVAL_DIR:?Set the validated frozen evaluation directory}"
 : "${ICCL_PERF_CANDIDATE:?Select a numerically validated candidate}"
 case "${ICCL_PERF_CANDIDATE}" in
-    optimized|group2|group4|bias|all_types|bias_group2|all_types_group2) ;;
+    typed_features|typed_features_group2|typed_features_group4|bias|all_types|bias_group2|all_types_group2) ;;
     *) echo "Unknown candidate: ${ICCL_PERF_CANDIDATE}" >&2; exit 1 ;;
 esac
 
