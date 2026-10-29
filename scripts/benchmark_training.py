@@ -141,14 +141,16 @@ def fixed_batches(cfg: DictConfig, count: int, start_step: int = 0):
     return batches, digest.hexdigest()
 
 
-def make_model_and_optimizer(cfg, device, state, checkpoint, variant):
+def make_training_state(cfg, device, state, checkpoint, variant):
     model = model_from_config(cfg).to(device)
     model.load_state_dict(state, strict=True)
     install_variant(model, variant)
     optimizer = build_optimizer(model, cfg.training)
+    scheduler = build_scheduler(optimizer, cfg.training)
     if checkpoint is not None:
         optimizer.load_state_dict(copy.deepcopy(checkpoint["optimizer"]))
-    return model, optimizer
+        scheduler.load_state_dict(checkpoint["scheduler"])
+    return model, optimizer, scheduler
 
 
 def initial_state(cfg, checkpoint):
@@ -176,7 +178,9 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
         cfg.training.precision = precision
         reference = None
         for variant in (*VARIANTS, "baseline"):
-            model, optimizer = make_model_and_optimizer(cfg, device, state, checkpoint, variant)
+            model, optimizer, scheduler = make_training_state(
+                cfg, device, state, checkpoint, variant
+            )
             with autocast(cfg, device):
                 predictions = model(batch["tokens"], batch["token_type"]).preds
             loss = masked_mse(predictions.float(), batch["targets"], batch["loss_mask"])
@@ -185,7 +189,9 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
             for name, parameter in model.named_parameters():
                 assert parameter.grad is not None, name
                 gradients[name] = parameter.grad.detach().cpu().clone()
+            learning_rate = float(optimizer.param_groups[0]["lr"])
             optimizer.step()
+            scheduler.step()
             updates = {name: p.detach().cpu() - state[name] for name, p in model.named_parameters()}
             observed = {
                 "predictions": predictions.detach().float().cpu()[real],
@@ -240,6 +246,7 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
                 row = {
                     "variant": variant,
                     "precision": precision,
+                    "optimizer_learning_rate": learning_rate,
                     "passed": passed,
                     "loss": observed["loss"],
                     "loss_relative_error": loss_error,
@@ -254,7 +261,7 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
                 print(
                     json.dumps({k: v for k, v in row.items() if k != "gradient_errors"}), flush=True
                 )
-            del model, optimizer, predictions, loss, observed
+            del model, optimizer, scheduler, predictions, loss, observed
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -289,11 +296,7 @@ def benchmark(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
     batches = [{key: value.to(device) for key, value in batch.items()} for batch in cpu_batches]
     rows = []
     for variant in (*VARIANTS, "baseline"):
-        model, optimizer = make_model_and_optimizer(cfg, device, state, checkpoint, variant)
-        scheduler = build_scheduler(optimizer, cfg.training)
-        if checkpoint is not None:
-            optimizer.load_state_dict(copy.deepcopy(checkpoint["optimizer"]))
-            scheduler.load_state_dict(checkpoint["scheduler"])
+        model, optimizer, scheduler = make_training_state(cfg, device, state, checkpoint, variant)
 
         for batch in batches:
             training_step(batch, model, optimizer, scheduler, cfg, device)
