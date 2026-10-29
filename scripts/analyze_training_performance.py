@@ -1,6 +1,7 @@
 """Summarize paired performance trials without treating episode tokens as independent."""
 
 import argparse
+import csv
 import json
 from pathlib import Path
 
@@ -45,6 +46,101 @@ def validation_pair(baseline: Path, candidate: Path) -> dict:
     }
 
 
+def capability_pair(paths: dict[str, Path], destination: Path, label: str) -> dict:
+    """Compare final canonical curves and paired per-episode normalized errors."""
+    figure, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
+    specifications = (
+        ("within_task_learning", "Within-task ICL", "Demonstration index"),
+        ("episode_learning", "Learning across the episode", "Task position"),
+        ("composition_learning", "Composition: final task", "Final-task demonstration index"),
+        ("retention_learning", "Retention: final task", "Final-task demonstration index"),
+    )
+    conditions = ["ordinary", "exposed", "unexposed", "no_history", "repeat", "shared"]
+    colors = dict(zip(conditions, plt.cm.tab10.colors, strict=False))
+    curve_maps, arrays, manifests = [], [], []
+    for variant_index, (variant, path) in enumerate(paths.items()):
+        result = next(path.glob("final-evaluation/step_*"))
+        with (result / "curves.csv").open() as stream:
+            rows = list(csv.DictReader(stream))
+        curve_maps.append(
+            {
+                tuple(
+                    row[key]
+                    for key in (
+                        "curve_type",
+                        "condition",
+                        "retention_component",
+                        "x_name",
+                        "x_value",
+                    )
+                ): float(row["nmse"])
+                for row in rows
+            }
+        )
+        arrays.append(np.load(result / "raw_errors.npz"))
+        manifests.append(json.loads((result / "manifest.json").read_text()))
+        for axis, (curve_type, title, x_label) in zip(axes.flat, specifications, strict=True):
+            for condition in conditions:
+                selected = [
+                    row
+                    for row in rows
+                    if row["curve_type"] == curve_type and row["condition"] == condition
+                ]
+                if not selected:
+                    continue
+                selected.sort(key=lambda row: float(row["x_value"]))
+                axis.plot(
+                    [float(row["x_value"]) for row in selected],
+                    [float(row["nmse"]) for row in selected],
+                    color=colors[condition],
+                    linestyle="-" if variant_index == 0 else "--",
+                    label=f"{condition.replace('_', ' ')}: {variant}",
+                    linewidth=1.4,
+                )
+            axis.set(title=title, xlabel=x_label, ylabel="Normalized MSE")
+            axis.grid(alpha=0.2)
+            axis.legend(fontsize=7)
+    figure.suptitle(f"{label}: final canonical evaluation (unsmoothed means)")
+    figure.savefig(destination / f"capabilities-{label}.png", dpi=180)
+    plt.close(figure)
+    assert curve_maps[0].keys() == curve_maps[1].keys()
+    comparisons = []
+    for key, info in manifests[0]["raw_arrays"].items():
+        logical = info["logical_name"]
+        if not logical.endswith("/nmse"):
+            continue
+        suite = logical.removesuffix("/nmse")
+        metadata = manifests[0]["suites"][suite]
+        a, b = arrays[0][key], arrays[1][key]
+        if metadata["capability"] == "icl":
+            a, b = a.mean(axis=(1, 2)), b.mean(axis=(1, 2))
+        else:
+            a, b = a[:, -1].mean(axis=1), b[:, -1].mean(axis=1)
+        difference = b - a
+        rng = np.random.default_rng(0)
+        draws = rng.integers(0, len(a), size=(10000, len(a)))
+        comparisons.append(
+            {
+                "suite": suite,
+                "capability": metadata["capability"],
+                "condition": metadata["condition"],
+                "episodes": len(a),
+                "baseline_mean_nmse": float(a.mean()),
+                "candidate_mean_nmse": float(b.mean()),
+                "candidate_minus_baseline_nmse": float(difference.mean()),
+                "paired_episode_percentile_95_ci": np.quantile(
+                    difference[draws].mean(axis=1), [0.025, 0.975]
+                ).tolist(),
+            }
+        )
+    return {
+        "max_abs_canonical_curve_difference": max(
+            abs(curve_maps[1][key] - value) for key, value in curve_maps[0].items()
+        ),
+        "paired_episode_conditions": comparisons,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
@@ -69,6 +165,7 @@ def main() -> None:
             for variant in ("baseline", args.candidate)
         }
         pair = {"label": label, "validation": validation_pair(*paths.values()), "runs": {}}
+        pair["capabilities"] = capability_pair(paths, destination, label)
         histories = {variant: records(path / "history.jsonl") for variant, path in paths.items()}
         for variant, path in paths.items():
             provenance = json.loads((path / "trajectory.json").read_text())
