@@ -25,12 +25,15 @@ from omegaconf import DictConfig, OmegaConf
 from iccl.data.dataset import collate_sequences, sequence_dataset_from_config, to_tensors
 from iccl.data.eval_bundle import validate_eval_bundle
 from iccl.data.sequences import TOKEN_PAD
+from iccl.evaluation.metrics import evaluate_suites, load_eval_suites, predict_suite
+from iccl.evaluation.results import write_evaluation_results
 from iccl.models.model import GDNModel, ModelOutput, TokenEmbedding, model_from_config
 from iccl.reporting.logger import RunLogger
 from iccl.training.trainer import (
     Trainer,
     build_optimizer,
     build_scheduler,
+    is_monitor_suite,
     masked_mse,
     resolve_autocast_dtype,
 )
@@ -399,8 +402,45 @@ def trajectory(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
     trainer.logger = RecordingLogger(cfg, out_dir)
     start = time.perf_counter()
     trainer.fit()
+    elapsed = time.perf_counter() - start
+    assert all(torch.isfinite(p).all() for p in trainer.model.parameters())
+    trainer.model.eval()
+    suites = load_eval_suites(
+        Path(cfg.data.eval_sets.out_dir),
+        select=lambda meta: is_monitor_suite(meta) or meta.get("capability") == "validation",
+        monitor=True,
+    )
+    report = evaluate_suites(
+        trainer.model,
+        suites,
+        device,
+        autocast_dtype=trainer.autocast_dtype,
+        bootstrap_seed=int(cfg.data.eval_sets.bootstrap_seed),
+        bootstrap_replicates=int(cfg.data.eval_sets.bootstrap_replicates),
+    )
+    for name, suite in suites.items():
+        if suite["__meta__"]["capability"] == "validation":
+            predictions = predict_suite(
+                trainer.model, suite, device, autocast_dtype=trainer.autocast_dtype
+            )
+            squared_error = ((predictions - suite["targets"]) ** 2).mean(axis=-1)
+            report.raw_errors[f"{name}/episode_error_sum"] = (
+                squared_error * suite["loss_mask"]
+            ).sum(axis=1)
+            report.raw_errors[f"{name}/episode_token_count"] = suite["loss_mask"].sum(axis=1)
+    write_evaluation_results(
+        report,
+        out_dir / "final-evaluation",
+        trainer.step,
+        provenance(cfg, device)
+        | {
+            "checkpoint_reference": str(out_dir / "checkpoints/last.pt"),
+            "suites": {name: suite["__meta__"] for name, suite in suites.items()},
+            "sample_scope": "training validation and canonical monitor episodes",
+        },
+    )
     result = provenance(cfg, device) | {
-        "elapsed_seconds": time.perf_counter() - start,
+        "elapsed_seconds": elapsed,
         "step": trainer.step,
         "last_loss": trainer.last_loss,
         "best_validation": trainer.best_metric if math.isfinite(trainer.best_metric) else None,
