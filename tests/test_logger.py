@@ -43,6 +43,16 @@ class FakeTable:
         self.data = data
 
 
+class FakeConfig:
+    def __init__(self) -> None:
+        self.values: dict[str, Any] = {}
+        self.allow_val_change = False
+
+    def update(self, values: dict[str, Any], *, allow_val_change: bool = False) -> None:
+        self.values.update(values)
+        self.allow_val_change = allow_val_change
+
+
 class FakeRun:
     def __init__(self, name: str | None = "different-sound-6") -> None:
         self.name = name
@@ -52,6 +62,9 @@ class FakeRun:
         self.used: list[str] = []
         self.records: list[tuple[dict[str, Any], int]] = []
         self.finished = False
+        self.step = 0
+        self.config = FakeConfig()
+        self.commits: list[bool | None] = []
 
     def log_artifact(self, artifact: FakeArtifact, aliases: list[str]) -> None:
         self.logged.append((artifact, aliases))
@@ -59,8 +72,9 @@ class FakeRun:
     def use_artifact(self, reference: str) -> None:
         self.used.append(reference)
 
-    def log(self, payload: dict[str, Any], step: int) -> None:
+    def log(self, payload: dict[str, Any], step: int, commit: bool | None = None) -> None:
         self.records.append((payload, step))
+        self.commits.append(commit)
 
     def finish(self) -> None:
         self.finished = True
@@ -122,6 +136,65 @@ def test_metrics_from_one_optimizer_step_share_one_wandb_record(
     logger.flush()
 
     assert run.records == [({"train/token_mse": 0.5, "validation/token_mse": 0.4}, 1000)]
+    assert run.commits == [True]
+
+
+def test_resume_requires_existing_run_and_preserves_uploaded_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = FakeRun()
+    run.step = 69751
+    run.config.values = {"training": {"num_steps": 70000}, "paths": {"run_dir": "old"}}
+    fake = FakeWandb(run)
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    cfg = OmegaConf.create(
+        {
+            "wandb": {
+                "mode": "online",
+                "entity": REFERENCE["entity"],
+                "project": REFERENCE["project"],
+            },
+            "training": {"num_steps": 80000},
+        }
+    )
+    logger = RunLogger(
+        cfg, tmp_path, job_type="train", resume_run=SourceRun(step=69000, **REFERENCE)
+    )
+    logger.start()
+    assert fake.captured["id"] == REFERENCE["run_id"]
+    assert fake.captured["resume"] == "must"
+    assert run.config.allow_val_change
+    assert run.config.values["training"]["num_steps"] == 80000
+    assert run.config.values["paths"]["run_dir"] == str(tmp_path)
+    for step in (69025, 69750):
+        logger.log({"train/token_mse": 0.2}, step)
+        logger.flush()
+    assert run.records == []
+    logger.log({"train/token_mse": 0.1}, 69751)
+    logger.log_validation(0.3, 69751)
+    logger.flush()
+    assert run.records == [({"train/token_mse": 0.1, "validation/token_mse": 0.3}, 69751)]
+    assert run.commits == [True]
+    assert logger.run_reference() == REFERENCE
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"mode": "offline"}, {"mode": "disabled"}, {"entity": "other"}, {"project": "other"}],
+)
+def test_resume_rejects_offline_or_different_destination(tmp_path: Path, overrides: dict) -> None:
+    cfg = OmegaConf.create(
+        {
+            "wandb": {
+                "mode": "online",
+                "entity": REFERENCE["entity"],
+                "project": REFERENCE["project"],
+                **overrides,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="online mode|entity/project"):
+        RunLogger(cfg, tmp_path, job_type="train", resume_run=SourceRun(step=2, **REFERENCE))
 
 
 def test_source_round_trips_through_a_checkpoint() -> None:
