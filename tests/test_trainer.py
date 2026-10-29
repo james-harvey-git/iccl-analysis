@@ -1,5 +1,7 @@
 import math
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -278,6 +280,50 @@ def test_checkpoint_resume_is_bit_exact(tmp_path: Path) -> None:
     assert full_state.keys() == resumed_state.keys()
     for key in full_state:
         assert torch.equal(full_state[key], resumed_state[key]), key
+
+
+@pytest.mark.parametrize("resume_wandb", [False, True])
+def test_training_resume_selects_the_checkpoint_wandb_run_only_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume_wandb: bool
+) -> None:
+    Trainer(make_cfg(tmp_path, num_steps=2), tmp_path / "source").fit()
+    path = tmp_path / "source" / "checkpoints" / "last.pt"
+    state = torch.load(path, weights_only=False)
+    state["wandb_run"] = {
+        "entity": "entity",
+        "project": "project",
+        "run_id": "existing-run",
+        "name": "existing-name",
+    }
+    torch.save(state, path)
+
+    cfg = make_cfg(tmp_path, num_steps=3, resume=str(path))
+    cfg.wandb = {"mode": "online", "entity": "entity", "project": "project", "resume": resume_wandb}
+    trainer = Trainer(cfg, tmp_path / "resumed")
+    captured: dict[str, Any] = {}
+
+    def init(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=init))
+    trainer.logger.start()
+    assert trainer.step == 2
+    assert trainer.scheduler.last_epoch == 2
+    assert captured["id"] == ("existing-run" if resume_wandb else None)
+    assert captured["resume"] == ("must" if resume_wandb else "never")
+
+
+@pytest.mark.parametrize("has_checkpoint", [False, True])
+def test_wandb_resume_requires_checkpoint_run_identity(
+    tmp_path: Path, has_checkpoint: bool
+) -> None:
+    path = tmp_path / "source" / "checkpoints" / "last.pt"
+    if has_checkpoint:
+        Trainer(make_cfg(tmp_path, num_steps=1), tmp_path / "source").fit()
+    cfg = make_cfg(tmp_path, resume=str(path) if has_checkpoint else None)
+    cfg.wandb.resume = True
+    with pytest.raises(ValueError, match="requires training.resume with a recorded W&B run"):
+        Trainer(cfg, tmp_path / "resumed")
 
 
 def test_validation_requires_frozen_suites(tmp_path: Path) -> None:

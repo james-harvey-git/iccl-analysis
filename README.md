@@ -203,5 +203,8 @@ teacher parameters, task distributions and evaluation-suite settings may differ.
 `eval_sets.retention.monitor_num_sequences` controls only the live subset.
 `eval_sets.num_sequences` still controls ICL/composition and training validation.
 Training data generation and its golden-stream checksums are unchanged. W&B jobs
-record the metric protocol and start fresh reporting runs; they do not resume
-historical metric series with different definitions.
+record the metric protocol and start fresh reporting runs by default. When metric
+definitions are unchanged, pass `wandb.resume=true` alongside `training.resume`
+to continue the checkpoint's existing online W&B run. Its history is preserved,
+and its configuration records the current step budget and output directory.
+Use a fresh run when metric definitions differ from the historical series.

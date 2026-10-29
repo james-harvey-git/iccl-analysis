@@ -20,6 +20,7 @@ from jaxtyping import Float
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
+from iccl.checkpoints import source_from_checkpoint
 from iccl.data.dataset import (
     collate_sequences,
     sequence_dataset_from_config,
@@ -147,7 +148,8 @@ class Trainer:
     restores a checkpoint and continues the data stream at the exact sample
     offset (bit-exact given the same batch size and worker count). Snapshot
     steps already behind a resumed run are not retaken, so a resumed run's
-    series has a gap wherever the original run's did.
+    series has a gap wherever the original run's did. ``cfg.wandb.resume``
+    continues the checkpoint's online W&B run instead of starting a fresh one.
     """
 
     def __init__(self, cfg: DictConfig, out_dir: Path | str) -> None:
@@ -163,9 +165,19 @@ class Trainer:
         self.best_metric_name = str(cfg.data.eval_sets.get("best_metric", ""))
         self.last_loss = float("nan")
         self.snapshot_steps = resolve_snapshot_steps(cfg.training)
-        self.logger = RunLogger(cfg, self.out_dir, job_type="train")
-        if cfg.training.resume is not None:
+        checkpoint = (
             self._load_checkpoint(Path(cfg.training.resume))
+            if cfg.training.resume is not None
+            else None
+        )
+        resume_run = None
+        if cfg.wandb.get("resume", False):
+            resume_run = source_from_checkpoint(checkpoint) if checkpoint is not None else None
+            if resume_run is None:
+                raise ValueError(
+                    "wandb.resume=true requires training.resume with a recorded W&B run"
+                )
+        self.logger = RunLogger(cfg, self.out_dir, job_type="train", resume_run=resume_run)
 
     # ------------------------------------------------------------------ setup
 
@@ -376,7 +388,7 @@ class Trainer:
             state["cuda_rng"] = torch.cuda.get_rng_state_all()
         torch.save(state, ckpt_dir / name)
 
-    def _load_checkpoint(self, path: Path) -> None:
+    def _load_checkpoint(self, path: Path) -> dict[str, Any]:
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
         self.model.load_state_dict(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
@@ -391,3 +403,4 @@ class Trainer:
         np.random.set_state(ckpt["numpy_rng"])
         if self.device.type == "cuda" and "cuda_rng" in ckpt:
             torch.cuda.set_rng_state_all(ckpt["cuda_rng"])
+        return ckpt
