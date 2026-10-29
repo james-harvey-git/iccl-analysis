@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from jaxtyping import Float, Int
 from omegaconf import DictConfig
 
@@ -44,10 +43,9 @@ class TokenEmbedding(nn.Module):
         token_type: Int[torch.Tensor, "batch seq"],
     ) -> Float[torch.Tensor, "batch seq d_model"]:
         token_type = token_type.long()
-        type_mask = F.one_hot(token_type, num_classes=self.weight.shape[0]).to(tokens.dtype)
-        features = rearrange(tokens.unsqueeze(-2) * type_mask.unsqueeze(-1), "b t k i -> b t (k i)")
-        weight = rearrange(self.weight, "k o i -> o (k i)")
-        return F.linear(features, weight) + F.embedding(token_type, self.bias)
+        return torch.einsum("btoi,bti->bto", self.weight[token_type], tokens) + F.embedding(
+            token_type, self.bias
+        )
 
 
 @dataclass
