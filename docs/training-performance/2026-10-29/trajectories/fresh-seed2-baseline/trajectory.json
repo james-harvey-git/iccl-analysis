@@ -1,0 +1,200 @@
+{
+  "revision": "ebc961c1d24c3dd63c9d83890b79dafab1d52f23",
+  "torch": "2.11.0+cu128",
+  "packages": {
+    "torch": "2.11.0+cu128",
+    "triton": "3.6.0",
+    "fla-core": "0.5.2",
+    "tilelang": "0.1.14"
+  },
+  "source_file": "/lus/lfs1aip2/scratch/u6oz/jharvey.u6oz/iccl-analysis/training-performance/20261029/source/src/iccl/models/model.py",
+  "slurm_job_id": "7831636",
+  "checkpoint_sha256": null,
+  "matmul_allow_tf32": false,
+  "device": "cuda",
+  "hardware": "NVIDIA GH200 120GB",
+  "config": {
+    "data": {
+      "name": "hyperteacher",
+      "input_dim": 16,
+      "output_dim": 16,
+      "hidden_dims": [
+        16
+      ],
+      "use_bias": true,
+      "num_modules": {
+        "min": 4,
+        "max": 12,
+        "held_out": [
+          6,
+          10
+        ]
+      },
+      "scale": 1.7320508075688772,
+      "weighting": "discrete",
+      "sequence": {
+        "curriculum_sampler": "constructive",
+        "hotness": 2,
+        "surplus_tasks": [
+          0,
+          4
+        ],
+        "demos_per_task": {
+          "min": 24,
+          "max": 40,
+          "scope": "per_task"
+        },
+        "signal_boundaries": true,
+        "require_identifiable": true,
+        "require_full_rank": false,
+        "max_attempts": 1000
+      },
+      "eval_sets": {
+        "num_sequences": 256,
+        "demos_per_task": 32,
+        "out_dir": "/scratch/u6oz/jharvey.u6oz/iccl-analysis/training-performance/20261029/eval_sets",
+        "bootstrap_seed": 0,
+        "bootstrap_replicates": 1000,
+        "best_metric": "validation/token_mse",
+        "capabilities": [
+          "icl",
+          "composition",
+          "retention"
+        ],
+        "canonical": {
+          "module_count": 8,
+          "task_count": 8
+        },
+        "module_counts": {
+          "min": 4,
+          "max": 12
+        },
+        "task_variation": {
+          "surplus_tasks": {
+            "min": 0,
+            "max": 4
+          }
+        },
+        "composition": {
+          "constituent_task_exposures": 1,
+          "controls": [
+            "unexposed",
+            "no_history"
+          ]
+        },
+        "retention": {
+          "controls": [
+            "unexposed",
+            "shared"
+          ],
+          "num_worlds": 256,
+          "monitor_num_sequences": 256
+        },
+        "retention_factorial": {
+          "enabled": true,
+          "num_worlds": 64,
+          "preceding_tasks": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "intervening_tasks": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        "rehearsal": {
+          "enabled": false,
+          "num_worlds": 256
+        }
+      },
+      "distribution_diagnostic": {
+        "num_sequences": 10000,
+        "bootstrap_seed": 0,
+        "bootstrap_replicates": 1000
+      }
+    },
+    "model": {
+      "name": "gdn",
+      "d_model": 256,
+      "n_heads": 4,
+      "n_layers": 4,
+      "d_ffw": 1024,
+      "expand_v": 2,
+      "use_short_conv": true,
+      "conv_size": 4,
+      "use_gate": true,
+      "allow_neg_eigval": false,
+      "norm_eps": 1e-05,
+      "backend": "auto"
+    },
+    "training": {
+      "batch_size": 128,
+      "num_steps": 2000,
+      "optimizer": "adamw",
+      "lr": 0.0003,
+      "warmup_steps": 1000,
+      "schedule": "constant",
+      "weight_decay": 0.003,
+      "grad_clip": null,
+      "precision": "auto",
+      "num_workers": 4,
+      "log_every": 50,
+      "validation_every": 200,
+      "monitor_every": 1000,
+      "checkpoint_every": 1000000,
+      "resume": null,
+      "snapshots": {
+        "every": null,
+        "at": [],
+        "log": null,
+        "include_optimizer_state": false
+      }
+    },
+    "seed": 0,
+    "device": "auto",
+    "wandb": {
+      "mode": "online",
+      "project": "iccl-analysis",
+      "entity": "jublett-university-of-oxford",
+      "name": "performance-fresh-seed2-baseline",
+      "upload_weights": false
+    },
+    "evaluation": {
+      "batch_size": 32,
+      "results_dir": null,
+      "suites": "all",
+      "checkpoints": [],
+      "upload_results": false
+    },
+    "performance": {
+      "mode": "trajectory",
+      "variant": "baseline",
+      "initialization_seed": 2,
+      "checkpoint": null,
+      "batches": 8,
+      "repetitions": 3
+    }
+  },
+  "elapsed_seconds": 426.57496608793736,
+  "step": 2000,
+  "last_loss": 0.18821872770786285,
+  "best_validation": 0.19358405674068271,
+  "wandb_run": {
+    "entity": "jublett-university-of-oxford",
+    "project": "iccl-analysis",
+    "run_id": "i6gd3ew8",
+    "name": "performance-fresh-seed2-baseline"
+  }
+}

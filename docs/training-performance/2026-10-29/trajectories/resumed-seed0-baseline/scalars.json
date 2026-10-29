@@ -1,0 +1,8 @@
+{
+  "composition/m08__t08__d032/benefit_mean": 0.19362258650575945,
+  "icl/m08__t08__d032/within_task_nmse_mean": 0.449812486773656,
+  "retention/m08__t08__d032/episodic_savings_mean": 0.02351763545649015,
+  "retention/m08__t08__d032/module_savings_mean": 0.30448828333318584,
+  "retention/m08__t08__d032/savings_mean": 0.328005918789676,
+  "validation/token_mse": 0.132812882138905
+}

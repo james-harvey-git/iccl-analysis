@@ -1,0 +1,16 @@
+..                                                                       [100%]
+=============================== warnings summary ===============================
+tests/test_ops_parity.py: 14 warnings
+  /home/u6oz/jharvey.u6oz/iccl-analysis/.venv/lib/python3.11/site-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/test_ops_parity.py::test_forward_and_backward_parity
+  /home/u6oz/jharvey.u6oz/iccl-analysis/.venv/lib/python3.11/site-packages/tilelang/cache/__init__.py:82: DeprecationWarning: `tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. Use `T.copy(..., disable_tma=True)` per-copy instead.
+    return cache.cached(
+
+tests/test_ops_parity.py::test_forward_and_backward_parity
+  /home/u6oz/jharvey.u6oz/iccl-analysis/.venv/lib/python3.11/site-packages/tilelang/jit/kernel.py:170: DeprecationWarning: `tl.disable_tma_lower` is deprecated and will be removed in v0.1.10. Use `T.copy(..., disable_tma=True)` per-copy instead.
+    instance = cls(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2 passed, 245 deselected, 16 warnings in 49.75s

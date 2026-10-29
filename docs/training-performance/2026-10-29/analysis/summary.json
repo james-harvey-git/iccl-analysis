@@ -1,0 +1,635 @@
+{
+  "candidate": "bias",
+  "bootstrap": "10000 paired whole-episode draws, seed 0, percentile 95% interval",
+  "uncertainty_scope": "frozen episodes, excluding training-seed and long-run uncertainty",
+  "pairs": [
+    {
+      "label": "fresh-seed0",
+      "validation": {
+        "baseline_token_mse": 0.17224613921188645,
+        "candidate_token_mse": 0.17243336668050024,
+        "candidate_minus_baseline_percent": 0.10869762856251192,
+        "paired_episode_percentile_95_ci": [
+          0.07172551605191267,
+          0.14466682383551613
+        ],
+        "episodes": 256,
+        "prediction_tokens": 73072,
+        "within_one_percent": true
+      },
+      "runs": {
+        "baseline": {
+          "elapsed_seconds": 426.288664822001,
+          "median_sequences_per_second_after_first_window": 750.2385186457184,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "l6e0kmp1",
+            "name": "performance-fresh-seed0-baseline"
+          },
+          "revision": "ebc961c1d24c3dd63c9d83890b79dafab1d52f23",
+          "job_id": "7831634",
+          "step": 2000,
+          "checkpoint_sha256": null
+        },
+        "bias": {
+          "elapsed_seconds": 335.262159298989,
+          "median_sequences_per_second_after_first_window": 964.512866931914,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "at4jvhg0",
+            "name": "performance-fresh-seed0-bias"
+          },
+          "revision": "647b318a2991a60a04f4086b1e3bc201e17cc05f",
+          "job_id": "7831887",
+          "step": 2000,
+          "checkpoint_sha256": null
+        }
+      },
+      "capabilities": {
+        "max_abs_canonical_curve_difference": 0.010067814538382347,
+        "max_curve_difference_location": {
+          "curve_type": "retention_learning",
+          "condition": "unexposed",
+          "retention_component": "",
+          "x_name": "demo_index",
+          "x_value": "4",
+          "baseline_nmse": 0.9985392897695056,
+          "candidate_nmse": 1.008607104307888
+        },
+        "paired_episode_conditions": [
+          {
+            "suite": "composition__exposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "exposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.565247024378061,
+            "candidate_mean_nmse": 0.5669299998332031,
+            "candidate_minus_baseline_nmse": 0.0016829754551423138,
+            "paired_episode_percentile_95_ci": [
+              0.0011330466680399293,
+              0.0022314673938679474
+            ]
+          },
+          {
+            "suite": "composition__no_history__m08__t08__d032",
+            "capability": "composition",
+            "condition": "no_history",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6615901932631818,
+            "candidate_mean_nmse": 0.6620794191667496,
+            "candidate_minus_baseline_nmse": 0.0004892259035677846,
+            "paired_episode_percentile_95_ci": [
+              6.494570985274085e-05,
+              0.0009250805724781149
+            ]
+          },
+          {
+            "suite": "composition__unexposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6075228744329273,
+            "candidate_mean_nmse": 0.6111809773084934,
+            "candidate_minus_baseline_nmse": 0.003658102875566115,
+            "paired_episode_percentile_95_ci": [
+              0.0030573757911131457,
+              0.004254712206400065
+            ]
+          },
+          {
+            "suite": "icl__ordinary__m08__t08__d032",
+            "capability": "icl",
+            "condition": "ordinary",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5650816338406021,
+            "candidate_mean_nmse": 0.5654998936417367,
+            "candidate_minus_baseline_nmse": 0.0004182598011346519,
+            "paired_episode_percentile_95_ci": [
+              0.00021070856844519726,
+              0.0006253153912852517
+            ]
+          },
+          {
+            "suite": "retention__repeat__m08__t08__d032",
+            "capability": "retention",
+            "condition": "repeat",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5619802755112188,
+            "candidate_mean_nmse": 0.5633875815111944,
+            "candidate_minus_baseline_nmse": 0.0014073059999757651,
+            "paired_episode_percentile_95_ci": [
+              0.000791862403651013,
+              0.0020542549037493515
+            ]
+          },
+          {
+            "suite": "retention__shared__m08__t08__d032",
+            "capability": "retention",
+            "condition": "shared",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5633428463696932,
+            "candidate_mean_nmse": 0.5647889669229452,
+            "candidate_minus_baseline_nmse": 0.0014461205532520695,
+            "paired_episode_percentile_95_ci": [
+              0.0008390946530772565,
+              0.002065709985009079
+            ]
+          },
+          {
+            "suite": "retention__unexposed__m08__t08__d032",
+            "capability": "retention",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6035377314531511,
+            "candidate_mean_nmse": 0.6068335750801153,
+            "candidate_minus_baseline_nmse": 0.0032958436269641053,
+            "paired_episode_percentile_95_ci": [
+              0.002648096746353773,
+              0.003956593328340711
+            ]
+          }
+        ]
+      },
+      "end_to_end_speedup": 1.271508438987992,
+      "median_window_speedup": 1.2856083005082033,
+      "largest_intermediate_validation_difference_percent": 1.4013740051811463,
+      "largest_validation_difference_location": {
+        "step": 1000,
+        "candidate_minus_baseline_percent": 1.4013740051811463
+      }
+    },
+    {
+      "label": "fresh-seed1",
+      "validation": {
+        "baseline_token_mse": 0.1728426943024739,
+        "candidate_token_mse": 0.17272117874255347,
+        "candidate_minus_baseline_percent": -0.07030413429438587,
+        "paired_episode_percentile_95_ci": [
+          -0.12530109063810604,
+          -0.014806325000273736
+        ],
+        "episodes": 256,
+        "prediction_tokens": 73072,
+        "within_one_percent": true
+      },
+      "runs": {
+        "baseline": {
+          "elapsed_seconds": 425.9593583380338,
+          "median_sequences_per_second_after_first_window": 752.0015005286502,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "kdjfjlhk",
+            "name": "performance-fresh-seed1-baseline"
+          },
+          "revision": "ebc961c1d24c3dd63c9d83890b79dafab1d52f23",
+          "job_id": "7831635",
+          "step": 2000,
+          "checkpoint_sha256": null
+        },
+        "bias": {
+          "elapsed_seconds": 336.0071464419598,
+          "median_sequences_per_second_after_first_window": 964.6703324664909,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "cwzc9m71",
+            "name": "performance-fresh-seed1-bias"
+          },
+          "revision": "647b318a2991a60a04f4086b1e3bc201e17cc05f",
+          "job_id": "7831888",
+          "step": 2000,
+          "checkpoint_sha256": null
+        }
+      },
+      "capabilities": {
+        "max_abs_canonical_curve_difference": 0.022677806790071697,
+        "max_curve_difference_location": {
+          "curve_type": "composition_learning",
+          "condition": "unexposed",
+          "retention_component": "",
+          "x_name": "demo_index",
+          "x_value": "0",
+          "baseline_nmse": 1.2122743875852842,
+          "candidate_nmse": 1.2349521943753559
+        },
+        "paired_episode_conditions": [
+          {
+            "suite": "composition__exposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "exposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5693233288872361,
+            "candidate_mean_nmse": 0.571502290783341,
+            "candidate_minus_baseline_nmse": 0.0021789618961048016,
+            "paired_episode_percentile_95_ci": [
+              0.001289227482643186,
+              0.0030743206142772534
+            ]
+          },
+          {
+            "suite": "composition__no_history__m08__t08__d032",
+            "capability": "composition",
+            "condition": "no_history",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6643380126834246,
+            "candidate_mean_nmse": 0.6634801165500388,
+            "candidate_minus_baseline_nmse": -0.0008578961333856896,
+            "paired_episode_percentile_95_ci": [
+              -0.00159627379624558,
+              -0.00011517394706270082
+            ]
+          },
+          {
+            "suite": "composition__unexposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6119132337749594,
+            "candidate_mean_nmse": 0.6183873146396167,
+            "candidate_minus_baseline_nmse": 0.006474080864657351,
+            "paired_episode_percentile_95_ci": [
+              0.005474439035892844,
+              0.007486238472640478
+            ]
+          },
+          {
+            "suite": "icl__ordinary__m08__t08__d032",
+            "capability": "icl",
+            "condition": "ordinary",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5670431721662651,
+            "candidate_mean_nmse": 0.567344017916477,
+            "candidate_minus_baseline_nmse": 0.0003008457502119313,
+            "paired_episode_percentile_95_ci": [
+              -3.029164171105064e-05,
+              0.0006298393040419724
+            ]
+          },
+          {
+            "suite": "retention__repeat__m08__t08__d032",
+            "capability": "retention",
+            "condition": "repeat",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5648205392425819,
+            "candidate_mean_nmse": 0.566887954142365,
+            "candidate_minus_baseline_nmse": 0.0020674148997831695,
+            "paired_episode_percentile_95_ci": [
+              0.0011623255148706653,
+              0.0029705088967134892
+            ]
+          },
+          {
+            "suite": "retention__shared__m08__t08__d032",
+            "capability": "retention",
+            "condition": "shared",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5662582268651957,
+            "candidate_mean_nmse": 0.568630258232301,
+            "candidate_minus_baseline_nmse": 0.00237203136710534,
+            "paired_episode_percentile_95_ci": [
+              0.001473726617935213,
+              0.0032603129967987174
+            ]
+          },
+          {
+            "suite": "retention__unexposed__m08__t08__d032",
+            "capability": "retention",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6072878343034038,
+            "candidate_mean_nmse": 0.6141301746197247,
+            "candidate_minus_baseline_nmse": 0.006842340316320859,
+            "paired_episode_percentile_95_ci": [
+              0.005879471827521288,
+              0.007795644369000947
+            ]
+          }
+        ]
+      },
+      "end_to_end_speedup": 1.267709222403732,
+      "median_window_speedup": 1.282803733487681,
+      "largest_intermediate_validation_difference_percent": 0.5930373443456838,
+      "largest_validation_difference_location": {
+        "step": 1600,
+        "candidate_minus_baseline_percent": -0.5930373443456838
+      }
+    },
+    {
+      "label": "fresh-seed2",
+      "validation": {
+        "baseline_token_mse": 0.1935840577689777,
+        "candidate_token_mse": 0.19227224280386804,
+        "candidate_minus_baseline_percent": -0.6776461761511244,
+        "paired_episode_percentile_95_ci": [
+          -0.7457677563261473,
+          -0.6073542794437713
+        ],
+        "episodes": 256,
+        "prediction_tokens": 73072,
+        "within_one_percent": true
+      },
+      "runs": {
+        "baseline": {
+          "elapsed_seconds": 426.57496608793736,
+          "median_sequences_per_second_after_first_window": 750.2673893486175,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "i6gd3ew8",
+            "name": "performance-fresh-seed2-baseline"
+          },
+          "revision": "ebc961c1d24c3dd63c9d83890b79dafab1d52f23",
+          "job_id": "7831636",
+          "step": 2000,
+          "checkpoint_sha256": null
+        },
+        "bias": {
+          "elapsed_seconds": 336.6441878179321,
+          "median_sequences_per_second_after_first_window": 962.6579679514962,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "lbgz03gm",
+            "name": "performance-fresh-seed2-bias"
+          },
+          "revision": "647b318a2991a60a04f4086b1e3bc201e17cc05f",
+          "job_id": "7831889",
+          "step": 2000,
+          "checkpoint_sha256": null
+        }
+      },
+      "capabilities": {
+        "max_abs_canonical_curve_difference": 0.01989648857397841,
+        "max_curve_difference_location": {
+          "curve_type": "retention_learning",
+          "condition": "original",
+          "retention_component": "",
+          "x_name": "demo_index",
+          "x_value": "6",
+          "baseline_nmse": 0.9048001902792787,
+          "candidate_nmse": 0.8849037017053003
+        },
+        "paired_episode_conditions": [
+          {
+            "suite": "composition__exposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "exposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6396453958507331,
+            "candidate_mean_nmse": 0.634364861166754,
+            "candidate_minus_baseline_nmse": -0.005280534683979085,
+            "paired_episode_percentile_95_ci": [
+              -0.006356270381569512,
+              -0.004201987805335221
+            ]
+          },
+          {
+            "suite": "composition__no_history__m08__t08__d032",
+            "capability": "composition",
+            "condition": "no_history",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.7281988424860142,
+            "candidate_mean_nmse": 0.7257095878540585,
+            "candidate_minus_baseline_nmse": -0.002489254631955514,
+            "paired_episode_percentile_95_ci": [
+              -0.0032961528319142216,
+              -0.0016803626426480436
+            ]
+          },
+          {
+            "suite": "composition__unexposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6879437000510908,
+            "candidate_mean_nmse": 0.680465905188832,
+            "candidate_minus_baseline_nmse": -0.007477794862258795,
+            "paired_episode_percentile_95_ci": [
+              -0.008646445287902618,
+              -0.006339119316455113
+            ]
+          },
+          {
+            "suite": "icl__ordinary__m08__t08__d032",
+            "capability": "icl",
+            "condition": "ordinary",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6353699684139194,
+            "candidate_mean_nmse": 0.6308851401568635,
+            "candidate_minus_baseline_nmse": -0.004484828257055991,
+            "paired_episode_percentile_95_ci": [
+              -0.0049187568469105806,
+              -0.00406374114482975
+            ]
+          },
+          {
+            "suite": "retention__repeat__m08__t08__d032",
+            "capability": "retention",
+            "condition": "repeat",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6382091951412414,
+            "candidate_mean_nmse": 0.6320724068734508,
+            "candidate_minus_baseline_nmse": -0.00613678826779061,
+            "paired_episode_percentile_95_ci": [
+              -0.007369509093978815,
+              -0.004926438699096915
+            ]
+          },
+          {
+            "suite": "retention__shared__m08__t08__d032",
+            "capability": "retention",
+            "condition": "shared",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6398904842531637,
+            "candidate_mean_nmse": 0.633541593749596,
+            "candidate_minus_baseline_nmse": -0.006348890503567852,
+            "paired_episode_percentile_95_ci": [
+              -0.007623370572677069,
+              -0.005077242668424637
+            ]
+          },
+          {
+            "suite": "retention__unexposed__m08__t08__d032",
+            "capability": "retention",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6863548289969488,
+            "candidate_mean_nmse": 0.6781261020424054,
+            "candidate_minus_baseline_nmse": -0.008228726954543264,
+            "paired_episode_percentile_95_ci": [
+              -0.009349526309863148,
+              -0.007112294241827062
+            ]
+          }
+        ]
+      },
+      "end_to_end_speedup": 1.2671389601374692,
+      "median_window_speedup": 1.2830865123796416,
+      "largest_intermediate_validation_difference_percent": 0.6776455136170894,
+      "largest_validation_difference_location": {
+        "step": 2000,
+        "candidate_minus_baseline_percent": -0.6776455136170894
+      }
+    },
+    {
+      "label": "resumed-seed0",
+      "validation": {
+        "baseline_token_mse": 0.1328128823728668,
+        "candidate_token_mse": 0.13283536969010096,
+        "candidate_minus_baseline_percent": 0.016931578347212966,
+        "paired_episode_percentile_95_ci": [
+          0.004528086908872878,
+          0.029102876629777386
+        ],
+        "episodes": 256,
+        "prediction_tokens": 73072,
+        "within_one_percent": true
+      },
+      "runs": {
+        "baseline": {
+          "elapsed_seconds": 240.31051546195522,
+          "median_sequences_per_second_after_first_window": 751.8358337154223,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "16s75dfa",
+            "name": "performance-resumed-seed0-baseline"
+          },
+          "revision": "ebc961c1d24c3dd63c9d83890b79dafab1d52f23",
+          "job_id": "7831361",
+          "step": 3501000,
+          "checkpoint_sha256": "d5c248eff34be1409c745f64428e72f1c6ba3063df2d91032b64979b90dcdfb0"
+        },
+        "bias": {
+          "elapsed_seconds": 200.94669431401417,
+          "median_sequences_per_second_after_first_window": 967.0996487741563,
+          "wandb_run": {
+            "entity": "jublett-university-of-oxford",
+            "project": "iccl-analysis",
+            "run_id": "o2vquqml",
+            "name": "performance-resumed-seed0-bias"
+          },
+          "revision": "647b318a2991a60a04f4086b1e3bc201e17cc05f",
+          "job_id": "7831886",
+          "step": 3501000,
+          "checkpoint_sha256": "d5c248eff34be1409c745f64428e72f1c6ba3063df2d91032b64979b90dcdfb0"
+        }
+      },
+      "capabilities": {
+        "max_abs_canonical_curve_difference": 0.004682452913567614,
+        "max_curve_difference_location": {
+          "curve_type": "retention_learning",
+          "condition": "unexposed",
+          "retention_component": "",
+          "x_name": "demo_index",
+          "x_value": "1",
+          "baseline_nmse": 1.1444096003397928,
+          "candidate_nmse": 1.1490920532533604
+        },
+        "paired_episode_conditions": [
+          {
+            "suite": "composition__exposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "exposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.34660800940122866,
+            "candidate_mean_nmse": 0.3469953273874036,
+            "candidate_minus_baseline_nmse": 0.00038731798617488414,
+            "paired_episode_percentile_95_ci": [
+              0.00018910149983599776,
+              0.000590918104713714
+            ]
+          },
+          {
+            "suite": "composition__no_history__m08__t08__d032",
+            "capability": "composition",
+            "condition": "no_history",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.6219652212615135,
+            "candidate_mean_nmse": 0.6219875970356847,
+            "candidate_minus_baseline_nmse": 2.2375774171145852e-05,
+            "paired_episode_percentile_95_ci": [
+              -4.9864153144543625e-05,
+              9.361573351850772e-05
+            ]
+          },
+          {
+            "suite": "composition__unexposed__m08__t08__d032",
+            "capability": "composition",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5402305959069882,
+            "candidate_mean_nmse": 0.5405463076268959,
+            "candidate_minus_baseline_nmse": 0.0003157117199078037,
+            "paired_episode_percentile_95_ci": [
+              0.00014810993862381824,
+              0.00048614567267832635
+            ]
+          },
+          {
+            "suite": "icl__ordinary__m08__t08__d032",
+            "capability": "icl",
+            "condition": "ordinary",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.449812486773656,
+            "candidate_mean_nmse": 0.4498463392871547,
+            "candidate_minus_baseline_nmse": 3.3852513498678054e-05,
+            "paired_episode_percentile_95_ci": [
+              -1.0232482058632305e-05,
+              7.719962861143545e-05
+            ]
+          },
+          {
+            "suite": "retention__repeat__m08__t08__d032",
+            "capability": "retention",
+            "condition": "repeat",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.21680053161992063,
+            "candidate_mean_nmse": 0.21699324307040574,
+            "candidate_minus_baseline_nmse": 0.00019271145048513317,
+            "paired_episode_percentile_95_ci": [
+              4.22211162325749e-05,
+              0.0003501552462863874
+            ]
+          },
+          {
+            "suite": "retention__shared__m08__t08__d032",
+            "capability": "retention",
+            "condition": "shared",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.24031816707641077,
+            "candidate_mean_nmse": 0.24041678134163383,
+            "candidate_minus_baseline_nmse": 9.861426522306119e-05,
+            "paired_episode_percentile_95_ci": [
+              -7.197448531847655e-05,
+              0.0002741944228735111
+            ]
+          },
+          {
+            "suite": "retention__unexposed__m08__t08__d032",
+            "capability": "retention",
+            "condition": "unexposed",
+            "episodes": 256,
+            "baseline_mean_nmse": 0.5448064504095966,
+            "candidate_mean_nmse": 0.5449960130365891,
+            "candidate_minus_baseline_nmse": 0.0001895626269924251,
+            "paired_episode_percentile_95_ci": [
+              6.7923497375466036e-06,
+              0.00037752171854032746
+            ]
+          }
+        ]
+      },
+      "end_to_end_speedup": 1.1958918572028272,
+      "median_window_speedup": 1.2863175781273197,
+      "largest_intermediate_validation_difference_percent": 0.01693187431363506,
+      "largest_validation_difference_location": {
+        "step": 3501000,
+        "candidate_minus_baseline_percent": 0.01693187431363506
+      }
+    }
+  ]
+}

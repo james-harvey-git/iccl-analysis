@@ -1,0 +1,302 @@
+{
+  "revision": "3096371047aa72b8cc9f3ef4a19bc84ff3842f01",
+  "torch": "2.11.0+cu128",
+  "packages": {
+    "torch": "2.11.0+cu128",
+    "triton": "3.6.0",
+    "fla-core": "0.5.2",
+    "tilelang": "0.1.14"
+  },
+  "source_file": "/scratch/u6oz/jharvey.u6oz/iccl-analysis/training-performance/20261029/source-precision/src/iccl/models/model.py",
+  "slurm_job_id": "7831753",
+  "checkpoint_sha256": "d5c248eff34be1409c745f64428e72f1c6ba3063df2d91032b64979b90dcdfb0",
+  "matmul_allow_tf32": false,
+  "cudnn_allow_tf32": true,
+  "device": "cuda",
+  "hardware": "NVIDIA GH200 120GB",
+  "config": {
+    "data": {
+      "name": "hyperteacher",
+      "input_dim": 16,
+      "output_dim": 16,
+      "hidden_dims": [
+        16
+      ],
+      "use_bias": true,
+      "num_modules": {
+        "min": 4,
+        "max": 12,
+        "held_out": [
+          6,
+          10
+        ]
+      },
+      "scale": 1.7320508075688772,
+      "weighting": "discrete",
+      "sequence": {
+        "curriculum_sampler": "constructive",
+        "hotness": 2,
+        "surplus_tasks": [
+          0,
+          4
+        ],
+        "demos_per_task": {
+          "min": 24,
+          "max": 40,
+          "scope": "per_task"
+        },
+        "signal_boundaries": true,
+        "require_identifiable": true,
+        "require_full_rank": false,
+        "max_attempts": 1000
+      },
+      "eval_sets": {
+        "num_sequences": 256,
+        "demos_per_task": 32,
+        "out_dir": "data/eval_sets",
+        "bootstrap_seed": 0,
+        "bootstrap_replicates": 1000,
+        "best_metric": "validation/token_mse",
+        "capabilities": [
+          "icl",
+          "composition",
+          "retention"
+        ],
+        "canonical": {
+          "module_count": 8,
+          "task_count": 8
+        },
+        "module_counts": {
+          "min": 4,
+          "max": 12
+        },
+        "task_variation": {
+          "surplus_tasks": {
+            "min": 0,
+            "max": 4
+          }
+        },
+        "composition": {
+          "constituent_task_exposures": 1,
+          "controls": [
+            "unexposed",
+            "no_history"
+          ]
+        },
+        "retention": {
+          "controls": [
+            "unexposed",
+            "shared"
+          ],
+          "num_worlds": 256,
+          "monitor_num_sequences": 256
+        },
+        "retention_factorial": {
+          "enabled": true,
+          "num_worlds": 64,
+          "preceding_tasks": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          "intervening_tasks": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        },
+        "rehearsal": {
+          "enabled": false,
+          "num_worlds": 256
+        }
+      },
+      "distribution_diagnostic": {
+        "num_sequences": 10000,
+        "bootstrap_seed": 0,
+        "bootstrap_replicates": 1000
+      }
+    },
+    "model": {
+      "name": "gdn",
+      "d_model": 256,
+      "n_heads": 4,
+      "n_layers": 4,
+      "d_ffw": 1024,
+      "expand_v": 2,
+      "use_short_conv": true,
+      "conv_size": 4,
+      "use_gate": true,
+      "allow_neg_eigval": false,
+      "norm_eps": 1e-05,
+      "backend": "auto"
+    },
+    "training": {
+      "batch_size": 128,
+      "num_steps": 2000,
+      "optimizer": "adamw",
+      "lr": 0.0003,
+      "warmup_steps": 1000,
+      "schedule": "constant",
+      "weight_decay": 0.003,
+      "grad_clip": null,
+      "precision": "auto",
+      "num_workers": 4,
+      "log_every": 50,
+      "validation_every": 200,
+      "monitor_every": 1000,
+      "checkpoint_every": 1000000,
+      "resume": null,
+      "snapshots": {
+        "every": null,
+        "at": [],
+        "log": null,
+        "include_optimizer_state": false
+      }
+    },
+    "seed": 0,
+    "device": "auto",
+    "wandb": {
+      "mode": "disabled",
+      "project": "iccl-analysis",
+      "entity": "jublett-university-of-oxford",
+      "name": null,
+      "upload_weights": false
+    },
+    "evaluation": {
+      "batch_size": 32,
+      "results_dir": null,
+      "suites": "all",
+      "checkpoints": [],
+      "upload_results": false
+    },
+    "performance": {
+      "mode": "benchmark",
+      "variant": "optimized",
+      "initialization_seed": 0,
+      "checkpoint": "/scratch/u6oz/jharvey.u6oz/iccl-analysis/training-performance/20261029/checkpoints/step_3500000.pt",
+      "batches": 8,
+      "repetitions": 3
+    }
+  },
+  "batch_sha256": "4734d6dab3865dd263f75a357d058245e0226c17c95089f54335eaa00a4f4e6a",
+  "measurements": [
+    {
+      "variant": "baseline",
+      "step_seconds_trials": [
+        0.17290248487552162,
+        0.17315015812528145,
+        0.17331361774995457
+      ],
+      "median_step_seconds": 0.17315015812528145,
+      "last_loss": 0.12630857527256012,
+      "sequences_per_second": 739.2427554549884,
+      "peak_allocated_bytes": 16917804032
+    },
+    {
+      "variant": "optimized",
+      "step_seconds_trials": [
+        0.09112609250041714,
+        0.09117061525012105,
+        0.09125478087480587
+      ],
+      "median_step_seconds": 0.09117061525012105,
+      "last_loss": 0.12631145119667053,
+      "sequences_per_second": 1403.9611298973882,
+      "peak_allocated_bytes": 16940364800
+    },
+    {
+      "variant": "group2",
+      "step_seconds_trials": [
+        0.07831892149988562,
+        0.07846124962543399,
+        0.07850449662510073
+      ],
+      "median_step_seconds": 0.07846124962543399,
+      "last_loss": 0.1263032853603363,
+      "sequences_per_second": 1631.378554522888,
+      "peak_allocated_bytes": 13074161152
+    },
+    {
+      "variant": "group4",
+      "step_seconds_trials": [
+        0.10119688512531866,
+        0.10063942812485038,
+        0.10075022912496934
+      ],
+      "median_step_seconds": 0.10075022912496934,
+      "last_loss": 0.12628932297229767,
+      "sequences_per_second": 1270.4685747288017,
+      "peak_allocated_bytes": 11427094528
+    },
+    {
+      "variant": "bias",
+      "step_seconds_trials": [
+        0.13496686700000282,
+        0.1350260175004223,
+        0.13537691200053814
+      ],
+      "median_step_seconds": 0.1350260175004223,
+      "last_loss": 0.1262926459312439,
+      "sequences_per_second": 947.9654541362717,
+      "peak_allocated_bytes": 16918676480
+    },
+    {
+      "variant": "all_types",
+      "step_seconds_trials": [
+        0.09164713424979709,
+        0.09197575762573251,
+        0.09462974600046437
+      ],
+      "median_step_seconds": 0.09197575762573251,
+      "last_loss": 0.1263151466846466,
+      "sequences_per_second": 1391.6710588115754,
+      "peak_allocated_bytes": 17206248448
+    },
+    {
+      "variant": "bias_group2",
+      "step_seconds_trials": [
+        0.10800867750003817,
+        0.1080010938749183,
+        0.10793917937462538
+      ],
+      "median_step_seconds": 0.1080010938749183,
+      "last_loss": 0.12630780041217804,
+      "sequences_per_second": 1185.1731811924376,
+      "peak_allocated_bytes": 13060984320
+    },
+    {
+      "variant": "all_types_group2",
+      "step_seconds_trials": [
+        0.07886933462486923,
+        0.07876873750046798,
+        0.07885065924983792
+      ],
+      "median_step_seconds": 0.07885065924983792,
+      "last_loss": 0.12630243599414825,
+      "sequences_per_second": 1623.3218747662293,
+      "peak_allocated_bytes": 13280501248
+    },
+    {
+      "variant": "baseline",
+      "step_seconds_trials": [
+        0.17374385424955108,
+        0.17366066049999063,
+        0.17374775799999043
+      ],
+      "median_step_seconds": 0.17374385424955108,
+      "last_loss": 0.12630857527256012,
+      "sequences_per_second": 736.7167060548314,
+      "peak_allocated_bytes": 16918676480
+    }
+  ]
+}

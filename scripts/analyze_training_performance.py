@@ -30,7 +30,8 @@ def validation_pair(baseline: Path, candidate: Path) -> dict:
     right = np.load(next(candidate.glob("final-evaluation/step_*/raw_errors.npz")))
     counts = left["validation.episode_token_count"]
     assert np.array_equal(counts, right["validation.episode_token_count"])
-    a, b = left["validation.episode_error_sum"], right["validation.episode_error_sum"]
+    a = left["validation.episode_error_sum"].astype(np.float64)
+    b = right["validation.episode_error_sum"].astype(np.float64)
     rng = np.random.default_rng(0)
     indices = rng.integers(0, len(a), size=(10000, len(a)))
     bootstrap = 100 * (b[indices].sum(axis=1) - a[indices].sum(axis=1)) / a[indices].sum(axis=1)
@@ -133,10 +134,20 @@ def capability_pair(paths: dict[str, Path], destination: Path, label: str) -> di
                 ).tolist(),
             }
         )
+    largest_key = max(curve_maps[0], key=lambda key: abs(curve_maps[1][key] - curve_maps[0][key]))
     return {
-        "max_abs_canonical_curve_difference": max(
-            abs(curve_maps[1][key] - value) for key, value in curve_maps[0].items()
+        "max_abs_canonical_curve_difference": abs(
+            curve_maps[1][largest_key] - curve_maps[0][largest_key]
         ),
+        "max_curve_difference_location": {
+            "curve_type": largest_key[0],
+            "condition": largest_key[1],
+            "retention_component": largest_key[2],
+            "x_name": largest_key[3],
+            "x_value": largest_key[4],
+            "baseline_nmse": curve_maps[0][largest_key],
+            "candidate_nmse": curve_maps[1][largest_key],
+        },
         "paired_episode_conditions": comparisons,
     }
 
@@ -154,9 +165,9 @@ def main() -> None:
         for key in ("training", "validation", "throughput")
     }
     quantities = {
-        "training": ("train/token_mse", "Training token MSE (logged batches; unsmoothed)"),
+        "training": ("train/token_mse", "Training token MSE"),
         "validation": ("validation/token_mse", "Frozen validation token MSE"),
-        "throughput": ("train/sequences_per_s", "Training sequences / second (50-step windows)"),
+        "throughput": ("train/sequences_per_s", "Sequences / second"),
     }
     pairs = []
     for pair_index, label in enumerate(labels):
@@ -183,8 +194,13 @@ def main() -> None:
                 figure, axes = figures[key]
                 axis = axes.flat[pair_index]
                 steps, values = series(histories[variant], metric)
-                axis.plot(steps, values, label=variant, alpha=0.9, linewidth=1.4)
-                axis.set(title=label, xlabel="Optimizer step", ylabel=y_label)
+                offset = 3_500_000 if label.startswith("resumed") else 0
+                axis.plot(steps - offset, values, label=variant, alpha=0.9, linewidth=1.4)
+                axis.set(
+                    title=label,
+                    xlabel="Optimizer steps since 3,500,000" if offset else "Optimizer step",
+                    ylabel=y_label,
+                )
                 axis.ticklabel_format(axis="x", style="plain", useOffset=False)
                 axis.grid(alpha=0.2)
                 axis.legend()
@@ -200,12 +216,25 @@ def main() -> None:
             histories[args.candidate], "validation/token_mse"
         )
         assert np.array_equal(baseline_steps, candidate_steps)
+        relative = 100 * (candidate_values - baseline_values) / baseline_values
+        largest_index = int(np.argmax(np.abs(relative)))
         pair["largest_intermediate_validation_difference_percent"] = float(
-            np.max(np.abs(100 * (candidate_values - baseline_values) / baseline_values))
+            abs(relative[largest_index])
         )
+        pair["largest_validation_difference_location"] = {
+            "step": int(baseline_steps[largest_index]),
+            "candidate_minus_baseline_percent": float(relative[largest_index]),
+        }
         pairs.append(pair)
 
     for key, (figure, _) in figures.items():
+        figure.suptitle(
+            {
+                "training": "Training objective: logged batches, unsmoothed",
+                "validation": "Frozen validation: 256 episodes, unsmoothed",
+                "throughput": "Training throughput: 50-step windows, including overhead",
+            }[key]
+        )
         figure.savefig(destination / f"{key}.png", dpi=180)
         plt.close(figure)
     payload = {
