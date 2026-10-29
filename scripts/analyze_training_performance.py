@@ -56,7 +56,7 @@ def capability_pair(paths: dict[str, Path], destination: Path, label: str) -> di
         ("retention_learning", "Retention: final task", "Final-task demonstration index"),
     )
     conditions = ["ordinary", "exposed", "unexposed", "no_history", "repeat", "shared"]
-    colors = dict(zip(conditions, plt.cm.tab10.colors, strict=False))
+    colors = {condition: plt.get_cmap("tab10")(index) for index, condition in enumerate(conditions)}
     curve_maps, arrays, manifests = [], [], []
     for variant_index, (variant, path) in enumerate(paths.items()):
         result = next(path.glob("final-evaluation/step_*"))
