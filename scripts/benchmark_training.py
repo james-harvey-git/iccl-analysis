@@ -39,7 +39,16 @@ from iccl.training.trainer import (
 )
 from iccl.utils import resolve_device, seed_everything
 
-VARIANTS = ("baseline", "optimized", "group2", "group4")
+VARIANTS = (
+    "baseline",
+    "optimized",
+    "group2",
+    "group4",
+    "bias",
+    "all_types",
+    "bias_group2",
+    "all_types_group2",
+)
 
 
 def baseline_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
@@ -48,15 +57,31 @@ def baseline_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.
     return torch.einsum("btoi,bti->bto", self.weight[kinds], tokens) + self.bias[kinds]
 
 
+def bias_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
+    kinds = kinds.long()
+    return torch.einsum("btoi,bti->bto", self.weight[kinds], tokens) + F.embedding(kinds, self.bias)
+
+
+def all_types_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
+    kinds = kinds.long()
+    values = F.linear(tokens, self.weight.flatten(0, 1)).unflatten(-1, self.weight.shape[:2])
+    indices = kinds[..., None, None].expand(-1, -1, 1, self.weight.shape[1])
+    return values.gather(-2, indices).squeeze(-2) + F.embedding(kinds, self.bias)
+
+
 def install_variant(model: GDNModel, variant: str) -> None:
     """Change computation on this experimental model without changing its parameter schema."""
     if variant not in VARIANTS:
         raise ValueError(f"unknown performance variant: {variant}")
     if variant == "baseline":
         model.embed.forward = MethodType(baseline_embedding, model.embed)
-    if not variant.startswith("group"):
+    if variant in {"bias", "bias_group2"}:
+        model.embed.forward = MethodType(bias_embedding, model.embed)
+    if variant in {"all_types", "all_types_group2"}:
+        model.embed.forward = MethodType(all_types_embedding, model.embed)
+    groups = {"group2": 2, "group4": 4, "bias_group2": 2, "all_types_group2": 2}.get(variant)
+    if groups is None:
         return
-    groups = int(variant.removeprefix("group"))
     ordinary_forward = model.forward
 
     def grouped_forward(self, tokens, token_type, **kwargs):
@@ -100,6 +125,7 @@ def provenance(cfg: DictConfig, device: torch.device) -> dict[str, Any]:
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "checkpoint_sha256": checkpoint_digest,
         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
         "device": str(device),
         "hardware": torch.cuda.get_device_name(device) if device.type == "cuda" else str(device),
         "config": OmegaConf.to_container(cfg, resolve=True),
@@ -267,6 +293,45 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
                 torch.cuda.empty_cache()
     write_result(
         out_dir / "numerical.json",
+        provenance(cfg, device) | {"batch_sha256": digest, "comparisons": rows},
+    )
+
+
+def precision_probe(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
+    """Locate FP32 differences without changing any numerical acceptance threshold."""
+    checkpoint = checkpoint_from(cfg)
+    state = initial_state(cfg, checkpoint)
+    batches, digest = fixed_batches(cfg, 1, checkpoint["step"] if checkpoint else 0)
+    batch = {key: value.to(device) for key, value in batches[0].items()}
+    real = batch["token_type"] != TOKEN_PAD
+    original_flag = torch.backends.cudnn.allow_tf32
+    rows = []
+    try:
+        for flag in (True, False):
+            torch.backends.cudnn.allow_tf32 = flag
+            reference = None
+            for variant in ("baseline", "optimized", "bias", "all_types"):
+                model = model_from_config(cfg).to(device)
+                model.load_state_dict(state)
+                install_variant(model, variant)
+                with torch.no_grad():
+                    observed = {
+                        "embedding": model.embed(batch["tokens"], batch["token_type"])[real],
+                        "predictions": model(batch["tokens"], batch["token_type"]).preds[real],
+                    }
+                if reference is None:
+                    reference = observed
+                else:
+                    row = {"variant": variant, "cudnn_allow_tf32": flag} | {
+                        name: errors(value, reference[name]) for name, value in observed.items()
+                    }
+                    rows.append(row)
+                    print(json.dumps(row), flush=True)
+                del model
+    finally:
+        torch.backends.cudnn.allow_tf32 = original_flag
+    write_result(
+        out_dir / "precision-probe.json",
         provenance(cfg, device) | {"batch_sha256": digest, "comparisons": rows},
     )
 
@@ -460,6 +525,8 @@ def main(cfg: DictConfig) -> None:
     mode = str(cfg.performance.mode)
     if mode == "preflight":
         preflight(cfg, out_dir, device)
+    elif mode == "precision_probe":
+        precision_probe(cfg, out_dir, device)
     elif mode == "numerical":
         numerical(cfg, out_dir, device)
     elif mode == "benchmark":
