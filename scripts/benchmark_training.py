@@ -46,6 +46,7 @@ VARIANTS = (
     "typed_features_group2",
     "typed_features_group4",
     "bias",
+    "weight_lookup",
     "all_types",
     "bias_group2",
     "all_types_group2",
@@ -73,6 +74,21 @@ def all_types_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch
     return values.gather(-2, indices).squeeze(-2) + F.embedding(kinds, self.bias)
 
 
+def weight_lookup_embedding(self: TokenEmbedding, tokens: torch.Tensor, kinds: torch.Tensor):
+    """Preserve the indexed projection's arithmetic with dense embedding lookup gradients."""
+    kinds = kinds.long()
+    selected = F.embedding(kinds, self.weight.flatten(1)).unflatten(-1, self.weight.shape[1:])
+    return torch.einsum("btoi,bti->bto", selected, tokens) + F.embedding(kinds, self.bias)
+
+
+def comparison_variants(cfg: DictConfig) -> tuple[str, ...]:
+    requested = cfg.performance.get("variants")
+    selected = tuple(requested) if requested is not None else VARIANTS
+    if unknown := set(selected) - set(VARIANTS):
+        raise ValueError(f"unknown performance variants: {sorted(unknown)}")
+    return ("baseline", *(variant for variant in selected if variant != "baseline"), "baseline")
+
+
 def install_variant(model: GDNModel, variant: str) -> None:
     """Change computation on this experimental model without changing its parameter schema."""
     if variant not in VARIANTS:
@@ -83,6 +99,8 @@ def install_variant(model: GDNModel, variant: str) -> None:
         model.embed.forward = MethodType(typed_features_embedding, model.embed)
     if variant in {"all_types", "all_types_group2"}:
         model.embed.forward = MethodType(all_types_embedding, model.embed)
+    if variant == "weight_lookup":
+        model.embed.forward = MethodType(weight_lookup_embedding, model.embed)
     groups = {
         "typed_features_group2": 2,
         "typed_features_group4": 4,
@@ -205,14 +223,29 @@ def errors(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
 def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
     checkpoint = checkpoint_from(cfg)
     state = initial_state(cfg, checkpoint)
-    cpu_batches, digest = fixed_batches(cfg, 1, checkpoint["step"] if checkpoint else 0)
-    batch = {key: value.to(device) for key, value in cpu_batches[0].items()}
-    real = cpu_batches[0]["token_type"] != TOKEN_PAD
+    cpu_batches, digest = fixed_batches(
+        cfg, int(cfg.performance.numerical_batches), checkpoint["step"] if checkpoint else 0
+    )
+    rows = []
+    for index, batch in enumerate(cpu_batches):
+        context = {"batch_index": index, "batch_shape": list(batch["tokens"].shape)}
+        rows.extend(
+            row | context for row in numerical_comparisons(cfg, device, state, checkpoint, batch)
+        )
+    write_result(
+        out_dir / "numerical.json",
+        provenance(cfg, device) | {"batch_sha256": digest, "comparisons": rows},
+    )
+
+
+def numerical_comparisons(cfg, device, state, checkpoint, cpu_batch):
+    batch = {key: value.to(device) for key, value in cpu_batch.items()}
+    real = cpu_batch["token_type"] != TOKEN_PAD
     rows = []
     for precision in ("fp32", "bf16"):
         cfg.training.precision = precision
         reference = None
-        for variant in (*VARIANTS, "baseline"):
+        for variant in comparison_variants(cfg):
             model, optimizer, scheduler = make_training_state(
                 cfg, device, state, checkpoint, variant
             )
@@ -300,10 +333,7 @@ def numerical(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
             gc.collect()
             if device.type == "cuda":
                 torch.cuda.empty_cache()
-    write_result(
-        out_dir / "numerical.json",
-        provenance(cfg, device) | {"batch_sha256": digest, "comparisons": rows},
-    )
+    return rows
 
 
 def precision_probe(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
@@ -369,7 +399,7 @@ def benchmark(cfg: DictConfig, out_dir: Path, device: torch.device) -> None:
     )
     batches = [{key: value.to(device) for key, value in batch.items()} for batch in cpu_batches]
     rows = []
-    for variant in (*VARIANTS, "baseline"):
+    for variant in comparison_variants(cfg):
         model, optimizer, scheduler = make_training_state(cfg, device, state, checkpoint, variant)
 
         for batch in batches:
